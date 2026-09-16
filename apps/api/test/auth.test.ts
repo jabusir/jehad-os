@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
 import { setupAuth } from "../src/auth";
-import { sha256Hex, type SqlExecutor } from "@jehad-os/db";
+import { sha256Hex, type SqlExecutor } from "@jehad/db";
 
 const VALID_CREDENTIAL = randomBytes(32).toString("hex");
 const VALID_HASH = sha256Hex(VALID_CREDENTIAL);

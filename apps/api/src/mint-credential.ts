@@ -8,7 +8,7 @@ import {
   sha256Hex,
   upsertPrincipalCredential,
   type PrincipalType,
-} from "@jehad-os/db";
+} from "@jehad/db";
 
 const execFileAsync = promisify(execFile);
 

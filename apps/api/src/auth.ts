@@ -5,7 +5,7 @@ import {
   sha256Hex,
   type Principal,
   type SqlExecutor,
-} from "@jehad-os/db";
+} from "@jehad/db";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -15,6 +15,8 @@ declare module "fastify" {
 
 export interface AuthOptions {
   db: SqlExecutor;
+  /** Paths exempt from authentication (liveness only — never authority). */
+  publicPaths?: readonly string[];
 }
 
 export function extractBearerCredential(
@@ -41,8 +43,10 @@ function hashesMatch(a: string, b: string): boolean {
 }
 
 export function setupAuth(app: FastifyInstance, opts: AuthOptions): void {
+  const publicPaths = new Set(opts.publicPaths ?? []);
   app.decorateRequest("principal", null);
   app.addHook("onRequest", async (request, reply) => {
+    if (publicPaths.has(request.url.split("?")[0] ?? "")) return;
     const credential = extractBearerCredential(request.headers.authorization);
     if (credential === null) {
       return deny(reply);
