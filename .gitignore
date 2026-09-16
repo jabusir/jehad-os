@@ -1,0 +1,17 @@
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# dependencies / build
+node_modules/
+dist/
+*.tsbuildinfo
+
+# plan-review runtime state
+.review/
+
+# local runtimes
+*.sqlite
+*.log
+.DS_Store
