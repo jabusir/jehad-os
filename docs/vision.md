@@ -108,7 +108,8 @@ human-blocked-time metric. All are Phase 1 scope (plan §15).
   workflow state.
 - Employer data stays in a detachable work domain — and, per review §3, must
   be capable of **never entering personal storage at all**
-  (remote/federated/opaque domain modes, plan §10).
+  (remote/opaque domain modes — federated exports a sanitized subset by
+  policy; plan §10).
 - No dangerous permissions to make demos work.
 - Boring, durable, reversible infrastructure.
 - Attention is the scarce resource — batch escalations.
