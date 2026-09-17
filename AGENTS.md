@@ -35,9 +35,11 @@ The edge node lives in a separate repo (`/Users/Shared/tito`).
 | Command | Purpose |
 | --- | --- |
 | `pnpm build` | Build all packages |
-| `pnpm test` | Unit + integration tests |
-| `pnpm migrate` | Apply SQL migrations |
-| `pnpm dev` | Run API + worker locally |
+| `pnpm test` | Unit + integration tests (vitest, all workspaces) |
+| `pnpm lint` | ESLint (flat config) |
+| `pnpm dev` | Run API + worker locally (builds first) |
+| `pnpm setup:db` | Create local `jehad` Postgres database (brew postgresql@16) |
+| `pnpm migrate` | Apply SQL migrations (lands M1 with packages/db) |
 
 ## Commit style
 

@@ -15,3 +15,10 @@ dist/
 *.sqlite
 *.log
 .DS_Store
+
+# kernel-local data (plan §4.2 / M0): file-backend artifacts only —
+# Phase 1 default is postgres (plan §7)
+data/
+
+# orchestration worktrees
+wt/
