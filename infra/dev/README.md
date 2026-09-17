@@ -1,4 +1,4 @@
-# scripts/
+# infra/dev
 
 ## setup-db.sh
 
@@ -7,10 +7,23 @@ Assumes Homebrew `postgresql@16`:
 
     brew install postgresql@16
     brew services start postgresql@16
-    pnpm setup:db        # or: bash scripts/setup-db.sh
+    pnpm setup:db        # or: bash infra/dev/setup-db.sh
 
 Override the database name with `JEHAD_DB_NAME` if ever needed. No Docker
 (ADR-0001, AGENTS.md).
+
+## backup.sh / restore.sh
+
+M1 durability (plan §15 M1, T16). Artifacts live in Postgres (Option A), so a
+database dump IS the artifact backup:
+
+    pnpm backup                     # pg_dump -Fc → data/backups/<db>-<ts>.dump
+    bash infra/dev/restore.sh <dump> <target-db>    # refuses `jehad` without --force
+
+The practiced-restore regression (rows AND artifact content byte-for-byte) is
+`packages/db/tests/backup-restore.test.ts` — runs whenever TEST_DATABASE_URL
+is set. Retention pruning + nightly scheduling: pending; encryption-at-rest
+for dumps: noted for E2.
 
 ## pnpm-lock.yaml is generated on first install
 
