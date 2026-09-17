@@ -166,11 +166,12 @@ async function writeCommitment(
   }
 
   const inserted = await tx.query(
-    `INSERT INTO commitments (direction, counterparty_text, counterparty_entity_id, link_confidence,
+    `INSERT INTO commitments (domain_id, direction, counterparty_text, counterparty_entity_id, link_confidence,
                               description, due_at, confidence, status, source_event_id, may_follow_up)
-     VALUES ($1, $2, $3::uuid, $4, $5, $6::timestamptz, $7, 'open', $8::uuid, $9)
+     VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6, $7::timestamptz, $8, 'open', $9::uuid, $10)
      RETURNING id`,
     [
+      ctx.domainUuid,
       str(ctx.payload.direction) ?? "i_owe",
       counterparty,
       entityId,

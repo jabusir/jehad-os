@@ -57,21 +57,21 @@ describe.skipIf(!TEST_DATABASE_URL)("briefs (integration)", () => {
     // New open commitment (evening close: new commitments).
     const commitEvent = await insertEvent("capture.recorded", { text: "Confirm squash court" }, new Date(NOW.getTime() - 3 * HOUR));
     await db.pool.query(
-      `INSERT INTO commitments (direction, counterparty_text, description, due_at, confidence,
+      `INSERT INTO commitments (domain_id, direction, counterparty_text, description, due_at, confidence,
                                 status, source_event_id, created_at, updated_at)
-       VALUES ('i_owe', 'Gym', 'Book squash court', NULL, 0.9, 'open', $1::uuid,
-               $2::timestamptz, $2::timestamptz)`,
-      [commitEvent, new Date(NOW.getTime() - 3 * HOUR).toISOString()],
+       VALUES ($1::uuid, 'i_owe', 'Gym', 'Book squash court', NULL, 0.9, 'open', $2::uuid,
+               $3::timestamptz, $3::timestamptz)`,
+      [domainId, commitEvent, new Date(NOW.getTime() - 3 * HOUR).toISOString()],
     );
 
     // Completed commitment (evening close: completed).
     const metEvent = await insertEvent("capture.recorded", { text: "Bill paid" }, new Date(NOW.getTime() - 4 * HOUR));
     await db.pool.query(
-      `INSERT INTO commitments (direction, counterparty_text, description, due_at, confidence,
+      `INSERT INTO commitments (domain_id, direction, counterparty_text, description, due_at, confidence,
                                 status, source_event_id, created_at, updated_at)
-       VALUES ('i_owe', 'ISP', 'Pay internet bill', NULL, 0.9, 'met', $1::uuid,
-               $2::timestamptz, $2::timestamptz)`,
-      [metEvent, new Date(NOW.getTime() - 4 * HOUR).toISOString()],
+       VALUES ($1::uuid, 'i_owe', 'ISP', 'Pay internet bill', NULL, 0.9, 'met', $2::uuid,
+               $3::timestamptz, $3::timestamptz)`,
+      [domainId, metEvent, new Date(NOW.getTime() - 4 * HOUR).toISOString()],
     );
 
     // Open escalations (morning brief batch summary): one pending, one batched.

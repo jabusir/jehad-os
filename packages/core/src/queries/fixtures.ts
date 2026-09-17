@@ -135,13 +135,14 @@ export async function seedQueryFixtureWorld(
     });
     const at_ = at(args.ageDays);
     const inserted = await db.query(
-      `INSERT INTO commitments (direction, counterparty_text, counterparty_entity_id,
+      `INSERT INTO commitments (domain_id, direction, counterparty_text, counterparty_entity_id,
                                 description, due_at, confidence, status, source_event_id,
                                 created_at, updated_at)
-       VALUES ($1, $2, $3::uuid, $4, $5::timestamptz, 0.9, $6, $7::uuid,
-               $8::timestamptz, $8::timestamptz)
+       VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6::timestamptz, 0.9, $7, $8::uuid,
+               $9::timestamptz, $9::timestamptz)
        RETURNING id`,
       [
+        dom(domainKey),
         args.direction,
         args.counterparty,
         args.counterpartyEntityId ?? null,

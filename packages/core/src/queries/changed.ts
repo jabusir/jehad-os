@@ -89,8 +89,7 @@ const COMMITMENTS_SQL = `
   SELECT c.id, c.description, c.direction, c.status, c.due_at, c.updated_at,
          dom.key AS domain_key
   FROM commitments c
-  JOIN events src ON src.id = c.source_event_id
-  JOIN domains dom ON dom.id = src.domain_id
+  JOIN domains dom ON dom.id = c.domain_id
   WHERE c.updated_at > $1::timestamptz
     AND ($2::text IS NULL OR dom.key = $2)
   ORDER BY c.updated_at ASC, c.id ASC

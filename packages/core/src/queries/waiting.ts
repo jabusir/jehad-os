@@ -1,9 +1,9 @@
 // The two directional commitment queries (plan §13: the §40 item-5
 // "what am i waiting for / what waits on me" questions over structured state
 // only — never LLM). Read-only. Domain filter is by domain KEY ("personal",
-// "work", …) matching the envelope convention; commitments carry no domain_id
-// (schema v1), so their domain derives via source_event_id → events.domain_id
-// (flagged in 001_schema_core.sql for M6 review).
+// "work", …) matching the envelope convention; commitments.domain_id is the
+// direct column (004_commitments_domain; the 001 source-event-join derivation
+// it replaces was the M6A flag this column resolves).
 
 import { toIsoOrNull, type QueryExecutor } from "./executor.js";
 
@@ -41,8 +41,7 @@ const OPEN_BY_DIRECTION_SQL = `
   SELECT c.id, c.direction, c.counterparty_text, c.counterparty_entity_id,
          c.description, c.due_at, c.confidence, c.status, dom.key AS domain_key
   FROM commitments c
-  JOIN events src ON src.id = c.source_event_id
-  JOIN domains dom ON dom.id = src.domain_id
+  JOIN domains dom ON dom.id = c.domain_id
   WHERE c.status = 'open'
     AND c.direction = $1
     AND ($2::text IS NULL OR dom.key = $2)

@@ -151,6 +151,7 @@ describe.skipIf(!TEST_DATABASE_URL)("promotion pipeline (integration)", () => {
       await db.pool.query("SELECT * FROM commitments WHERE source_event_id = $1::uuid", [sourceEventId])
     ).rows[0];
     expect(commitment).toMatchObject({
+      domain_id: domainUuids.get("personal"),
       direction: "i_owe",
       counterparty_text: "acme corp",
       counterparty_entity_id: entityId,

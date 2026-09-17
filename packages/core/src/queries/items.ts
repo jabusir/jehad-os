@@ -23,12 +23,12 @@ export interface ItemInfo {
   readonly commitmentStatus: string | null;
 }
 
-// Per-type batch lookups. Commitments carry no domain_id (schema v1;
-// 001_schema_core.sql note) — their domain derives via source_event_id.
+// Per-type batch lookups. Commitment domain is the direct
+// commitments.domain_id column (004_commitments_domain).
 // `base` must alias the primary table as `t` and expose `dom.key AS domain`.
 const BATCH_SPECS: Record<string, { base: string; labelExpr: string }> = {
   commitment: {
-    base: "FROM commitments t JOIN events src ON src.id = t.source_event_id JOIN domains dom ON dom.id = src.domain_id",
+    base: "FROM commitments t JOIN domains dom ON dom.id = t.domain_id",
     labelExpr: "t.description",
   },
   decision: {
