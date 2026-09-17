@@ -16,6 +16,6 @@ export default defineConfig({
     ],
   },
   test: {
-    projects: ["apps/*", "packages/*"],
+    projects: ["apps/*", "packages/*", "evals"],
   },
 });
