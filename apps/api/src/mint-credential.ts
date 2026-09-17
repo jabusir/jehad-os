@@ -26,7 +26,7 @@ export function parseArgs(argv: readonly string[]): MintArgs | null {
   const args = argv.slice(2);
   if (args.length < 1 || args.length > 2) return null;
   const name = args[0];
-  if (name.length === 0 || name.trim() !== name) return null;
+  if (name === undefined || name.length === 0 || name.trim() !== name) return null;
   const type = args.length === 2 ? args[1] : "user";
   if (!isPrincipalType(type)) return null;
   return { name, type };

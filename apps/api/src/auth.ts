@@ -25,8 +25,10 @@ export function extractBearerCredential(
   if (typeof authorization !== "string") return null;
   const parts = authorization.trim().split(/\s+/);
   if (parts.length !== 2) return null;
-  if (parts[0].toLowerCase() !== "bearer") return null;
-  return parts[1];
+  const [scheme, credential] = parts;
+  if (scheme === undefined || credential === undefined) return null;
+  if (scheme.toLowerCase() !== "bearer") return null;
+  return credential;
 }
 
 function deny(reply: FastifyReply): FastifyReply {
@@ -44,7 +46,7 @@ function hashesMatch(a: string, b: string): boolean {
 
 export function setupAuth(app: FastifyInstance, opts: AuthOptions): void {
   const publicPaths = new Set(opts.publicPaths ?? []);
-  app.decorateRequest("principal", null);
+  app.decorateRequest("principal", undefined);
   app.addHook("onRequest", async (request, reply) => {
     if (publicPaths.has(request.url.split("?")[0] ?? "")) return;
     const credential = extractBearerCredential(request.headers.authorization);
