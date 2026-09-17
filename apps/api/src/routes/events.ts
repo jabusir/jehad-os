@@ -5,11 +5,9 @@
  *
  * AUTHORITY (plan A3, v1 single-user): only principal.type === "user" may
  * ingest or read events. harness/service/workflow principals get 403 +
- * audit_log — machine principals act through grant-bearing seams, never
- * through the raw event API.
- * TODO(E4/M5): grant-based ingest arrives with harness wiring — a machine
- * principal presenting a valid capability token will be authorized per
- * grant, replacing this type gate.
+ * audit_log — machine principals act through grant-bearing seams (E4:
+ * routes/harness.ts), never through the raw event API. The type gate is the
+ * shared guard (principal-guard.ts), same rule on every non-harness route.
  *
  * All envelope validation and the events/outbox write go through
  * @jehad/core's events module — the single envelope↔column mapping point
@@ -19,39 +17,19 @@
  * malformed envelope, 404/400 on reads.
  */
 
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import type { SqlExecutor } from "@jehad/db";
 import {
   acceptEvent,
   DomainNotFoundError,
   getEventById,
-  recordAudit,
   UUID_RE,
   validateEventIngest,
 } from "@jehad/core";
+import { forbidNonUser } from "./principal-guard.js";
 
 export interface EventRoutesOptions {
   db: SqlExecutor;
-}
-
-/** 403 + audit row for non-user principals (plan A3; machine principals). */
-async function forbidNonUser(
-  db: SqlExecutor,
-  request: FastifyRequest,
-): Promise<{ error: "forbidden" }> {
-  const principal = request.principal;
-  await recordAudit(db, {
-    actor: principal ? `${principal.type}:${principal.name}` : "unauthenticated",
-    action: "events.forbidden",
-    reversible: true,
-    outputsRef: JSON.stringify({
-      reason: "principal_type_forbidden",
-      principalType: principal?.type ?? null,
-      method: request.method,
-      url: request.url.split("?")[0] ?? request.url,
-    }),
-  });
-  return { error: "forbidden" };
 }
 
 export function registerEventRoutes(
@@ -60,7 +38,7 @@ export function registerEventRoutes(
 ): void {
   app.post("/events", async (request, reply) => {
     if (request.principal?.type !== "user") {
-      return await reply.code(403).send(await forbidNonUser(opts.db, request));
+      return await reply.code(403).send(await forbidNonUser(opts.db, request, "events"));
     }
     const validated = validateEventIngest(request.body);
     if (!validated.ok) {
@@ -88,7 +66,7 @@ export function registerEventRoutes(
 
   app.get("/events/:id", async (request, reply) => {
     if (request.principal?.type !== "user") {
-      return await reply.code(403).send(await forbidNonUser(opts.db, request));
+      return await reply.code(403).send(await forbidNonUser(opts.db, request, "events"));
     }
     const { id } = request.params as { id: string };
     if (!UUID_RE.test(id)) {

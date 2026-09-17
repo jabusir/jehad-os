@@ -11,3 +11,21 @@ autonomy_ceiling:
   write_canonical: gated
   external_side_effect: approval_required
   money_and_contracts: prohibited
+
+# notifications — E4 (OpenClaw attach) delivery policy. The notification queue
+# sits BEHIND review/policy: creation consults these keys, never model judgment.
+#   autoApproveKinds      — notification kinds that skip the user review queue
+#                           and land status=approved at creation (briefs are
+#                           self-authored structured output, not external
+#                           actions). Everything else — escalation, custom —
+#                           lands pending until POST /notifications/:id/approve.
+#   escalationMinUrgency  — an escalation raise enqueues a delivery
+#                           notification only at/above this urgency
+#                           (low < medium < high < critical < blocker).
+#   defaultTtlMinutes     — delivery window stamped on new notifications as
+#                           expires_at; past it a row is expired and can never
+#                           be claimed or delivered.
+notifications:
+  autoApproveKinds: ["brief"]
+  escalationMinUrgency: high
+  defaultTtlMinutes: 240

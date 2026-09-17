@@ -29,6 +29,81 @@ export type ActionType = (typeof ACTION_TYPES)[number];
 export interface PolicyV1 {
   version: 1;
   autonomy_ceiling: Readonly<Record<ActionType, AutonomyLevel>>;
+  /** E4 notification delivery policy; absent → code defaults apply. */
+  notifications?: NotificationsPolicyV1;
+}
+
+/**
+ * The `notifications:` section (E4 OpenClaw attach). Fail-closed like the
+ * ceiling: unknown keys or malformed values are parser errors, never silent
+ * permissiveness.
+ */
+export interface NotificationsPolicyV1 {
+  /** Notification kinds that land status=approved at creation. */
+  autoApproveKinds: readonly string[];
+  /** Escalation raises enqueue a notification only at/above this urgency. */
+  escalationMinUrgency: "low" | "medium" | "high" | "critical" | "blocker";
+  /** Delivery window (minutes) stamped on new notifications as expires_at. */
+  defaultTtlMinutes: number;
+}
+
+const URGENCY_VALUES = ["low", "medium", "high", "critical", "blocker"] as const;
+
+function parseFlowStringList(key: string, value: string): readonly string[] {
+  if (!value.startsWith("[") || !value.endsWith("]")) {
+    throw new Error(`policy: notifications.${key} must be a ["a", "b"] style list`);
+  }
+  const inner = value.slice(1, -1).trim();
+  if (inner === "") throw new Error(`policy: notifications.${key} must not be empty`);
+  const items: string[] = [];
+  for (const raw of inner.split(",")) {
+    const token = raw.trim();
+    if (!/^"[^"]*"$/.test(token) || token.slice(1, -1).length === 0) {
+      throw new Error(`policy: notifications.${key} entries must be non-empty double-quoted strings`);
+    }
+    items.push(token.slice(1, -1));
+  }
+  if (new Set(items).size !== items.length) {
+    throw new Error(`policy: notifications.${key} contains duplicates`);
+  }
+  return items;
+}
+
+function parseNotificationsSection(
+  entries: Array<{ key: string; value: string }>,
+): NotificationsPolicyV1 {
+  const section: Partial<NotificationsPolicyV1> = {};
+  for (const { key, value } of entries) {
+    if (key === "autoApproveKinds") {
+      if (section.autoApproveKinds !== undefined) {
+        throw new Error("policy: duplicate notifications.autoApproveKinds key");
+      }
+      section.autoApproveKinds = parseFlowStringList(key, value);
+    } else if (key === "escalationMinUrgency") {
+      if (section.escalationMinUrgency !== undefined) {
+        throw new Error("policy: duplicate notifications.escalationMinUrgency key");
+      }
+      if (!(URGENCY_VALUES as readonly string[]).includes(value)) {
+        throw new Error(`policy: invalid urgency '${value}' for notifications.escalationMinUrgency`);
+      }
+      section.escalationMinUrgency = value as NotificationsPolicyV1["escalationMinUrgency"];
+    } else if (key === "defaultTtlMinutes") {
+      if (section.defaultTtlMinutes !== undefined) {
+        throw new Error("policy: duplicate notifications.defaultTtlMinutes key");
+      }
+      if (!/^\d+$/.test(value) || Number(value) <= 0) {
+        throw new Error("policy: notifications.defaultTtlMinutes must be a positive integer");
+      }
+      section.defaultTtlMinutes = Number(value);
+    } else {
+      throw new Error(`policy: unknown notifications key '${key}'`);
+    }
+  }
+  return {
+    autoApproveKinds: section.autoApproveKinds ?? ["brief"],
+    escalationMinUrgency: section.escalationMinUrgency ?? "high",
+    defaultTtlMinutes: section.defaultTtlMinutes ?? 240,
+  };
 }
 
 export type AutonomyDecision =
@@ -69,8 +144,10 @@ function stripComment(line: string): string {
 export function parsePolicyV1(text: string): PolicyV1 {
   const ceiling: Partial<Record<ActionType, AutonomyLevel>> = {};
   let version: number | undefined;
-  let inCeiling = false;
+  let section: "autonomy_ceiling" | "notifications" | null = null;
   let sawCeiling = false;
+  let sawNotifications = false;
+  const notificationEntries: Array<{ key: string; value: string }> = [];
 
   for (const rawLine of text.split("\n")) {
     const line = stripComment(rawLine);
@@ -82,7 +159,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
     const key = rawKey?.trim() ?? "";
 
     if (!indented) {
-      inCeiling = false;
+      section = null;
       if (key === "version") {
         if (version !== undefined) throw new Error("policy: duplicate version key");
         if (value !== "1") throw new Error(`policy: unsupported version ${String(value)}`);
@@ -91,14 +168,25 @@ export function parsePolicyV1(text: string): PolicyV1 {
         if (value !== "") throw new Error("policy: autonomy_ceiling must be a mapping");
         if (sawCeiling) throw new Error("policy: duplicate autonomy_ceiling key");
         sawCeiling = true;
-        inCeiling = true;
+        section = "autonomy_ceiling";
+      } else if (key === "notifications") {
+        if (value !== "") throw new Error("policy: notifications must be a mapping");
+        if (sawNotifications) throw new Error("policy: duplicate notifications key");
+        sawNotifications = true;
+        section = "notifications";
       } else {
         throw new Error(`policy: unknown top-level key '${key}'`);
       }
       continue;
     }
 
-    if (!inCeiling) throw new Error(`policy: unexpected indented line '${line.trim()}'`);
+    if (section === null) {
+      throw new Error(`policy: unexpected indented line '${line.trim()}'`);
+    }
+    if (section === "notifications") {
+      notificationEntries.push({ key, value });
+      continue;
+    }
     if (!isActionType(key)) throw new Error(`policy: unknown action type '${key}'`);
     if (ceiling[key] !== undefined) throw new Error(`policy: duplicate action type '${key}'`);
     if (!isAutonomyLevel(value)) {
@@ -114,7 +202,11 @@ export function parsePolicyV1(text: string): PolicyV1 {
       throw new Error(`policy: autonomy_ceiling is missing '${actionType}'`);
     }
   }
-  return { version: 1, autonomy_ceiling: ceiling as Record<ActionType, AutonomyLevel> };
+  const policy: PolicyV1 = { version: 1, autonomy_ceiling: ceiling as Record<ActionType, AutonomyLevel> };
+  if (notificationEntries.length > 0) {
+    policy.notifications = parseNotificationsSection(notificationEntries);
+  }
+  return policy;
 }
 
 /** Loads and parses a policy.yaml file from disk. Fails closed on any error. */

@@ -3,6 +3,8 @@ import Fastify from "fastify";
 import { setupAuth } from "./auth.js";
 import { registerEventRoutes } from "./routes/events.js";
 import { registerReviewRoutes } from "./routes/review.js";
+import { registerHarnessRoutes } from "./routes/harness.js";
+import { registerNotificationRoutes } from "./routes/notifications.js";
 import type { PromotionDb } from "@jehad/core";
 
 const HOST = "127.0.0.1";
@@ -26,6 +28,8 @@ export async function buildApp(opts: AppOptions = {}) {
     setupAuth(app, { db: opts.db, publicPaths: ["/healthz"] });
     registerEventRoutes(app, { db: opts.db });
     registerReviewRoutes(app, { db: opts.db });
+    registerHarnessRoutes(app, { db: opts.db });
+    registerNotificationRoutes(app, { db: opts.db });
   }
 
   app.get("/healthz", async () => ({ ok: true }) as const);
