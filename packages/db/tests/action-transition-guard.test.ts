@@ -108,6 +108,7 @@ describe.skipIf(!TEST_DATABASE_URL)("002 action_attempts outcome guard (integrat
 
     const rolled = await migrateDown(db.pool, { to: "001_schema_core" });
     expect(rolled).toEqual([
+      "006_notifications",
       "005_commitments_temporal",
       "004_commitments_domain",
       "003_evidence_links",

@@ -12,5 +12,6 @@ export * from "./escalations/index.js";
 export * from "./metrics/index.js";
 export * from "./queries/index.js";
 export * from "./briefs/index.js";
+export * from "./notifications/index.js";
 export * from "./trust/index.js";
 export * from "./memory/candidate-contract.js";

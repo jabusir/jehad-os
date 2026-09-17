@@ -13,6 +13,8 @@
 
 import { UUID_RE } from "../events/envelope.js";
 import { acceptEvent } from "../events/store.js";
+import { enqueueEscalationNotification } from "../notifications/service.js";
+import type { NotificationsConfig } from "../notifications/config.js";
 
 /** The six escalation causes (plan §28; schema CHECK constraint). */
 export const ESCALATION_REASONS = [
@@ -203,12 +205,14 @@ const RAISE_SQL = `
 /**
  * Raises one escalation: row (status pending) + open human_waits interval +
  * escalation.raised event, atomically. The event carries the full raise
- * context as provenance (source "internal", run_id linked).
+ * context as provenance (source "internal", run_id linked). Raises at/above
+ * the configured notification urgency (default high) also enqueue a pending
+ * escalation notification for harness delivery review (E4).
  */
 export async function raiseEscalation(
   db: EscalationDb,
   input: RaiseEscalationInput,
-  opts: { now?: () => Date } = {},
+  opts: { now?: () => Date; notifications?: NotificationsConfig | false } = {},
 ): Promise<RaisedEscalation> {
   if (!isEscalationReason(input.reason)) {
     throw new InvalidEscalationReasonError(input.reason);
@@ -218,7 +222,8 @@ export async function raiseEscalation(
 
   return withTransaction(db, async (tx) => {
     const run = await tx.query(
-      `SELECT d.key AS domain_key FROM runs r JOIN domains d ON d.id = r.domain_id
+      `SELECT d.key AS domain_key, d.id AS domain_id, r.principal_id
+       FROM runs r JOIN domains d ON d.id = r.domain_id
        WHERE r.id = $1::uuid`,
       [input.runId],
     );
@@ -267,6 +272,21 @@ export async function raiseEscalation(
       },
       runId: escalation.runId,
     });
+
+    if (opts.notifications !== false) {
+      await enqueueEscalationNotification(tx, {
+        escalationId: escalation.id,
+        runId: escalation.runId,
+        reason: escalation.reason,
+        urgency: escalation.urgency,
+        consequenceOfWaiting: escalation.consequenceOfWaiting,
+        estHumanMinutes: escalation.estHumanMinutes,
+        domainId: String(runRow.domain_id),
+        createdBy: String(runRow.principal_id),
+        config: opts.notifications ?? undefined,
+        now,
+      });
+    }
 
     return { escalation, eventId: accepted.envelope.id, humanWaitId };
   });
