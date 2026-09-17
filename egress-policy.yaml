@@ -1,0 +1,54 @@
+# egress-policy.yaml — model/data egress policy v1 (ADR-0012; plan §9;
+# docs/policy-model.md §6). The question this file answers: may THIS data
+# (domain × sensitivity) leave for THIS provider/model?
+#
+# Policy is data: tightening for a future employer is an edit here, not a
+# code change. Deny by default everywhere — an unmatched
+# (domainId, sensitivity, provider) request is DENIED by the registry even
+# without a rule; a rule can only widen, never weaken, the invariants:
+#   - `secret` sensitivity is never in model context (T4) — enforced in code;
+#   - denials raise + audit BEFORE any provider dispatch (T12).
+#
+# Matching: most-specific rule wins (exact domainId + exact sensitivity >
+# exact domain + `*` > `*` + exact sensitivity > `*` + `*`).
+# Sensitivity vocabulary: normal | sensitive | secret (source-adapter.ts).
+
+version: 1
+
+rules:
+  # secret → never in model context, any domain, any provider (plan §9; T4).
+  - id: secret-never
+    domainId: "*"
+    sensitivity: secret
+    allowedProviders: []
+    allowRemote: false
+    requireRedaction: true
+
+  # personal.normal → openrouter allowed (plan §9 starter posture).
+  - id: personal-normal
+    domainId: personal
+    sensitivity: normal
+    allowedProviders: [openrouter]
+    allowRemote: false
+    requireRedaction: false
+
+  # finance.sensitive → selected providers only (plan §9). v1 ships an EMPTY
+  # allowlist: no finance-approved provider exists yet, so everything is
+  # denied until one is added here.
+  - id: finance-sensitive
+    domainId: finance
+    sensitivity: sensitive
+    allowedProviders: []
+    allowRemote: false
+    requireRedaction: true
+
+  # work.remote-employer → personal model providers forbidden (plan §9; T15).
+  # v1 ships an EMPTY allowlist: no employer-approved provider is registered
+  # yet; remote execution (allowRemote) is the only sanctioned path, and none
+  # exists in v1.
+  - id: work-remote-employer
+    domainId: work
+    sensitivity: sensitive
+    allowedProviders: []
+    allowRemote: true
+    requireRedaction: true
