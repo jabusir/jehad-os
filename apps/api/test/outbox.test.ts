@@ -96,7 +96,7 @@ describe.skipIf(!TEST_DATABASE_URL)("outbox dispatcher (integration)", () => {
   it("drains nothing once everything is dispatched", async () => {
     const { handler } = idempotentHandler();
     const result = await drainOutbox(db.pool, handler);
-    expect(result).toEqual({ claimed: 0, dispatched: 0, failed: 0 });
+    expect(result).toEqual({ requeued: 0, claimed: 0, dispatched: 0, failed: 0 });
   });
 
   it("replay: re-dispatching is safe — handler re-runs, semantic effects stay single", async () => {
@@ -113,7 +113,7 @@ describe.skipIf(!TEST_DATABASE_URL)("outbox dispatcher (integration)", () => {
     // or at-least-once overlap) and is dispatched AGAIN.
     await resetToPending(event.id);
     const second = await drainOutbox(db.pool, handler);
-    expect(second).toEqual({ claimed: 1, dispatched: 1, failed: 0 });
+    expect(second).toEqual({ requeued: 0, claimed: 1, dispatched: 1, failed: 0 });
 
     expect(calls).toEqual([event.id, event.id]); // delivered twice…
     expect(effects).toEqual([event.id]); // …but exactly one semantic effect
@@ -135,7 +135,7 @@ describe.skipIf(!TEST_DATABASE_URL)("outbox dispatcher (integration)", () => {
     };
 
     const failed = await drainOutbox(db.pool, flakyHandler);
-    expect(failed).toEqual({ claimed: 1, dispatched: 0, failed: 1 });
+    expect(failed).toEqual({ requeued: 0, claimed: 1, dispatched: 0, failed: 1 });
     const state = await outboxState(event.id);
     expect(state.status).toBe("failed");
     expect(state.last_error).toBe("downstream unavailable");
@@ -143,7 +143,7 @@ describe.skipIf(!TEST_DATABASE_URL)("outbox dispatcher (integration)", () => {
 
     await resetToPending(event.id);
     const retried = await drainOutbox(db.pool, flakyHandler);
-    expect(retried).toEqual({ claimed: 1, dispatched: 1, failed: 0 });
+    expect(retried).toEqual({ requeued: 0, claimed: 1, dispatched: 1, failed: 0 });
     const afterRetry = await outboxState(event.id);
     expect(afterRetry.status).toBe("dispatched");
     expect(afterRetry.last_error).toBeNull(); // R6: success clears the stale error
