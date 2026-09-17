@@ -19,7 +19,7 @@ const TABLES_001 = [
 
 const ALL_MIGRATIONS = [
   "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
-  "004_commitments_domain",
+  "004_commitments_domain", "005_commitments_temporal",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -66,6 +66,14 @@ describe("migration files (fs only)", () => {
     expect(domain!.sql).toMatch(/CREATE INDEX commitments_domain_status_idx ON commitments \(domain_id, status\)/);
     expect(domain!.downSql).toMatch(/DROP INDEX IF EXISTS commitments_domain_status_idx/);
     expect(domain!.downSql).toMatch(/ALTER TABLE commitments DROP COLUMN IF EXISTS domain_id/);
+  });
+
+  it("005 adds nullable commitments.temporal jsonb; down drops it", async () => {
+    const migrations = await listMigrations();
+    const temporal = migrations.find((m) => m.name === "005_commitments_temporal");
+    expect(temporal).toBeDefined();
+    expect(temporal!.sql).toMatch(/ALTER TABLE commitments ADD COLUMN temporal jsonb NULL/);
+    expect(temporal!.downSql).toMatch(/ALTER TABLE commitments DROP COLUMN IF EXISTS temporal/);
   });
 
   it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {

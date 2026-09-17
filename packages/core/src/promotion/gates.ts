@@ -14,6 +14,7 @@ import type { EgressDecision, Sensitivity, StorageMode } from "../egress/policy.
 import { SENSITIVITY_V1, UUID_RE } from "../events/envelope.js";
 import type {
   AssertionKind,
+  CommitmentState,
   ProposedClass,
 } from "../memory/candidate-contract.js";
 import type { PromotionGateConfig } from "./config.js";
@@ -76,7 +77,10 @@ export type PromotionReviewReason =
   | "low_confidence"
   | "material_conflict"
   | "semantic_requires_review"
-  | "invalid_write_payload";
+  | "invalid_write_payload"
+  /** Owner temporal directive 2026-09-17: non-standing commitment states
+   *  (historical/prospective/hypothetical) route to review — never an open row. */
+  | `commitment_state_${"prospective" | "historical" | "hypothetical"}`;
 
 export type PromotionAction = "promoted" | "rejected" | "in_review" | "gated";
 
@@ -129,6 +133,62 @@ export class InvalidWritePayloadError extends Error {
     super(message);
     this.name = "InvalidWritePayloadError";
   }
+}
+
+const COMMITMENT_STATES: readonly CommitmentState[] = [
+  "prospective",
+  "active",
+  "completed",
+  "historical",
+  "renegotiated",
+  "cancelled",
+  "hypothetical",
+];
+
+/** States that are NOT a standing obligation — never an open commitments row. */
+const NON_STANDING_COMMITMENT_STATES = [
+  "prospective",
+  "historical",
+  "hypothetical",
+] as const;
+
+type NonStandingCommitmentState = (typeof NON_STANDING_COMMITMENT_STATES)[number];
+
+/**
+ * Owner temporal directive 2026-09-17. Missing/invalid state defaults to
+ * active: a commitment extracted without state information is a standing
+ * obligation (the v2 behavior, preserved for legacy candidates).
+ */
+export function commitmentStateFromPayload(
+  payload: Readonly<Record<string, unknown>>,
+): CommitmentState {
+  const raw = payload.commitmentState;
+  return typeof raw === "string" && (COMMITMENT_STATES as readonly string[]).includes(raw)
+    ? (raw as CommitmentState)
+    : "active";
+}
+
+/**
+ * Gate 5 → commitments.status mapping. active/renegotiated land open (the
+ * LATEST terms stand); completed lands met; cancelled lands void. The
+ * non-standing states never reach a writer (gate 5 routes them to review and
+ * the review-approved landing is event-log-only).
+ */
+export function commitmentStatusForState(
+  state: CommitmentState,
+): "open" | "met" | "void" {
+  switch (state) {
+    case "completed":
+      return "met";
+    case "cancelled":
+      return "void";
+    default:
+      return "open";
+  }
+}
+
+function commitmentStateReviewReason(state: NonStandingCommitmentState): PromotionReviewReason {
+  return `commitment_state_${state}`;
 }
 
 /** Gate 1: provenance attached (sourceEventId required; nulls allowed for human sources). */
@@ -304,6 +364,36 @@ export function evaluateGates(
   if (cls === "discard") {
     return rejected(5, "discard_class", "classifier discarded the candidate", base);
   }
+  if (cls === "commitment") {
+    // Owner temporal directive 2026-09-17: historical/prospective/hypothetical
+    // are NOT standing obligations — like non-canonical semantic they route to
+    // review (episodic/review landing), NEVER an open commitments row. On
+    // review approval the landing stays event-log-only; completed/cancelled
+    // may instead write directly with their terminal status (user_declared),
+    // and active/renegotiated land open with the latest terms.
+    const state = commitmentStateFromPayload(candidate.payload);
+    if ((NON_STANDING_COMMITMENT_STATES as readonly string[]).includes(state)) {
+      if (opts.overrideReview) {
+        return {
+          ...base,
+          action: "promoted",
+          gate: 5,
+          reason: null,
+          message: `review-approved ${state} commitment: event-log landing only — never an open commitments row`,
+          canonicalWrite: false,
+          note: `commitment_state_${state}`,
+        };
+      }
+      return review(
+        5,
+        commitmentStateReviewReason(state as NonStandingCommitmentState),
+        `commitment_state "${state}" is not a standing obligation (owner temporal directive 2026-09-17): episodic/review landing, never an open commitments row`,
+        base,
+      );
+    }
+    // active | renegotiated | completed | cancelled fall through to the
+    // semantic truth-semantics path; the writer maps state → commitments.status.
+  }
   if (g5.episodicClasses.includes(cls)) {
     return {
       ...base,
@@ -399,6 +489,14 @@ export function validateWritePayload(
       const direction = payload.direction ?? "i_owe";
       if (direction !== "i_owe" && direction !== "owes_me") {
         return { ok: false, message: `commitment payload.direction must be "i_owe" or "owes_me" (got ${JSON.stringify(direction)})` };
+      }
+      const state = payload.commitmentState;
+      if (
+        state !== undefined &&
+        state !== null &&
+        !(COMMITMENT_STATES as readonly string[]).includes(state as string)
+      ) {
+        return { ok: false, message: `commitment payload.commitmentState is not a known state (got ${JSON.stringify(state)})` };
       }
       // Canonical payload key is counterpartyText (matches the
       // commitments.counterparty_text column, review §9); `counterparty` is

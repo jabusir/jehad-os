@@ -55,6 +55,7 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
     //    roll back exactly 004 — its down path drops the column.
     await migrateUp(pool, defaultMigrationsDir());
     expect(await migrateDown(pool, { to: "003_evidence_links" }, defaultMigrationsDir())).toEqual([
+      "005_commitments_temporal",
       "004_commitments_domain",
     ]);
     const columns = await pool.query<{ column_name: string }>(
@@ -68,8 +69,11 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
     const personalId = await insertLegacyCommitment("personal", "Pay October rent");
     const workId = await insertLegacyCommitment("work", "Ship the quarterly review deck");
 
-    // 3. Re-up applies only 004, backfilling every row.
-    expect(await migrateUp(pool, defaultMigrationsDir())).toEqual(["004_commitments_domain"]);
+    // 3. Re-up applies 004 (+005), backfilling every row.
+    expect(await migrateUp(pool, defaultMigrationsDir())).toEqual([
+      "004_commitments_domain",
+      "005_commitments_temporal",
+    ]);
 
     const rows = (
       await pool.query<{ id: string; domain_id: string }>(
@@ -93,8 +97,9 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
     );
     expect(index.rows).toHaveLength(1);
 
-    // 5. A post-backfill down path still reverses 004 cleanly.
+    // 5. A post-backfill down path still reverses 004 cleanly (005 first).
     expect(await migrateDown(pool, { to: "003_evidence_links" }, defaultMigrationsDir())).toEqual([
+      "005_commitments_temporal",
       "004_commitments_domain",
     ]);
   });

@@ -8,7 +8,11 @@
  * compromised or hostile model response cannot survive into a candidate.
  */
 
+import type { CommitmentState } from "../memory/candidate-contract.js";
+
 export type ExtractionDirection = "owes_me" | "i_owe";
+
+export type TemporalType = "relative" | "absolute" | "vague";
 
 /** The allowlisted, validated extraction proposal. */
 export interface ExtractionProposal {
@@ -16,8 +20,10 @@ export interface ExtractionProposal {
   readonly isDecision: boolean;
   readonly direction: ExtractionDirection | null;
   readonly counterparty: string | null;
-  /** ISO date YYYY-MM-DD or null. */
-  readonly dueDate: string | null;
+  /** Verbatim temporal phrase from the text; resolution is NOT the model's job. */
+  readonly temporalExpression: string | null;
+  readonly temporalType: TemporalType | null;
+  readonly commitmentState: CommitmentState | null;
   /** Clamped to [0,1]. */
   readonly confidence: number;
   readonly description: string | null;
@@ -43,14 +49,15 @@ export interface ParsedExtraction {
   readonly droppedFields: readonly string[];
 }
 
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_TEXT_FIELD = 2000;
 const ALLOWED_FIELDS = [
   "is_commitment",
   "is_decision",
   "direction",
   "counterparty",
-  "due_date",
+  "temporal_expression",
+  "temporal_type",
+  "commitment_state",
   "confidence",
   "description",
   "question",
@@ -58,11 +65,16 @@ const ALLOWED_FIELDS = [
   "rationale",
 ] as const;
 
-function isIsoDate(value: string): boolean {
-  if (!DATE_RE.test(value)) return false;
-  const parsed = new Date(`${value}T00:00:00Z`);
-  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
-}
+const TEMPORAL_TYPES: readonly TemporalType[] = ["relative", "absolute", "vague"];
+const COMMITMENT_STATES: readonly CommitmentState[] = [
+  "prospective",
+  "active",
+  "completed",
+  "historical",
+  "renegotiated",
+  "cancelled",
+  "hypothetical",
+];
 
 function boolField(raw: Record<string, unknown>, key: string): boolean {
   const value = raw[key];
@@ -120,8 +132,18 @@ export function parseExtractionOutput(text: string): ParsedExtraction {
   const direction: ExtractionDirection | null =
     directionRaw === "owes_me" || directionRaw === "i_owe" ? directionRaw : null;
 
-  const dueRaw = optionalText(raw.due_date);
-  const dueDate = dueRaw !== null && isIsoDate(dueRaw) ? dueRaw : null;
+  const temporalTypeRaw = raw.temporal_type;
+  const temporalType: TemporalType | null =
+    typeof temporalTypeRaw === "string" && (TEMPORAL_TYPES as readonly string[]).includes(temporalTypeRaw)
+      ? (temporalTypeRaw as TemporalType)
+      : null;
+
+  const commitmentStateRaw = raw.commitment_state;
+  const commitmentState: CommitmentState | null =
+    typeof commitmentStateRaw === "string" &&
+    (COMMITMENT_STATES as readonly string[]).includes(commitmentStateRaw)
+      ? (commitmentStateRaw as CommitmentState)
+      : null;
 
   const confidenceRaw = raw.confidence;
   const confidence =
@@ -135,7 +157,9 @@ export function parseExtractionOutput(text: string): ParsedExtraction {
       isDecision: boolField(raw, "is_decision"),
       direction,
       counterparty: optionalText(raw.counterparty),
-      dueDate,
+      temporalExpression: optionalText(raw.temporal_expression),
+      temporalType,
+      commitmentState,
       confidence,
       description: textField(raw, "description"),
       question: textField(raw, "question"),

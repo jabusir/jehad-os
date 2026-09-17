@@ -107,7 +107,9 @@ describe("extractFromEvent (hermetic)", () => {
           is_commitment: true,
           direction: "i_owe",
           counterparty: "Jehad",
-          due_date: "2026-09-18",
+          temporal_expression: "Friday",
+          temporal_type: "relative",
+          commitment_state: "active",
           confidence: 0.93,
         },
       },
@@ -162,7 +164,9 @@ describe("extractFromEvent (hermetic)", () => {
           is_decision: false,
           direction: null,
           counterparty: null,
-          due_date: null,
+          temporal_expression: null,
+          temporal_type: null,
+          commitment_state: null,
           confidence: 0.3,
           rationale: "third-party promise: John reporting his own commitment, user is not a party",
         },
@@ -220,7 +224,7 @@ describe("extractFromEvent (hermetic)", () => {
     // No instruction-shaped fields exist anywhere in written payloads.
     for (const candidate of result.candidates) {
       expect(Object.keys(candidate.contract.payload).every((key) =>
-        ["kind", "direction", "counterpartyText", "description", "dueAt", "confidence", "question", "chosen", "rationale"].includes(key),
+        ["kind", "direction", "counterpartyText", "description", "temporal", "commitmentState", "confidence", "question", "chosen", "rationale"].includes(key),
       )).toBe(true);
     }
   });
@@ -234,7 +238,9 @@ describe("extractFromEvent (hermetic)", () => {
           is_decision: true,
           direction: "i_owe",
           counterparty: null,
-          due_date: null,
+          temporal_expression: "Friday",
+          temporal_type: "relative",
+          commitment_state: "active",
           confidence: 0.85,
           question: "Ship Friday?",
           chosen: "yes",
