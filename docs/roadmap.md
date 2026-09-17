@@ -55,6 +55,31 @@ interfaces.
 - After M6: **Phase 1 exit review** against the §40 subset in plan §13, then
   execute the standing gates E2, E3, and E4 before Phase 2.
 
+### Phase 2 execution order (owner directive, 2026-09-17)
+
+Kernel Phase 1 accepted 2026-09-17. The owner fixed the Phase-2 sequence:
+
+1. Selective kernel backlog (done): `commitments.domain_id` (migration 004),
+   model-budget reservation/advisory lock, outbox retry/backoff.
+   `grant.issued/revoked` events + `WorkflowStatus` refinement remain
+   non-blocking backlog.
+2. Real model tier: add `OPENROUTER_API_KEY`, run `pnpm eval:live` +
+   `pnpm eval:compare`. **No Calendar wiring until the live model preserves
+   ≥0.9 action-precision.**
+3. **E4 first**: OpenClaw attaches read/query + approved notification
+   delivery only — no generic actions (narrow grant scope stands).
+4. **E3**: Google Calendar is the first real sensor — structured, low-noise;
+   exercises observation, delta detection, world-state updates, briefs, and
+   Watch against real life.
+5. **Calendar soak**: run Calendar ALONE long enough to evaluate usefulness
+   (useful observations vs noise, mispromotions, morning-brief feel, review
+   queue load). Do not connect Gmail just because Calendar worked.
+6. **Then Gmail** — the first serious untrusted-input test (noise,
+   commitments, receipts, injection, relationship context).
+7. **E2 cloud hosting** around the Calendar→Gmail transition: decide hosting
+   (incl. Inngest managed-vs-self-hosted) before Gmail becomes operationally
+   important, so continuous ingestion doesn't depend on the laptop.
+
 ## 4. Phase ladder (plan §15)
 
 ```text
