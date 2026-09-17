@@ -448,7 +448,7 @@ export class ActionService {
   async recordOutcome(input: RecordOutcomeInput): Promise<ActionAttemptRecord> {
     // T13 honesty rule: a `succeeded` outcome certifies an observed effect —
     // it must point at the provider's own reference for that effect.
-    if (input.outcome === "succeeded" && (typeof input.providerRef !== "string" || input.providerRef.length === 0)) {
+    if (input.outcome === "succeeded" && (typeof input.providerRef !== "string" || input.providerRef.trim().length === 0)) {
       throw new MissingProviderRefError(input.attemptId, "recordOutcome(outcome='succeeded')");
     }
     const result = await this.db.query(
