@@ -15,6 +15,8 @@ import { buildApp } from "../src/index";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const CREDENTIAL = randomBytes(32).toString("hex");
+const HARNESS_CREDENTIAL = randomBytes(32).toString("hex");
+const SERVICE_CREDENTIAL = randomBytes(32).toString("hex");
 
 describe.skipIf(!TEST_DATABASE_URL)("events routes (integration)", () => {
   let db: IsolatedDb;
@@ -28,6 +30,16 @@ describe.skipIf(!TEST_DATABASE_URL)("events routes (integration)", () => {
       type: "user",
       name: "josctl",
       credentialHash: sha256Hex(CREDENTIAL),
+    });
+    await upsertPrincipalCredential(db.pool, {
+      type: "harness",
+      name: "openclaw",
+      credentialHash: sha256Hex(HARNESS_CREDENTIAL),
+    });
+    await upsertPrincipalCredential(db.pool, {
+      type: "service",
+      name: "worker-bot",
+      credentialHash: sha256Hex(SERVICE_CREDENTIAL),
     });
     app = await buildApp({ db: db.pool });
   });
@@ -51,10 +63,16 @@ describe.skipIf(!TEST_DATABASE_URL)("events routes (integration)", () => {
     };
   }
 
-  function post(body: unknown, authorize = true) {
+  function post(body: unknown, authorize = true, credential: string = CREDENTIAL) {
     const headers: Record<string, string> = { "content-type": "application/json" };
-    if (authorize) headers.authorization = `Bearer ${CREDENTIAL}`;
+    if (authorize) headers.authorization = `Bearer ${credential}`;
     return app.inject({ method: "POST", url: "/events", headers, payload: JSON.stringify(body) });
+  }
+
+  function nestedPayload(depth: number): Record<string, unknown> {
+    let value: Record<string, unknown> = { text: "leaf" };
+    for (let i = 1; i < depth; i += 1) value = { a: value };
+    return value;
   }
 
   async function countRows(table: "events" | "outbox"): Promise<number> {
@@ -160,6 +178,8 @@ describe.skipIf(!TEST_DATABASE_URL)("events routes (integration)", () => {
     ["unknown domain key", { domainId: "nopetopia" }, "DOMAIN_NOT_FOUND"],
     ["unknown sensitivity", { sensitivity: "top-secret" }, "SENSITIVITY_INVALID"],
     ["array payload", { payload: ["nope"] }, "PAYLOAD_INVALID"],
+    ["payload nested deeper than 64 (R7)", { payload: nestedPayload(65) }, "PAYLOAD_INVALID"],
+    ["payload over 256KB (R7)", { payload: { text: "x".repeat(256 * 1024 + 1) } }, "PAYLOAD_INVALID"],
     ["non-uuid runId", { runId: "not-a-uuid" }, "RUN_ID_INVALID"],
     ["empty externalId", { externalId: "" }, "EXTERNAL_ID_INVALID"],
   ];
@@ -186,6 +206,51 @@ describe.skipIf(!TEST_DATABASE_URL)("events routes (integration)", () => {
     expect(res.statusCode).toBe(401);
     expect(res.json()).toEqual({ error: "unauthenticated" });
     expect(await countRows("events")).toBe(await countRows("events")); // unchanged
+  });
+
+  it("R3 regression: only principal.type=user may POST/GET events; machine principals get 403 + audit", async () => {
+    // Before R3 the route never looked at request.principal — a harness or
+    // service credential could ingest and read any domain's events.
+    const before = await countRows("events");
+
+    const harnessPost = await post(validBody(), true, HARNESS_CREDENTIAL);
+    expect(harnessPost.statusCode).toBe(403);
+    expect(harnessPost.json()).toEqual({ error: "forbidden" });
+    expect(await countRows("events")).toBe(before); // nothing ingested
+
+    const servicePost = await post(validBody(), true, SERVICE_CREDENTIAL);
+    expect(servicePost.statusCode).toBe(403);
+    expect(servicePost.json()).toEqual({ error: "forbidden" });
+
+    const userEvent = (await post(validBody())).json().event;
+    const harnessGet = await app.inject({
+      method: "GET",
+      url: `/events/${userEvent.id}`,
+      headers: { authorization: `Bearer ${HARNESS_CREDENTIAL}` },
+    });
+    expect(harnessGet.statusCode).toBe(403);
+    expect(harnessGet.json()).toEqual({ error: "forbidden" });
+
+    const denials = await db.pool.query(
+      "SELECT actor, action, outputs_ref FROM audit_log WHERE action = 'events.forbidden' ORDER BY created_at, id",
+    );
+    expect(denials.rows).toHaveLength(3);
+    expect(denials.rows.map((r) => r.actor)).toEqual([
+      "harness:openclaw",
+      "service:worker-bot",
+      "harness:openclaw",
+    ]);
+    for (const row of denials.rows) {
+      expect(String(row.outputs_ref)).toContain("principal_type_forbidden");
+    }
+
+    // The user principal still can (regression guard against over-blocking).
+    const userGet = await app.inject({
+      method: "GET",
+      url: `/events/${userEvent.id}`,
+      headers: { authorization: `Bearer ${CREDENTIAL}` },
+    });
+    expect(userGet.statusCode).toBe(200);
   });
 
   it("reads an accepted event back via GET /events/:id as the camelCase envelope", async () => {

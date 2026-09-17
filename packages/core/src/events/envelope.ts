@@ -9,8 +9,11 @@
  * Ingest minting (plan §15 M2): the caller supplies the occurrence fields
  * (type, source, externalId, occurredAt, domainId, sensitivity, payload);
  * this module's store mints `id` (uuid v7), `idempotencyKey`
- * (sha256(source + externalId)), `recordedAt`, and defaults `runId` to null —
- * "those are ingest-API responsibilities" (ports/source-adapter.ts).
+ * (sha256(source + "\u0000" + externalId) — the NUL separator makes the
+ * source/externalId split unambiguous, so cross-source concatenation can
+ * never collide: (adapter:a, "bc") ≠ (adapter:ab, "c")), `recordedAt`, and
+ * defaults `runId` to null — "those are ingest-API responsibilities"
+ * (ports/source-adapter.ts).
  */
 
 import { createHash, randomBytes } from "node:crypto";
@@ -109,6 +112,38 @@ function isIsoDatetime(value: string): boolean {
   return Number.isFinite(parsed);
 }
 
+/** Max JSON nesting depth accepted in an ingest payload (R7 guard). */
+export const MAX_PAYLOAD_DEPTH = 64;
+
+/** Max serialized payload size in bytes (R7 guard). */
+export const MAX_PAYLOAD_JSON_BYTES = 256 * 1024;
+
+/**
+ * True when `value` nests containers deeper than `limit` levels (the
+ * top-level object is depth 1; primitives consume no depth). Recursion is
+ * bounded by `limit + 1` frames, so adversarially deep input is rejected,
+ * never stack-crashed.
+ */
+function exceedsDepth(value: unknown, limit: number): boolean {
+  function walk(node: unknown, depth: number): boolean {
+    if (Array.isArray(node)) {
+      if (depth > limit) return true;
+      return node.some((child) => walk(child, depth + 1));
+    }
+    if (isPlainObject(node)) {
+      if (depth > limit) return true;
+      return Object.values(node).some((child) => walk(child, depth + 1));
+    }
+    return false;
+  }
+  return walk(value, 1);
+}
+
+/** Serialized byte size of the payload as it will be stored (jsonb). */
+function payloadJsonBytes(payload: Record<string, unknown>): number {
+  return Buffer.byteLength(JSON.stringify(payload), "utf8");
+}
+
 /**
  * Validates an ingest body. Deterministic: checks fields in a fixed order and
  * reports the first failure as a stable (code, message) pair — the API maps
@@ -178,6 +213,18 @@ export function validateEventIngest(input: unknown): EventValidationResult {
     return err("PAYLOAD_INVALID", "payload must be a JSON object");
   }
   const payload: Record<string, unknown> = input.payload;
+  if (exceedsDepth(payload, MAX_PAYLOAD_DEPTH)) {
+    return err(
+      "PAYLOAD_INVALID",
+      `payload must not nest deeper than ${MAX_PAYLOAD_DEPTH} levels`,
+    );
+  }
+  if (payloadJsonBytes(payload) > MAX_PAYLOAD_JSON_BYTES) {
+    return err(
+      "PAYLOAD_INVALID",
+      `payload must serialize to at most ${MAX_PAYLOAD_JSON_BYTES} bytes`,
+    );
+  }
   const rawRunId: unknown = input.runId;
   let runId: string | null = null;
   if (rawRunId !== undefined && rawRunId !== null) {
@@ -203,12 +250,18 @@ export function validateEventIngest(input: unknown): EventValidationResult {
 }
 
 /**
- * Idempotency key: sha256(source + external id) — plan §8. Every source
+ * Idempotency key: sha256(source + "\u0000" + external id) — plan §8. The NUL
+ * separator cannot appear in either string (source is matched by SOURCE_RE,
+ * externalId is validated non-empty UTF-8 text), so the (source, externalId)
+ * pair maps injectively onto the hashed bytes — no cross-source collisions
+ * ((adapter:a, "bc") vs (adapter:ab, "c") hash differently). Every source
  * defines its external id; adapter retries reuse it (redelivery dedupes),
  * distinct real-world occurrences mint a new one.
  */
 export function idempotencyKeyFor(source: string, externalId: string): string {
-  return createHash("sha256").update(`${source}${externalId}`, "utf8").digest("hex");
+  return createHash("sha256")
+    .update(`${source}\u0000${externalId}`, "utf8")
+    .digest("hex");
 }
 
 /** Mints the envelope id: UUID v7 (time-ordered; PG16 has no uuidv7()). */

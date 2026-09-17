@@ -5,8 +5,8 @@
  * (the port interface lives in packages/adapters with the other ports),
  * plan §15 M3 (Inngest implementation in packages/workflow/inngest, gated
  * on the M3 spike). Defining ADR: ADR-0008 (Inngest as the initial durable
- * workflow runtime behind this boundary — status: accepted, pending M3
- * spike confirmation).
+ * workflow runtime behind this boundary — status: accepted, spike confirmed
+ * 2026-09-17).
  *
  * Authority split (plan §12; ADR-0008): Jehad OS PostgreSQL remains
  * authoritative for world state, events, and the `runs` record — the

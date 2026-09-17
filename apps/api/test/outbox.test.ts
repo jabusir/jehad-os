@@ -144,8 +144,29 @@ describe.skipIf(!TEST_DATABASE_URL)("outbox dispatcher (integration)", () => {
     await resetToPending(event.id);
     const retried = await drainOutbox(db.pool, flakyHandler);
     expect(retried).toEqual({ claimed: 1, dispatched: 1, failed: 0 });
-    expect((await outboxState(event.id)).status).toBe("dispatched");
+    const afterRetry = await outboxState(event.id);
+    expect(afterRetry.status).toBe("dispatched");
+    expect(afterRetry.last_error).toBeNull(); // R6: success clears the stale error
     expect(effects).toEqual([event.id]);
+  });
+
+  it("R6 regression: last_error is control-stripped and capped at 500 chars", async () => {
+    const event = await acceptCapture("sanitize me");
+    const hostile = async (): Promise<void> => {
+      throw new Error(
+        `payload=SECRET\u0000\u0007\r\n inject ${"x".repeat(600)}`,
+      );
+    };
+    const result = await drainOutbox(db.pool, hostile);
+    expect(result.failed).toBe(1);
+
+    const state = await outboxState(event.id);
+    expect(state.last_error).not.toBeNull();
+    expect(state.last_error!.length).toBe(500);
+    // Control chars (NUL, BEL, CR, LF, tab…) must never reach the column.
+    expect(state.last_error).toMatch(/^[\u0020-\u007e]*$/);
+    // The cap keeps the leading diagnostic and drops the flood.
+    expect(state.last_error!.startsWith("payload=")).toBe(true);
   });
 
   it("respects the claim limit", async () => {

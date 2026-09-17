@@ -13,6 +13,7 @@
  */
 
 import type { ModelProvider, ModelRequest, ModelResult, Sensitivity } from "@jehad/adapters";
+import type { SqlExecutor } from "../policy/grants.js";
 
 export type { Sensitivity };
 
@@ -21,8 +22,10 @@ export type StorageMode = "local" | "remote" | "federated" | "opaque";
 
 /**
  * What is being asked: may data with this domainId/sensitivity go to this
- * provider/model? `storageMode` (when known) lets the check honor `allowRemote`
- * — remote-domain content never transits personal providers (T15).
+ * provider/model? `storageMode` lets the check honor `allowRemote` —
+ * remote-domain content never transits personal providers (T15). The gated
+ * provider (`egressGatedModelProvider`) resolves it from the domains table
+ * on every request; callers cannot opt out of the check.
  */
 export interface EgressCheckContext {
   readonly domainId: string;
@@ -51,7 +54,8 @@ export type EgressDenialReason =
   | "provider_not_allowed"
   | "model_not_allowed"
   | "model_required_by_policy"
-  | "remote_content_forbidden";
+  | "remote_content_forbidden"
+  | "unknown_domain";
 
 export type EgressDecision =
   | { readonly allowed: true; readonly ruleId: string; readonly requireRedaction: boolean }
@@ -96,6 +100,7 @@ const DENIAL_MESSAGES: Record<EgressDenialReason, (ctx: EgressCheckContext) => s
   model_not_allowed: (ctx) => `model "${ctx.model}" is not allowed for domain=${ctx.domainId} sensitivity=${ctx.sensitivity}`,
   model_required_by_policy: (ctx) => `policy constrains models for domain=${ctx.domainId} sensitivity=${ctx.sensitivity} but the request names no model`,
   remote_content_forbidden: (ctx) => `remote-domain content (mode=${ctx.storageMode}) may not transit provider "${ctx.provider}" (allowRemote=false)`,
+  unknown_domain: (ctx) => `domain "${ctx.domainId}" is not registered; egress denied by default (fail closed)`,
 };
 
 function validateContext(ctx: EgressCheckContext): void {
@@ -199,21 +204,71 @@ export class ModelEgressPolicyRegistry {
 }
 
 /**
+ * Resolves the domain's storage_mode from the domains table — fail CLOSED:
+ * an unknown domain denies (it may not be a local-mode domain the policy
+ * was written for), and a garbage storage_mode value is a configuration
+ * error, never a silent pass.
+ */
+async function requireStorageMode(
+  db: SqlExecutor,
+  ctx: EgressCheckContext,
+): Promise<StorageMode> {
+  const result = await db.query(
+    "SELECT storage_mode FROM domains WHERE key = $1 LIMIT 1",
+    [ctx.domainId],
+  );
+  const row = result.rows[0];
+  if (row === undefined) {
+    throw new EgressDenialError({
+      code: "egress.denied",
+      reason: "unknown_domain",
+      request: { domainId: ctx.domainId, sensitivity: ctx.sensitivity, provider: ctx.provider, model: ctx.model },
+      message: DENIAL_MESSAGES.unknown_domain(ctx),
+    });
+  }
+  const mode = row.storage_mode;
+  if (mode !== "local" && mode !== "remote" && mode !== "federated" && mode !== "opaque") {
+    throw new EgressPolicyError(
+      `domain "${ctx.domainId}" has invalid storage_mode ${JSON.stringify(mode)}`,
+    );
+  }
+  return mode;
+}
+
+/**
  * Wraps a ModelProvider so every request is egress-checked BEFORE dispatch
  * (ADR-0012 enforcement point; composes with — never replaces — the
  * `call_model:<provider>` capability grant, which is M4A's lane). On denial
  * the wrapped provider is never invoked.
+ *
+ * Fail-closed by construction (T15):
+ * - `storageMode` is resolved from the `domains` table via `db` on EVERY
+ *   request and passed into the check — callers cannot opt out of the
+ *   `allowRemote` evaluation, and an unknown domain denies.
+ * - The request must name the wrapped provider (`request.provider ===
+ *   provider.id`); a mismatch is a wiring error and throws.
  */
-export function egressGatedModelProvider(provider: ModelProvider, registry: ModelEgressPolicyRegistry): ModelProvider {
+export function egressGatedModelProvider(
+  provider: ModelProvider,
+  registry: ModelEgressPolicyRegistry,
+  db: SqlExecutor,
+): ModelProvider {
   return {
     id: provider.id,
     async complete(request: ModelRequest): Promise<ModelResult> {
-      registry.assertAllowed({
+      if (request.provider !== provider.id) {
+        throw new EgressPolicyError(
+          `egress-gated provider "${provider.id}" received a request naming provider "${request.provider}"`,
+        );
+      }
+      const ctx: EgressCheckContext = {
         domainId: request.domainId,
         sensitivity: request.sensitivity,
         provider: request.provider,
         model: request.model,
-      });
+      };
+      const storageMode = await requireStorageMode(db, ctx);
+      registry.assertAllowed({ ...ctx, storageMode });
       return provider.complete(request);
     },
   };
