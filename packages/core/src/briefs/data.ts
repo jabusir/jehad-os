@@ -24,6 +24,7 @@ import type { BlockedItem, StalledItem } from "../queries/blocked.js";
 import { whatIsBlocked } from "../queries/blocked.js";
 import type { LeverageDecision } from "../queries/leverage.js";
 import { highestLeverageDecision } from "../queries/leverage.js";
+import { getTodaySchedule, type TodayScheduleItem } from "../calendar/projection.js";
 
 /** Briefs are a personal-operations surface (plan §13); artifacts land here. */
 export const BRIEF_DOMAIN_KEY = "personal";
@@ -68,6 +69,8 @@ export interface MorningBriefData {
   readonly stalled: readonly StalledItem[];
   readonly unlock: LeverageDecision | null;
   readonly escalations: EscalationBatchSummary;
+  /** E3: today's calendar events from the calendar_events projection (calendar-native times). */
+  readonly todaySchedule: readonly TodayScheduleItem[];
 }
 
 export interface EveningCloseData {
@@ -142,12 +145,13 @@ export async function collectMorningBriefData(
   const { now, since } = resolveWindow(opts);
   const nowFn = (): Date => now;
 
-  const [changed, waitsOnMe, blockedResult, ranked, escalations] = await Promise.all([
+  const [changed, waitsOnMe, blockedResult, ranked, escalations, todaySchedule] = await Promise.all([
     whatChanged(db, { since, domainId: BRIEF_DOMAIN_KEY }),
     whatWaitsOnMe(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
     whatIsBlocked(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
     highestLeverageDecision(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
     escalationSummary(db, BRIEF_DOMAIN_KEY),
+    getTodaySchedule(db, { now }),
   ]);
 
   const overdue = waitsOnMe.filter((c) => c.overdue);
@@ -168,6 +172,7 @@ export async function collectMorningBriefData(
     stalled: blockedResult.stalled,
     unlock: pickUnlock(ranked),
     escalations,
+    todaySchedule,
   };
 }
 
@@ -205,8 +210,11 @@ export async function collectEveningCloseData(
 
 /**
  * Morning renders iff ANY signal exists: overnight delta, an i_owe item
- * overdue/due-soon, anything blocked/stalled, a real unlock, or open
- * escalations. Empty world → suppressed (no artifact).
+ * overdue/due-soon, anything blocked/stalled, a real unlock, open
+ * escalations, or anything on today's calendar. Owner call (E3): a schedule
+ * IS meaningful attention — a day with meetings is not a calm-empty day,
+ * so todaySchedule presence alone un-suppresses the brief (documented in
+ * infra/calendar/README.md). Empty world → suppressed (no artifact).
  */
 export function isMorningBriefMeaningful(data: MorningBriefData): boolean {
   return (
@@ -219,7 +227,8 @@ export function isMorningBriefMeaningful(data: MorningBriefData): boolean {
     data.blocked.length > 0 ||
     data.stalled.length > 0 ||
     data.unlock !== null ||
-    data.escalations.pending + data.escalations.batched > 0
+    data.escalations.pending + data.escalations.batched > 0 ||
+    data.todaySchedule.length > 0
   );
 }
 

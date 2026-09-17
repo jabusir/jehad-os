@@ -5,6 +5,7 @@
 
 import type { CommitmentListItem, WaitsOnMeItem } from "../queries/waiting.js";
 import type { BlockedItem, StalledItem } from "../queries/blocked.js";
+import type { TodayScheduleItem } from "../calendar/projection.js";
 import type { EveningCloseData, MorningBriefData } from "./data.js";
 
 function blank(): string {
@@ -75,6 +76,19 @@ function renderUnlockBrief(data: MorningBriefData): string[] {
   ];
 }
 
+function scheduleLine(item: TodayScheduleItem): string {
+  const title = item.summary.length > 0 ? item.summary : "(untitled)";
+  const endPart = item.endTime === null ? "" : ` → ${item.endTime}`;
+  const locationPart = item.location === null ? "" : ` (${item.location})`;
+  return `- ${title} — ${item.startTime}${endPart}${locationPart}`;
+}
+
+/** E3: today's calendar from the projection — deterministic, calendar-native times. */
+function renderTodaySchedule(schedule: readonly TodayScheduleItem[]): string[] {
+  if (schedule.length === 0) return ["TODAY'S SCHEDULE", "- nothing on the calendar"];
+  return ["TODAY'S SCHEDULE", ...schedule.map(scheduleLine)];
+}
+
 function renderEscalations(data: MorningBriefData): string[] {
   const e = data.escalations;
   const open = e.pending + e.batched;
@@ -135,6 +149,8 @@ export function renderMorningBriefText(data: MorningBriefData): string {
     `delta since ${data.since}`,
     blank(),
     ...whileAway,
+    blank(),
+    ...renderTodaySchedule(data.todaySchedule),
     blank(),
     ...renderWaitingOnYou(data),
     blank(),
