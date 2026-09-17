@@ -15,6 +15,7 @@ import {
 } from "./data.js";
 import { renderEveningCloseText, renderMorningBriefText } from "./render.js";
 import { persistBriefArtifact } from "./artifacts.js";
+import { enqueueBriefNotification } from "../notifications/service.js";
 
 export interface BriefOutcome {
   readonly kind: "brief" | "close";
@@ -41,6 +42,7 @@ export async function renderMorningBrief(
     domainId: data.domainId,
     now: new Date(data.now),
   });
+  if (opts.notify === true) await enqueueBriefNotification(db, { title: "Morning brief", content, artifactId, domainKey: data.domainId });
   return { kind: "brief", suppressed: false, content, artifactId };
 }
 
@@ -58,5 +60,6 @@ export async function renderEveningClose(
     domainId: data.domainId,
     now: new Date(data.now),
   });
+  if (opts.notify === true) await enqueueBriefNotification(db, { title: "Evening close", content, artifactId, domainKey: data.domainId });
   return { kind: "close", suppressed: false, content, artifactId };
 }

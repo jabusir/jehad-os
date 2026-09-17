@@ -14,8 +14,7 @@
  * 409 wrong-state, 200 with the resulting row/outcome.
  */
 
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { SqlExecutor } from "@jehad/db";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   CandidateNotFoundError,
   EscalationInputError,
@@ -32,6 +31,7 @@ import {
   resolveEscalation,
   type PromotionDb,
 } from "@jehad/core";
+import { requireUser } from "./principal-guard.js";
 
 export interface ReviewRoutesOptions {
   /** Structural pg.Pool: query + connect() for the promotion/escalation transactions. */
@@ -45,41 +45,6 @@ let defaultRegistry: Promise<ModelEgressPolicyRegistry> | null = null;
 function loadRegistryOnce(): Promise<ModelEgressPolicyRegistry> {
   defaultRegistry ??= loadEgressPolicyRegistry();
   return defaultRegistry;
-}
-
-/** 403 + audit row for non-user principals (plan A3; same shape as events.ts). */
-async function forbidNonUser(
-  db: SqlExecutor,
-  request: FastifyRequest,
-  route: string,
-): Promise<{ error: "forbidden" }> {
-  const principal = request.principal;
-  await recordAudit(db, {
-    actor: principal ? `${principal.type}:${principal.name}` : "unauthenticated",
-    action: `${route}.forbidden`,
-    reversible: true,
-    outputsRef: JSON.stringify({
-      reason: "principal_type_forbidden",
-      principalType: principal?.type ?? null,
-      method: request.method,
-      url: request.url.split("?")[0] ?? request.url,
-    }),
-  });
-  return { error: "forbidden" };
-}
-
-/** True when the request carries a user principal; otherwise sends 403. */
-async function requireUser(
-  db: SqlExecutor,
-  request: FastifyRequest,
-  reply: FastifyReply,
-  route: string,
-): Promise<boolean> {
-  if (request.principal?.type !== "user") {
-    await reply.code(403).send(await forbidNonUser(db, request, route));
-    return false;
-  }
-  return true;
 }
 
 function actorFor(request: FastifyRequest): string {

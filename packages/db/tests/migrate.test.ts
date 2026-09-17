@@ -19,7 +19,7 @@ const TABLES_001 = [
 
 const ALL_MIGRATIONS = [
   "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
-  "004_commitments_domain", "005_commitments_temporal",
+  "004_commitments_domain", "005_commitments_temporal", "006_notifications",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -74,6 +74,22 @@ describe("migration files (fs only)", () => {
     expect(temporal).toBeDefined();
     expect(temporal!.sql).toMatch(/ALTER TABLE commitments ADD COLUMN temporal jsonb NULL/);
     expect(temporal!.downSql).toMatch(/ALTER TABLE commitments DROP COLUMN IF EXISTS temporal/);
+  });
+
+  it("006 creates the notifications queue with the claim lease and a down path", async () => {
+    const migrations = await listMigrations();
+    const notifications = migrations.find((m) => m.name === "006_notifications");
+    expect(notifications).toBeDefined();
+    expect(notifications!.sql).toMatch(/CREATE TABLE notifications\b/);
+    for (const column of [
+      "kind", "title", "payload", "domain_id", "status", "source_type", "source_id",
+      "created_by", "approved_by", "approved_at", "claimed_at", "claimed_by",
+      "delivered_by", "delivered_at", "expires_at",
+    ]) {
+      expect(notifications!.sql).toMatch(new RegExp(`\\b${column}\\s+`));
+    }
+    expect(notifications!.sql).toMatch(/CHECK \(status IN \('pending', 'approved', 'rejected', 'delivered', 'expired'\)\)/);
+    expect(notifications!.downSql).toMatch(/DROP TABLE IF EXISTS notifications\b/);
   });
 
   it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {

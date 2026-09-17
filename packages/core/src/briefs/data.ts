@@ -35,6 +35,8 @@ export interface BriefOptions {
   readonly now?: () => Date;
   /** Exclusive delta lower bound; default now - 16h. */
   readonly since?: Date | string;
+  /** E4: also enqueue a kind=brief notification next to the artifact. */
+  readonly notify?: boolean;
 }
 
 export interface EscalationReasonCount {
