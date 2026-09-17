@@ -18,7 +18,14 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run"
   },
+  "dependencies": {
+    "@jehad/adapters": "workspace:*"
+  },
   "devDependencies": {
+    "@jehad/db": "workspace:*",
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.0",
+    "pg": "^8.13.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }
