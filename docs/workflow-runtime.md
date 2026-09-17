@@ -31,11 +31,12 @@ second brain.
 
 ## 2. ADR-0008 — Use Inngest as the initial durable workflow runtime behind the `WorkflowRuntime` boundary
 
-**Status: accepted, pending M3 spike confirmation.**
+**Status: accepted (spike confirmed 2026-09-17).**
 
-ADR-0008 ships with the Phase-0 docs in this status (satisfying plan §1 exit
-criterion 3: ADR-0008 rewritten per review §2). It is finalized — or returned to
-the owner — only after the M3 spike (plan §12, §19; section 6 below).
+ADR-0008 originally shipped as "accepted, pending M3 spike confirmation"
+(satisfying plan §1 exit criterion 3: ADR-0008 rewritten per review §2). The
+M3 spike ran and passed; the result is recorded in ADR-0008 and the status is
+final (section 6 disposition rules were never triggered).
 
 **Supersedes:** the earlier pg-backed-first workflow recommendation (old plan
 disagreement D1). The owner's external review rejected building a bespoke

@@ -1,0 +1,28 @@
+{
+  "name": "@jehad/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "josctl": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@jehad/adapters": "workspace:*"
+  },
+  "devDependencies": {
+    "@jehad/api": "workspace:*",
+    "@jehad/db": "workspace:*",
+    "@types/node": "^22.10.0",
+    "pg": "^8.13.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

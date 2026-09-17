@@ -13,6 +13,8 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
+    "@jehad/adapters": "workspace:*",
+    "@jehad/core": "workspace:*",
     "@jehad/db": "workspace:*",
     "fastify": "^5.2.0",
     "pg": "^8.13.0"

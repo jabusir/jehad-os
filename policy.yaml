@@ -1,0 +1,13 @@
+# Jehad OS autonomy ceiling — policy.yaml v1 (§35 pattern; plan §9; ADR-0007).
+# Policy is data, not model judgment: models propose; policy disposes.
+# Levels: autonomous | gated | approval_required | prohibited.
+# v1 ships exactly the five action types below; later versions may add the
+# further §35 dimensions (domain, amount/impact, reversibility, confidence,
+# data sensitivity, user-defined rules). Every evaluation denies by default.
+version: 1
+autonomy_ceiling:
+  read: autonomous
+  propose: autonomous
+  write_canonical: gated
+  external_side_effect: approval_required
+  money_and_contracts: prohibited

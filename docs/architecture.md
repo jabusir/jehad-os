@@ -256,4 +256,4 @@ are recorded here so the shape is not misread:
 | `docs/workflow-runtime.md` | Inngest-first behind WorkflowRuntime; the M3 spike |
 | `docs/data-model.md`, `docs/event-model.md`, `docs/policy-model.md`, `docs/memory-architecture.md` | schema v1, event contract, capability/egress policy, memory classes + promotion |
 | `docs/threat-model.md` | T1–T16, including harness and workflow-runtime threats |
-| `docs/adr/` | ADR-0001..0012 (ADR-0008 pending M3 spike confirmation) |
+| `docs/adr/` | ADR-0001..0012 (ADR-0008 accepted — spike confirmed 2026-09-17) |
