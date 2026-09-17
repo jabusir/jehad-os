@@ -145,7 +145,7 @@ async function writeCommitment(
   tx: WriterSql,
   ctx: WriteContext,
 ): Promise<CanonicalWriteResult> {
-  const counterparty = str(ctx.payload.counterparty)!;
+  const counterparty = str(ctx.payload.counterpartyText ?? ctx.payload.counterparty)!;
   // Counterparty resolution: explicit entity id, else an exact (case-insensitive)
   // name match in the candidate's domain. Never auto-created from raw text.
   let entityId: string | null = str(ctx.payload.counterpartyEntityId);

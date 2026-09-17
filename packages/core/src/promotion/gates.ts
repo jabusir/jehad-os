@@ -400,7 +400,10 @@ export function validateWritePayload(
       if (direction !== "i_owe" && direction !== "owes_me") {
         return { ok: false, message: `commitment payload.direction must be "i_owe" or "owes_me" (got ${JSON.stringify(direction)})` };
       }
-      if (!nonEmptyString(payload.counterparty)) {
+      // Canonical payload key is counterpartyText (matches the
+      // commitments.counterparty_text column, review §9); `counterparty` is
+      // accepted as a legacy alias.
+      if (!nonEmptyString(payload.counterpartyText ?? payload.counterparty)) {
         return { ok: false, message: "commitment payload requires non-empty counterparty text (T9)" };
       }
       if (!nonEmptyString(payload.description)) {
