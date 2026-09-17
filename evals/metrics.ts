@@ -1,31 +1,58 @@
 /**
- * Eval metrics (M5B; docs/evals.md §3.1) — pure functions, unit-tested in
- * metrics.test.ts. Definitions:
+ * Eval metrics v2 (golden set v2 / lane W6B; docs/evals.md §3.1) — pure
+ * functions, unit-tested in metrics.test.ts against synthetic v2-shape
+ * fixtures (contract: packages/core/src/memory/candidate-contract.ts).
+ *
+ * Definitions:
  *
  * - Commitment detection: TP/FP/FN/TN over is_commitment → precision,
- *   recall, F1, FPR = FP/(FP+TN).
- * - Direction accuracy: among items that are commitments in BOTH golden and
- *   prediction — share where predicted direction equals golden direction.
- * - Counterparty accuracy: additionally conditioned on golden counterparty
- *   non-null — exact match, case-insensitive.
- * - Due-date accuracy: additionally conditioned on golden due_date non-null —
- *   exact ISO date match (predicted null = miss).
- * - Confidence-in-band: among CORRECTLY classified items — share whose
- *   predicted confidence falls inside the golden confidence band.
- * - Calibration (reported): predictions bucketed by confidence; per bucket,
- *   mean confidence vs observed classification accuracy.
- * - Action-driving precision: among predictions with is_commitment=true and
- *   confidence ≥ threshold (0.7) — share that are real commitments. This is
- *   the ≥0.9 plan §13 gate any propose→act automation must clear.
+ *   recall, F1, FPR = FP/(FP+TN). (Unchanged.)
+ * - Direction / counterparty accuracy: among shared positives; counterparty
+ *   additionally conditioned on golden counterparty non-null, exact match,
+ *   case-insensitive. (Unchanged.)
+ * - Normalizer accuracy (DIAGNOSTIC, not gated): among shared positives
+ *   whose golden resolution_status is defined — the candidate temporal
+ *   block must match BOTH golden resolution_status AND golden
+ *   resolved_due_date (resolved → exact ISO date; ambiguous/none/unsupported
+ *   → null). This measures the model-echo → normalizer chain; the
+ *   deterministic normalizer itself is unit-tested in lane W6A.
+ * - Due-date accuracy (end-to-end): among shared positives whose golden
+ *   resolved_due_date is non-null — the block's normalizedTime must equal
+ *   it exactly (null = miss). Same definition as v1, now driven by
+ *   normalizedTime instead of a raw model date.
+ * - Commitment-state accuracy: among ALL items (golden v2 carries
+ *   commitment_state for every item) — predicted state must equal golden
+ *   state, per state and overall. GATED ≥ 0.80 (hermetic + live).
+ * - Confidence-in-band, calibration, action-driving precision: unchanged.
  */
 
+import type { CommitmentState } from "@jehad/core";
+
 export type Direction = "owes_me" | "i_owe";
+
+export type ResolutionStatus = "resolved" | "ambiguous" | "unsupported" | "none";
+
+/** CommitmentState ordering for the per-state accuracy table. */
+export const COMMITMENT_STATES: readonly CommitmentState[] = [
+  "prospective",
+  "active",
+  "completed",
+  "historical",
+  "renegotiated",
+  "cancelled",
+  "hypothetical",
+];
 
 export interface GoldenExpected {
   readonly is_commitment: boolean;
   readonly direction?: Direction | null;
   readonly counterparty?: string | null;
-  readonly due_date?: string | null;
+  /** Verbatim temporal phrase the text contains (golden echo target). */
+  readonly temporal_expression?: string | null;
+  /** Golden ISO answer the NORMALIZER should produce, or null. */
+  readonly resolved_due_date?: string | null;
+  readonly resolution_status?: ResolutionStatus;
+  readonly commitment_state?: CommitmentState;
   readonly confidence?: readonly [number, number];
 }
 
@@ -42,12 +69,21 @@ export interface GoldenSet {
   readonly items: readonly GoldenItem[];
 }
 
+/** The slice of TemporalProvenance the metrics consume. */
+export interface TemporalBlock {
+  readonly rawExpression: string | null;
+  readonly normalizedTime: string | null;
+  readonly resolutionStatus: ResolutionStatus;
+}
+
 export interface EvalPrediction {
   readonly isCommitment: boolean;
   readonly direction: Direction | null;
   readonly counterparty: string | null;
-  readonly dueDate: string | null;
   readonly confidence: number;
+  readonly commitmentState: CommitmentState | null;
+  /** Null when no commitment was proposed (no candidate → no block). */
+  readonly temporal: TemporalBlock | null;
 }
 
 export const ACTION_CONFIDENCE_THRESHOLD = 0.7;
@@ -76,6 +112,15 @@ export interface FieldAccuracy {
   readonly accuracy: number;
 }
 
+export interface StateAccuracy extends FieldAccuracy {
+  readonly state: CommitmentState;
+}
+
+export interface CommitmentStateMetrics {
+  readonly overall: FieldAccuracy;
+  readonly perState: readonly StateAccuracy[];
+}
+
 export interface CalibrationBucket {
   readonly label: string;
   readonly n: number;
@@ -83,29 +128,46 @@ export interface CalibrationBucket {
   readonly observedAccuracy: number;
 }
 
+export type FailureKind =
+  | "false-positive"
+  | "false-negative"
+  | "direction"
+  | "counterparty"
+  | "due-date"
+  | "normalizer"
+  | "commitment-state";
+
 export interface EvalReport {
   readonly n: number;
   readonly detection: ClassificationMetrics;
   readonly direction: FieldAccuracy;
   readonly counterparty: FieldAccuracy;
+  /** End-to-end due-date accuracy (driven by normalizedTime). */
   readonly dueDate: FieldAccuracy;
+  /** Diagnostic echo+normalizer accuracy (status AND date must match). */
+  readonly normalizer: FieldAccuracy;
+  readonly commitmentState: CommitmentStateMetrics;
   readonly confidenceInBand: FieldAccuracy;
   readonly calibration: readonly CalibrationBucket[];
   readonly actionDriving: { readonly threshold: number } & FieldAccuracy;
   readonly failures: readonly {
     readonly id: string;
     readonly category: string;
-    readonly kind:
-      | "false-positive"
-      | "false-negative"
-      | "direction"
-      | "counterparty"
-      | "due-date";
+    readonly kind: FailureKind;
   }[];
 }
 
 function accuracy(correct: number, total: number): number {
   return total === 0 ? 1 : correct / total;
+}
+
+/** One candidate temporal block vs one golden expectation. */
+export function temporalBlockMatches(
+  block: TemporalBlock,
+  expected: GoldenExpected,
+): boolean {
+  if (expected.resolution_status === undefined) return false;
+  return block.resolutionStatus === expected.resolution_status && block.normalizedTime === (expected.resolved_due_date ?? null);
 }
 
 export function computeEvalReport(
@@ -122,15 +184,14 @@ export function computeEvalReport(
   let counterpartyTotal = 0;
   let dueCorrect = 0;
   let dueTotal = 0;
+  let normalizerCorrect = 0;
+  let normalizerTotal = 0;
   let bandCorrect = 0;
   let bandTotal = 0;
   let actionCorrect = 0;
   let actionTotal = 0;
-  const failures: {
-    id: string;
-    category: string;
-    kind: "false-positive" | "false-negative" | "direction" | "counterparty" | "due-date";
-  }[] = [];
+  const stateCounts = new Map<CommitmentState, { correct: number; total: number }>();
+  const failures: { id: string; category: string; kind: FailureKind }[] = [];
 
   for (const item of items) {
     const predicted = predictions.get(item.id);
@@ -138,8 +199,14 @@ export function computeEvalReport(
       throw new Error(`computeEvalReport: no prediction for golden item ${item.id}`);
     }
     const expected = item.expected;
+    // OPEN is derived from stance, not from is_commitment alone (owner
+    // directive): only active/renegotiated obligations land as open
+    // commitments. A model "is=true, state=completed" is NOT an open-prediction.
     const real = expected.is_commitment;
-    const said = predicted.isCommitment;
+    const predictedState = predicted.commitmentState ?? (predicted.isCommitment ? "active" : null);
+    const said =
+      predicted.isCommitment === true &&
+      (predictedState === "active" || predictedState === "renegotiated");
 
     if (real && said) tp += 1;
     else if (!real && said) {
@@ -149,6 +216,24 @@ export function computeEvalReport(
       fn += 1;
       failures.push({ id: item.id, category: item.category, kind: "false-negative" });
     } else tn += 1;
+
+    // Commitment state: scored ONLY where the golden records a stance (an
+    // obligation was expressed). No obligation -> no stance to get right;
+    // a model emitting a state where golden has none is penalized.
+    if (expected.commitment_state !== undefined && expected.commitment_state !== null) {
+      const entry = stateCounts.get(expected.commitment_state) ?? { correct: 0, total: 0 };
+      entry.total += 1;
+      const stateOk = predictedState === expected.commitment_state;
+      if (stateOk) entry.correct += 1;
+      else failures.push({ id: item.id, category: item.category, kind: "commitment-state" });
+      stateCounts.set(expected.commitment_state, entry);
+    } else if (predictedState !== null && predictedState !== undefined) {
+      // Model claims a stance where the golden says no obligation exists.
+      const entry = stateCounts.get("none" as CommitmentState) ?? { correct: 0, total: 0 };
+      entry.total += 1;
+      failures.push({ id: item.id, category: item.category, kind: "commitment-state" });
+      stateCounts.set("none" as CommitmentState, entry);
+    }
 
     // Confidence band: scored only on correctly classified items.
     if (real === said && expected.confidence !== undefined) {
@@ -163,7 +248,7 @@ export function computeEvalReport(
         actionTotal += 1;
         if (real) actionCorrect += 1;
       }
-      // Direction / counterparty / due-date: conditioned on shared positives.
+      // Direction / counterparty / temporal: conditioned on shared positives.
       directionTotal += 1;
       if (expected.direction !== undefined && expected.direction === predicted.direction) {
         directionCorrect += 1;
@@ -180,9 +265,16 @@ export function computeEvalReport(
         if (match) counterpartyCorrect += 1;
         else failures.push({ id: item.id, category: item.category, kind: "counterparty" });
       }
-      if (expected.due_date !== undefined && expected.due_date !== null) {
+      const block = predicted.temporal;
+      if (expected.resolution_status !== undefined) {
+        normalizerTotal += 1;
+        const normalizerOk = block !== null && temporalBlockMatches(block, expected);
+        if (normalizerOk) normalizerCorrect += 1;
+        else failures.push({ id: item.id, category: item.category, kind: "normalizer" });
+      }
+      if (expected.resolved_due_date !== undefined && expected.resolved_due_date !== null) {
         dueTotal += 1;
-        if (predicted.dueDate === expected.due_date) dueCorrect += 1;
+        if (block !== null && block.normalizedTime === expected.resolved_due_date) dueCorrect += 1;
         else failures.push({ id: item.id, category: item.category, kind: "due-date" });
       }
     } else if (!real && said && predicted.confidence >= ACTION_CONFIDENCE_THRESHOLD) {
@@ -218,6 +310,18 @@ export function computeEvalReport(
     };
   });
 
+  const stateOverallCorrect = [...stateCounts.values()].reduce((sum, e) => sum + e.correct, 0);
+  const stateOverallTotal = [...stateCounts.values()].reduce((sum, e) => sum + e.total, 0);
+  const perState = COMMITMENT_STATES.filter((state) => stateCounts.has(state)).map((state) => {
+    const entry = stateCounts.get(state)!;
+    return {
+      state,
+      correct: entry.correct,
+      total: entry.total,
+      accuracy: accuracy(entry.correct, entry.total),
+    };
+  });
+
   return {
     n: items.length,
     detection: {
@@ -237,6 +341,19 @@ export function computeEvalReport(
       accuracy: accuracy(counterpartyCorrect, counterpartyTotal),
     },
     dueDate: { correct: dueCorrect, total: dueTotal, accuracy: accuracy(dueCorrect, dueTotal) },
+    normalizer: {
+      correct: normalizerCorrect,
+      total: normalizerTotal,
+      accuracy: accuracy(normalizerCorrect, normalizerTotal),
+    },
+    commitmentState: {
+      overall: {
+        correct: stateOverallCorrect,
+        total: stateOverallTotal,
+        accuracy: accuracy(stateOverallCorrect, stateOverallTotal),
+      },
+      perState,
+    },
     confidenceInBand: {
       correct: bandCorrect,
       total: bandTotal,
@@ -263,8 +380,8 @@ export interface GateResult {
   readonly passed: boolean;
 }
 
-/** Bootstrap gates (plan §13; docs/evals.md §3.1): F1 ≥ 0.8 overall,
- *  precision ≥ 0.9 for action-driving predictions. */
+/** Gates (golden v2): F1 ≥ 0.80, action-precision ≥ 0.90, commitment-state
+ *  accuracy ≥ 0.80. Normalizer accuracy is reported as a diagnostic only. */
 export function evaluateGates(report: EvalReport): GateResult {
   const gates = [
     {
@@ -278,6 +395,12 @@ export function evaluateGates(report: EvalReport): GateResult {
       requirement: ">= 0.90",
       actual: report.actionDriving.accuracy,
       passed: report.actionDriving.accuracy >= 0.9,
+    },
+    {
+      name: "commitment-state-accuracy",
+      requirement: ">= 0.80",
+      actual: report.commitmentState.overall.accuracy,
+      passed: report.commitmentState.overall.accuracy >= 0.8,
     },
   ];
   return { gates, passed: gates.every((g) => g.passed) };

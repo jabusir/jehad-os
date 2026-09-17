@@ -14,8 +14,10 @@ import type { EgressDecision, Sensitivity, StorageMode } from "../egress/policy.
 import { SENSITIVITY_V1, UUID_RE } from "../events/envelope.js";
 import type {
   AssertionKind,
+  CommitmentState,
   ProposedClass,
 } from "../memory/candidate-contract.js";
+import { policyConfidence, type EmpiricalPrecision } from "../trust/index.js";
 import type { PromotionGateConfig } from "./config.js";
 
 /** The candidate as the gate sees it (contract shape + row identity). */
@@ -59,6 +61,14 @@ export interface GateEvaluationInput {
   readonly egress: EgressDecision;
   /** Gate 4: newest canonical record for the same conflict key, if any. */
   readonly existingConflict: ExistingConflictRecord | null;
+  /**
+   * Gate 4 (decalibration directive): the injected empirical precision map
+   * (parsed by the pipeline from gate4Confidence.empiricalPrecisionPath).
+   * undefined = no empirical source configured (legacy raw-confidence gate);
+   * null = source configured but the file is missing (fails closed to the
+   * 0.5 action cap). Gates stay pure — no IO here.
+   */
+  readonly empirical?: EmpiricalPrecision | null;
 }
 
 export type GateNumber = 1 | 2 | 3 | 4 | 5;
@@ -76,7 +86,10 @@ export type PromotionReviewReason =
   | "low_confidence"
   | "material_conflict"
   | "semantic_requires_review"
-  | "invalid_write_payload";
+  | "invalid_write_payload"
+  /** Owner temporal directive 2026-09-17: non-standing commitment states
+   *  (historical/prospective/hypothetical) route to review — never an open row. */
+  | `commitment_state_${"prospective" | "historical" | "hypothetical"}`;
 
 export type PromotionAction = "promoted" | "rejected" | "in_review" | "gated";
 
@@ -87,6 +100,16 @@ export interface ConflictInfo {
   readonly existingRecordId: string;
   /** True when the class routes the conflict to the review queue. */
   readonly material: boolean;
+}
+
+/** Gate 4 audit: how raw model confidence became policy confidence. */
+export interface ConfidencePolicyInfo {
+  /** The model's raw (uncalibrated) claim. */
+  readonly model: number;
+  /** The number the threshold was applied to. */
+  readonly policy: number;
+  /** The empirical cap applied, when any. */
+  readonly cap: number | null;
 }
 
 /** The gate pipeline's verdict — everything gate_result persists. */
@@ -104,6 +127,8 @@ export interface GateEvaluation {
   readonly canonicalWrite: boolean;
   /** Human-readable routing note (e.g. "episodic: canonical store is the event log"). */
   readonly note: string | null;
+  /** Gate 4 decalibration audit; null when no empirical source is active. */
+  readonly confidencePolicy: ConfidencePolicyInfo | null;
 }
 
 /**
@@ -129,6 +154,62 @@ export class InvalidWritePayloadError extends Error {
     super(message);
     this.name = "InvalidWritePayloadError";
   }
+}
+
+const COMMITMENT_STATES: readonly CommitmentState[] = [
+  "prospective",
+  "active",
+  "completed",
+  "historical",
+  "renegotiated",
+  "cancelled",
+  "hypothetical",
+];
+
+/** States that are NOT a standing obligation — never an open commitments row. */
+const NON_STANDING_COMMITMENT_STATES = [
+  "prospective",
+  "historical",
+  "hypothetical",
+] as const;
+
+type NonStandingCommitmentState = (typeof NON_STANDING_COMMITMENT_STATES)[number];
+
+/**
+ * Owner temporal directive 2026-09-17. Missing/invalid state defaults to
+ * active: a commitment extracted without state information is a standing
+ * obligation (the v2 behavior, preserved for legacy candidates).
+ */
+export function commitmentStateFromPayload(
+  payload: Readonly<Record<string, unknown>>,
+): CommitmentState {
+  const raw = payload.commitmentState;
+  return typeof raw === "string" && (COMMITMENT_STATES as readonly string[]).includes(raw)
+    ? (raw as CommitmentState)
+    : "active";
+}
+
+/**
+ * Gate 5 → commitments.status mapping. active/renegotiated land open (the
+ * LATEST terms stand); completed lands met; cancelled lands void. The
+ * non-standing states never reach a writer (gate 5 routes them to review and
+ * the review-approved landing is event-log-only).
+ */
+export function commitmentStatusForState(
+  state: CommitmentState,
+): "open" | "met" | "void" {
+  switch (state) {
+    case "completed":
+      return "met";
+    case "cancelled":
+      return "void";
+    default:
+      return "open";
+  }
+}
+
+function commitmentStateReviewReason(state: NonStandingCommitmentState): PromotionReviewReason {
+  return `commitment_state_${state}`;
 }
 
 /** Gate 1: provenance attached (sourceEventId required; nulls allowed for human sources). */
@@ -194,6 +275,7 @@ export function evaluateGates(
     conflict: null as ConflictInfo | null,
     canonicalWrite: false,
     note: null as string | null,
+    confidencePolicy: null as ConfidencePolicyInfo | null,
   };
 
   // ---- Gate 1: provenance attached ------------------------------------
@@ -258,16 +340,38 @@ export function evaluateGates(
   }
 
   // ---- Gate 4: confidence + conflict -----------------------------------
+  // Decalibration directive (2026-09-17): when an empirical source is
+  // configured, the threshold applies to POLICY confidence — the model's
+  // claim capped by observed precision — never to the raw number.
   const g4 = config.gate4Confidence;
+  const empiricalActive = input.empirical !== undefined || g4.empiricalPrecisionPath !== null;
+  const effectiveConfidence = empiricalActive
+    ? policyConfidence(candidate.confidence, {
+        class: cls,
+        empirical: input.empirical ?? null,
+        purpose: "action",
+      })
+    : candidate.confidence;
+  if (empiricalActive) {
+    base.confidencePolicy = {
+      model: candidate.confidence,
+      policy: effectiveConfidence,
+      cap: effectiveConfidence < candidate.confidence ? effectiveConfidence : null,
+    };
+  }
   const minConfidence = g4.minByClass[cls] ?? g4.defaultMin;
-  if (candidate.confidence < minConfidence) {
+  if (effectiveConfidence < minConfidence) {
     if (opts.overrideReview) {
-      base.note = `low confidence ${candidate.confidence} < ${minConfidence} overridden by review approval`;
+      base.note = empiricalActive
+        ? `low policy confidence ${effectiveConfidence} < ${minConfidence} overridden by review approval`
+        : `low confidence ${candidate.confidence} < ${minConfidence} overridden by review approval`;
     } else {
       return review(
         4,
         "low_confidence",
-        `confidence ${candidate.confidence} below minimum ${minConfidence} for class "${cls}"`,
+        empiricalActive
+          ? `policy confidence ${effectiveConfidence} (model claimed ${candidate.confidence}, empirical-capped) below minimum ${minConfidence} for class "${cls}"`
+          : `confidence ${candidate.confidence} below minimum ${minConfidence} for class "${cls}"`,
         base,
       );
     }
@@ -303,6 +407,36 @@ export function evaluateGates(
   const g5 = config.gate5TruthSemantics;
   if (cls === "discard") {
     return rejected(5, "discard_class", "classifier discarded the candidate", base);
+  }
+  if (cls === "commitment") {
+    // Owner temporal directive 2026-09-17: historical/prospective/hypothetical
+    // are NOT standing obligations — like non-canonical semantic they route to
+    // review (episodic/review landing), NEVER an open commitments row. On
+    // review approval the landing stays event-log-only; completed/cancelled
+    // may instead write directly with their terminal status (user_declared),
+    // and active/renegotiated land open with the latest terms.
+    const state = commitmentStateFromPayload(candidate.payload);
+    if ((NON_STANDING_COMMITMENT_STATES as readonly string[]).includes(state)) {
+      if (opts.overrideReview) {
+        return {
+          ...base,
+          action: "promoted",
+          gate: 5,
+          reason: null,
+          message: `review-approved ${state} commitment: event-log landing only — never an open commitments row`,
+          canonicalWrite: false,
+          note: `commitment_state_${state}`,
+        };
+      }
+      return review(
+        5,
+        commitmentStateReviewReason(state as NonStandingCommitmentState),
+        `commitment_state "${state}" is not a standing obligation (owner temporal directive 2026-09-17): episodic/review landing, never an open commitments row`,
+        base,
+      );
+    }
+    // active | renegotiated | completed | cancelled fall through to the
+    // semantic truth-semantics path; the writer maps state → commitments.status.
   }
   if (g5.episodicClasses.includes(cls)) {
     return {
@@ -399,6 +533,14 @@ export function validateWritePayload(
       const direction = payload.direction ?? "i_owe";
       if (direction !== "i_owe" && direction !== "owes_me") {
         return { ok: false, message: `commitment payload.direction must be "i_owe" or "owes_me" (got ${JSON.stringify(direction)})` };
+      }
+      const state = payload.commitmentState;
+      if (
+        state !== undefined &&
+        state !== null &&
+        !(COMMITMENT_STATES as readonly string[]).includes(state as string)
+      ) {
+        return { ok: false, message: `commitment payload.commitmentState is not a known state (got ${JSON.stringify(state)})` };
       }
       // Canonical payload key is counterpartyText (matches the
       // commitments.counterparty_text column, review §9); `counterparty` is

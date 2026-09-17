@@ -77,7 +77,17 @@ describe.skipIf(!TEST_DATABASE_URL)("runLiveEval — real provider path against 
           JSON.stringify({
             id: "stub-completion-1",
             choices: [
-              { message: { content: JSON.stringify({ is_commitment: false, confidence: 0.2, rationale: "stub" }) } },
+              {
+                message: {
+                  content: JSON.stringify({
+                    is_commitment: false,
+                    confidence: 0.2,
+                    commitment_state: "historical",
+                    temporal_expression: null,
+                    rationale: "stub",
+                  }),
+                },
+              },
             ],
             usage: { prompt_tokens: 10, completion_tokens: 5, cost: 0.0001 },
           }),

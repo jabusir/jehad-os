@@ -11,6 +11,10 @@
 //     2-day-fresh item (not), progress-event-rescued item (not), explicitly
 //     blocked stale item (blocked, NOT stalled), expired-edge item (stalled
 //     again), a 12-day-stale project (per-type threshold override target)
+//   - the owner date-trust directive (2026-09-17) overdue variants: past-due
+//     calendar-native and high-confidence-normalized dates (overdue fires),
+//     ambiguous / low-confidence-normalized / legacy-no-temporal past-due
+//     dates (overdue suppressed, needsReview set)
 //
 // Test-only: writes canonical rows; the query services themselves are
 // read-only.
@@ -23,6 +27,37 @@ export interface FixtureNow {
 }
 
 const MS_PER_DAY = 86_400_000;
+
+/**
+ * TEST-ONLY stand-in for W6A's commitments.temporal jsonb migration (owner
+ * temporal directive 2026-09-17): the date-trust gating in waiting.ts must
+ * be exercisable before that migration lands in this worktree. Idempotent —
+ * a no-op once the real column exists.
+ */
+export async function ensureCommitmentsTemporalColumn(db: QueryExecutor): Promise<void> {
+  await db.query(`ALTER TABLE commitments ADD COLUMN IF NOT EXISTS temporal jsonb`);
+}
+
+/** Minimal TemporalProvenance block (contract shape; candidate-contract.ts). */
+function temporalBlock(args: {
+  status: "resolved" | "ambiguous" | "unsupported" | "none";
+  method: string | null;
+  confidence: number;
+  normalized: Date | null;
+  raw: string | null;
+  now: Date;
+}): Record<string, unknown> {
+  return {
+    rawExpression: args.raw,
+    anchorTime: args.now.toISOString(),
+    anchorTimezone: "UTC",
+    normalizedTime: args.normalized === null ? null : args.normalized.toISOString().slice(0, 10),
+    resolutionStatus: args.status,
+    normalizerVersion: "test-fixture",
+    resolutionConfidence: args.confidence,
+    resolutionMethod: args.method,
+  };
+}
 
 export interface FixtureIds {
   readonly domains: { readonly personal: string; readonly work: string };
@@ -57,6 +92,11 @@ export interface FixtureIds {
     readonly expiredBlocked: string;
     readonly progressRescued: string;
     readonly workTask: string;
+    readonly waitingAmbiguousPast: string;
+    readonly mineNormalizedPast: string;
+    readonly mineAmbiguousPast: string;
+    readonly mineLowConfidencePast: string;
+    readonly mineLegacyPast: string;
   };
   readonly decisions: {
     readonly decisionA: string;
@@ -75,6 +115,7 @@ export async function seedQueryFixtureWorld(
   const t0 = opts.now.getTime();
   const at = (daysAgo: number): Date => new Date(t0 - daysAgo * MS_PER_DAY);
   const ahead = (days: number): Date => new Date(t0 + days * MS_PER_DAY);
+  await ensureCommitmentsTemporalColumn(db);
 
   const domainIds = new Map<string, string>();
   for (const [key, sensitivity] of [
@@ -125,6 +166,8 @@ export async function seedQueryFixtureWorld(
     status: string;
     ageDays: number;
     counterpartyEntityId?: string;
+    /** TemporalProvenance block (date-trust fixtures); omit for legacy rows. */
+    temporal?: Record<string, unknown> | null;
   }): Promise<string> {
     const domainKey = args.domainKey ?? "personal";
     const sourceEventId = await insertEvent({
@@ -137,9 +180,9 @@ export async function seedQueryFixtureWorld(
     const inserted = await db.query(
       `INSERT INTO commitments (domain_id, direction, counterparty_text, counterparty_entity_id,
                                 description, due_at, confidence, status, source_event_id,
-                                created_at, updated_at)
+                                temporal, created_at, updated_at)
        VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6::timestamptz, 0.9, $7, $8::uuid,
-               $9::timestamptz, $9::timestamptz)
+               $9::jsonb, $10::timestamptz, $10::timestamptz)
        RETURNING id`,
       [
         dom(domainKey),
@@ -150,6 +193,7 @@ export async function seedQueryFixtureWorld(
         args.dueAt === null ? null : args.dueAt.toISOString(),
         args.status,
         sourceEventId,
+        args.temporal === undefined || args.temporal === null ? null : JSON.stringify(args.temporal),
         at_.toISOString(),
       ],
     );
@@ -368,6 +412,14 @@ export async function seedQueryFixtureWorld(
     dueAt: at(2),
     status: "open",
     ageDays: 8,
+    temporal: temporalBlock({
+      status: "resolved",
+      method: "calendar-native",
+      confidence: 1,
+      normalized: at(2),
+      raw: "2026-09-15",
+      now: opts.now,
+    }),
   });
   const waitingFuture = await insertCommitment({
     direction: "owes_me",
@@ -376,6 +428,14 @@ export async function seedQueryFixtureWorld(
     dueAt: ahead(10),
     status: "open",
     ageDays: 1,
+    temporal: temporalBlock({
+      status: "resolved",
+      method: "calendar-native",
+      confidence: 1,
+      normalized: ahead(10),
+      raw: "2026-09-27",
+      now: opts.now,
+    }),
   });
   const renegotiatedPast = await insertCommitment({
     direction: "owes_me",
@@ -400,6 +460,14 @@ export async function seedQueryFixtureWorld(
     dueAt: at(1),
     status: "open",
     ageDays: 3.5,
+    temporal: temporalBlock({
+      status: "resolved",
+      method: "calendar-native",
+      confidence: 1,
+      normalized: at(1),
+      raw: "October 1st",
+      now: opts.now,
+    }),
   });
   const mineDueSoon = await insertCommitment({
     direction: "i_owe",
@@ -408,6 +476,14 @@ export async function seedQueryFixtureWorld(
     dueAt: ahead(2),
     status: "open",
     ageDays: 1,
+    temporal: temporalBlock({
+      status: "resolved",
+      method: "in-N-weeks",
+      confidence: 0.95,
+      normalized: ahead(2),
+      raw: "in two days",
+      now: opts.now,
+    }),
   });
   const mineNoDue = await insertCommitment({
     direction: "i_owe",
@@ -433,6 +509,82 @@ export async function seedQueryFixtureWorld(
     dueAt: ahead(1),
     status: "open",
     ageDays: 1,
+  });
+
+  // ---- date-trust overdue variants (owner directive 2026-09-17) -------------
+  // All seeded 6 days old so they stay outside whatChanged's 3-day delta
+  // windows while their due dates remain past-due relative to now.
+  const waitingAmbiguousPast = await insertCommitment({
+    direction: "owes_me",
+    counterparty: "Shady Co",
+    description: "Shady Co owes the deposit back",
+    dueAt: at(2),
+    status: "open",
+    ageDays: 6,
+    temporal: temporalBlock({
+      status: "ambiguous",
+      method: null,
+      confidence: 0.3,
+      normalized: null,
+      raw: "sometime next month",
+      now: opts.now,
+    }),
+  });
+  const mineNormalizedPast = await insertCommitment({
+    direction: "i_owe",
+    counterparty: "Contractor",
+    description: "Send the contractor the signed renewal",
+    dueAt: at(1),
+    status: "open",
+    ageDays: 6,
+    temporal: temporalBlock({
+      status: "resolved",
+      method: "weekday",
+      confidence: 0.95,
+      normalized: at(1),
+      raw: "last Tuesday",
+      now: opts.now,
+    }),
+  });
+  const mineAmbiguousPast = await insertCommitment({
+    direction: "i_owe",
+    counterparty: "Tailor",
+    description: "Pick up the altered suit",
+    dueAt: at(2),
+    status: "open",
+    ageDays: 6,
+    temporal: temporalBlock({
+      status: "ambiguous",
+      method: null,
+      confidence: 0.4,
+      normalized: null,
+      raw: "in a few days",
+      now: opts.now,
+    }),
+  });
+  const mineLowConfidencePast = await insertCommitment({
+    direction: "i_owe",
+    counterparty: "Printer",
+    description: "Approve the proof before printing",
+    dueAt: at(1),
+    status: "open",
+    ageDays: 6,
+    temporal: temporalBlock({
+      status: "resolved",
+      method: "end-of-month",
+      confidence: 0.7,
+      normalized: at(1),
+      raw: "end of the month",
+      now: opts.now,
+    }),
+  });
+  const mineLegacyPast = await insertCommitment({
+    direction: "i_owe",
+    counterparty: "Old Bank",
+    description: "Legacy row with a due date but no temporal block",
+    dueAt: at(3),
+    status: "open",
+    ageDays: 6,
   });
 
   // ---- stalled + cycle set ---------------------------------------------------
@@ -565,6 +717,11 @@ export async function seedQueryFixtureWorld(
       expiredBlocked,
       progressRescued,
       workTask,
+      waitingAmbiguousPast,
+      mineNormalizedPast,
+      mineAmbiguousPast,
+      mineLowConfidencePast,
+      mineLegacyPast,
     },
     decisions: { decisionA, decisionE, decisionClosed, decisionNoDownstream, decisionWork },
     events: { progressEvent },

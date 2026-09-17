@@ -6,8 +6,9 @@
  * EVAL_FAKE_LIVE dry-run), then prints a side-by-side per-field table and
  * writes a human-readable markdown report the owner reads for the step-2
  * Calendar-wiring decision (docs/evals.md §3.1): gates are evaluated
- * against the LIVE numbers — overall F1 ≥ 0.80, action-precision ≥ 0.90 —
- * and the process exits nonzero when a live gate fails.
+ * against the LIVE numbers — overall F1 ≥ 0.80, action-precision ≥ 0.90,
+ * commitment-state accuracy ≥ 0.80 (normalizer accuracy is a diagnostic
+ * row, not a gate) — and the process exits nonzero when a live gate fails.
  *
  * Rendering is pure (unit-tested with a golden string); the CLI only wires
  * env → options → run → render → write.
@@ -59,7 +60,9 @@ export function compareTiers(hermetic: TierRun, live: TierRun): CompareResult {
     fieldRow("precision", hermetic.report.detection.precision, live.report.detection.precision),
     fieldRow("recall", hermetic.report.detection.recall, live.report.detection.recall),
     fieldRow("FPR", hermetic.report.detection.fpr, live.report.detection.fpr),
-    fieldRow("due-date acc", hermetic.report.dueDate.accuracy, live.report.dueDate.accuracy),
+    fieldRow("due-date acc (e2e)", hermetic.report.dueDate.accuracy, live.report.dueDate.accuracy),
+    fieldRow("normalizer acc", hermetic.report.normalizer.accuracy, live.report.normalizer.accuracy),
+    fieldRow("state acc", hermetic.report.commitmentState.overall.accuracy, live.report.commitmentState.overall.accuracy),
     fieldRow("direction acc", hermetic.report.direction.accuracy, live.report.direction.accuracy),
     fieldRow("counterparty acc", hermetic.report.counterparty.accuracy, live.report.counterparty.accuracy),
     fieldRow("conf-in-band acc", hermetic.report.confidenceInBand.accuracy, live.report.confidenceInBand.accuracy),
@@ -162,7 +165,7 @@ export function renderCompareMarkdown(input: CompareInput): string {
   lines.push("# Extraction eval report — live vs hermetic");
   lines.push("");
   lines.push(`- Generated: ${input.generatedAt}`);
-  lines.push(`- Golden set: ${hermetic.report.n} items (v1)`);
+  lines.push(`- Golden set: ${hermetic.report.n} items (v${hermetic.meta.goldenVersion ?? 1})`);
   lines.push(`- Hermetic tier: ${tierLine(hermetic, "deterministic fake")}`);
   lines.push(
     `- Live tier: ${tierLine(live.run, "EVAL_FAKE_LIVE dry-run")} — source: ${input.liveFromCache ? "cached .last-live.json" : "fresh run"}`,
@@ -177,6 +180,18 @@ export function renderCompareMarkdown(input: CompareInput): string {
   lines.push("| --- | --- | --- | --- |");
   for (const field of cmp.fields) {
     lines.push(`| ${field.label} | ${pct(field.hermetic)} | ${pct(field.live)} | ${delta(field.delta)} |`);
+  }
+  lines.push("");
+  lines.push("## Commitment-state accuracy (per state; scored on every golden item)");
+  lines.push("");
+  lines.push("| State | n (H/L) | Hermetic | Live |");
+  lines.push("| --- | --- | --- | --- |");
+  const states = hermetic.report.commitmentState.perState;
+  for (const hState of states) {
+    const lState = live.run.report.commitmentState.perState.find((s) => s.state === hState.state);
+    lines.push(
+      `| ${hState.state} | ${hState.total}/${lState?.total ?? 0} | ${pct(hState.accuracy)} | ${lState === undefined ? "—" : pct(lState.accuracy)} |`,
+    );
   }
   lines.push("");
   lines.push("## Calibration (commitment predictions, bucketed)");
@@ -222,8 +237,8 @@ export function renderCompareMarkdown(input: CompareInput): string {
   lines.push("");
   lines.push(
     cmp.gatesPassed
-      ? "LIVE GATES PASS — the live tier clears the step-2 bar (F1 ≥ 0.80, action-precision ≥ 0.90); Calendar wiring may proceed."
-      : "LIVE GATES FAIL — do NOT wire Calendar automation yet: the live tier must clear F1 ≥ 0.80 and action-precision ≥ 0.90 first.",
+      ? "LIVE GATES PASS — the live tier clears the bar (F1 ≥ 0.80, action-precision ≥ 0.90, commitment-state accuracy ≥ 0.80); Calendar wiring may proceed."
+      : "LIVE GATES FAIL — do NOT wire Calendar automation yet: the live tier must clear F1 ≥ 0.80, action-precision ≥ 0.90, and commitment-state accuracy ≥ 0.80 first.",
   );
   lines.push("");
   return lines.join("\n");

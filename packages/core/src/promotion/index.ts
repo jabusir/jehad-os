@@ -6,10 +6,13 @@ export {
   type PromotionGateConfig,
 } from "./config.js";
 export {
+  commitmentStateFromPayload,
+  commitmentStatusForState,
   InvalidWritePayloadError,
   classifySensitivity,
   evaluateGates,
   validateWritePayload,
+  type ConfidencePolicyInfo,
   type ExistingConflictRecord,
   type GateCandidate,
   type GateDomain,

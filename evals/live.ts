@@ -29,15 +29,14 @@ import { createOpenRouterProvider } from "@jehad/adapters";
 import type { ModelProvider } from "@jehad/adapters";
 import {
   EXTRACTION_PROMPT_VERSION,
-  ExtractionParseError,
   callModel,
   loadEgressPolicyRegistry,
   ModelEgressPolicyRegistry,
-  runExtractionPipeline,
 } from "@jehad/core";
 import { migrateUp, seedDomains } from "@jehad/db";
 import { createIsolatedTestDb, dropIsolatedTestDb } from "../packages/db/tests/test-db.js";
 import { createEvalFakeProvider } from "./fake-provider.js";
+import { runV3Extraction, EvalParseError } from "./extraction-v3.js";
 import { envelopeFor, loadDefaultGoldenSet } from "./golden.js";
 import { computeEvalReport, evaluateGates, type EvalPrediction, type GoldenItem } from "./metrics.js";
 import { isInjectionClean, perCategoryAccuracy, type TierRun } from "./tiers.js";
@@ -183,23 +182,23 @@ export async function runLiveEval(options: LiveEvalOptions = {}): Promise<LiveEv
       let prediction: EvalPrediction;
       let dropped = 0;
       try {
-        const pipeline = await runExtractionPipeline(provider, envelopeFor(item, index, runId), { model });
-        const p = pipeline.proposal;
-        prediction = {
-          isCommitment: p.isCommitment,
-          direction: p.direction,
-          counterparty: p.counterparty,
-          dueDate: p.dueDate,
-          confidence: p.confidence,
-        };
+        const pipeline = await runV3Extraction(provider, envelopeFor(item, index, runId), { model });
+        prediction = pipeline.prediction;
         dropped = pipeline.droppedFields.length;
       } catch (err) {
         // A live model can emit unparseable output for an item; score it as
         // a no-commitment miss (honest — recall pays for it) and keep the
         // paid run alive. Listed in the report's parse-failure section.
-        if (err instanceof ExtractionParseError) {
+        if (err instanceof EvalParseError) {
           parseFailures.push(item.id);
-          prediction = { isCommitment: false, direction: null, counterparty: null, dueDate: null, confidence: 0 };
+          prediction = {
+            isCommitment: false,
+            direction: null,
+            counterparty: null,
+            confidence: 0,
+            commitmentState: null,
+            temporal: null,
+          };
         } else {
           throw err;
         }
@@ -221,7 +220,14 @@ export async function runLiveEval(options: LiveEvalOptions = {}): Promise<LiveEv
     return {
       skipped: false,
       run: {
-        meta: { tier: "live", provider: raw.id, model, ranAt: now().toISOString(), fakeLive },
+        meta: {
+          tier: "live",
+          provider: raw.id,
+          model,
+          ranAt: now().toISOString(),
+          fakeLive,
+          goldenVersion: loadDefaultGoldenSet().version,
+        },
         report,
         gates: evaluateGates(report),
         categories: perCategoryAccuracy(items, predictions),
@@ -257,8 +263,15 @@ function print(result: LiveEvalSuccess): void {
   console.log("Per-field accuracy (conditioned on shared positives)");
   console.log(`  direction     ${pct(report.direction.accuracy)}  (${report.direction.correct}/${report.direction.total})`);
   console.log(`  counterparty  ${pct(report.counterparty.accuracy)}  (${report.counterparty.correct}/${report.counterparty.total})`);
-  console.log(`  due-date      ${pct(report.dueDate.accuracy)}  (${report.dueDate.correct}/${report.dueDate.total})`);
+  console.log(`  due-date (end-to-end, via normalizedTime) ${pct(report.dueDate.accuracy)}  (${report.dueDate.correct}/${report.dueDate.total})`);
   console.log(`  confidence-in-band ${pct(report.confidenceInBand.accuracy)}  (${report.confidenceInBand.correct}/${report.confidenceInBand.total})`);
+  console.log(`Normalizer accuracy (DIAGNOSTIC)`);
+  console.log(`  normalizer    ${pct(report.normalizer.accuracy)}  (${report.normalizer.correct}/${report.normalizer.total})`);
+  console.log("Commitment-state accuracy (scored on every item)");
+  console.log(`  overall       ${pct(report.commitmentState.overall.accuracy)}  (${report.commitmentState.overall.correct}/${report.commitmentState.overall.total})`);
+  for (const state of report.commitmentState.perState) {
+    console.log(`  ${state.state.padEnd(13)} ${pct(state.accuracy)}  (${state.correct}/${state.total})`);
+  }
   console.log(`Action-driving (confidence ≥ ${report.actionDriving.threshold})`);
   console.log(`  precision ${pct(report.actionDriving.accuracy)}  (${report.actionDriving.correct}/${report.actionDriving.total})`);
   if (result.parseFailures.length > 0) {

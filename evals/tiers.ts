@@ -17,6 +17,8 @@ export interface TierMeta {
   readonly ranAt: string;
   /** True when the "live" tier ran the deterministic fake (EVAL_FAKE_LIVE dry-run). */
   readonly fakeLive?: boolean;
+  /** Golden-set format version the run scored (report header). */
+  readonly goldenVersion?: number;
 }
 
 export interface CategoryAccuracy {
