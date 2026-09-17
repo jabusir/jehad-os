@@ -112,7 +112,12 @@ describe.skipIf(!TEST_DATABASE_URL)("runBriefCommand (integration)", () => {
     await migrateUp(db.pool);
     await seedDomains(db.pool);
     // Minimal world: one overdue i_owe commitment (makes the morning brief
-    // meaningful) sourced from a capture event.
+    // meaningful) sourced from a capture event. The due date carries a
+    // calendar-native TemporalProvenance block (owner date-trust directive
+    // 2026-09-17): without trustworthy provenance the overdue flag is
+    // suppressed to needsReview. Test-only column stand-in until the W6A
+    // commitments.temporal migration lands.
+    await db.pool.query(`ALTER TABLE commitments ADD COLUMN IF NOT EXISTS temporal jsonb`);
     const domainId = (
       await db.pool.query(`SELECT id FROM domains WHERE key = 'personal'`)
     ).rows[0].id;
@@ -127,10 +132,24 @@ describe.skipIf(!TEST_DATABASE_URL)("runBriefCommand (integration)", () => {
     );
     await db.pool.query(
       `INSERT INTO commitments (domain_id, direction, counterparty_text, description, due_at, confidence,
-                                status, source_event_id, created_at, updated_at)
+                                status, source_event_id, temporal, created_at, updated_at)
        VALUES ($1::uuid, 'i_owe', 'Landlord', 'Pay October rent', '2026-09-16T12:00:00.000Z'::timestamptz,
-               0.9, 'open', $2::uuid, $3::timestamptz, $3::timestamptz)`,
-      [domainId, eventId, at],
+               0.9, 'open', $2::uuid, $3::jsonb, $4::timestamptz, $4::timestamptz)`,
+      [
+        domainId,
+        eventId,
+        JSON.stringify({
+          rawExpression: "October 1st",
+          anchorTime: at,
+          anchorTimezone: "UTC",
+          normalizedTime: "2026-09-16",
+          resolutionStatus: "resolved",
+          normalizerVersion: "cli-test",
+          resolutionConfidence: 1,
+          resolutionMethod: "calendar-native",
+        }),
+        at,
+      ],
     );
   });
 

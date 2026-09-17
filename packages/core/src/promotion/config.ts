@@ -62,11 +62,20 @@ export interface PromotionGateConfig {
     readonly model?: string;
   };
 
-  /** Gate 4 — confidence + conflict (§38; plan §6.2). */
+  /** Gate 4 — confidence + conflict (§38; plan §6.2; owner directive 2026-09-17). */
   readonly gate4Confidence: {
     /** Per-class minimum confidence; unknown classes fall back to defaultMin. */
     readonly minByClass: Readonly<Record<string, number>>;
     readonly defaultMin: number;
+    /**
+     * Empirical precision source (owner decalibration directive): when set,
+     * thresholds apply to POLICY confidence — min(model confidence, empirical
+     * per-class cap from the file) — never to the raw model number. null
+     * keeps the legacy raw-confidence behavior (uncalibrated; set this path
+     * in deployed configs once the eval runner writes the file). A missing
+     * file fails action decisions closed (0.5 cap); a malformed file throws.
+     */
+    readonly empiricalPrecisionPath: string | null;
     readonly conflict: {
       /** Payload fields carrying the canonical key/value pair being asserted. */
       readonly payloadKeyField: string;
@@ -129,6 +138,11 @@ export const DEFAULT_PROMOTION_GATE_CONFIG: PromotionGateConfig = {
       commitment: 0.6,
     },
     defaultMin: 0.5,
+    // null = raw model confidence (legacy, uncalibrated). Deployed configs
+    // point this at evals/.empirical-precision.json (owner directive
+    // 2026-09-17) so gate 4 thresholds apply to empirical-capped policy
+    // confidence instead.
+    empiricalPrecisionPath: null,
     conflict: {
       payloadKeyField: "key",
       payloadValueField: "value",
@@ -216,6 +230,9 @@ export function validatePromotionGateConfig(config: PromotionGateConfig): void {
   requireUnitInterval("gate4Confidence.defaultMin", g4.defaultMin);
   for (const [cls, min] of Object.entries(g4.minByClass)) {
     requireUnitInterval(`gate4Confidence.minByClass.${cls}`, min);
+  }
+  if (g4.empiricalPrecisionPath !== null) {
+    requireNonEmptyString("gate4Confidence.empiricalPrecisionPath", g4.empiricalPrecisionPath);
   }
   requireNonEmptyString("gate4Confidence.conflict.payloadKeyField", g4.conflict.payloadKeyField);
   requireNonEmptyString("gate4Confidence.conflict.payloadValueField", g4.conflict.payloadValueField);

@@ -10,6 +10,7 @@ export {
   classifySensitivity,
   evaluateGates,
   validateWritePayload,
+  type ConfidencePolicyInfo,
   type ExistingConflictRecord,
   type GateCandidate,
   type GateDomain,

@@ -4,16 +4,21 @@
 // PostgreSQL 16; skipped unless TEST_DATABASE_URL is set. Isolated DB.
 
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateUp, seedDomains } from "@jehad/db";
 import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../../../db/tests/test-db.js";
 import { ModelEgressPolicyRegistry } from "../egress/index.js";
 import { acceptEvent } from "../events/store.js";
+import { EmpiricalPrecisionError } from "../trust/index.js";
 import {
   InvalidCandidateStatusError,
   promoteCandidate,
   type PromotionOutcome,
 } from "./pipeline.js";
+import { DEFAULT_PROMOTION_GATE_CONFIG, type PromotionGateConfig } from "./config.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
@@ -387,5 +392,94 @@ describe.skipIf(!TEST_DATABASE_URL)("promotion pipeline (integration)", () => {
     await expect(
       promoteCandidate(db.pool, fresh, { egressRegistry: registry, review: { approvedBy: "jehad" } }),
     ).rejects.toBeInstanceOf(InvalidCandidateStatusError);
+  });
+
+  // ---- gate 4 decalibration (owner directive 2026-09-17) --------------------
+  describe("gate 4 empirical policy confidence", () => {
+    let empiricalDir: string;
+
+    beforeAll(async () => {
+      empiricalDir = await mkdtemp(join(tmpdir(), "jehad-w6c-promo-"));
+    });
+
+    afterAll(async () => {
+      await rm(empiricalDir, { recursive: true, force: true });
+    });
+
+    function empiricalConfig(path: string | null, minCommitment = 0.9): PromotionGateConfig {
+      return {
+        ...DEFAULT_PROMOTION_GATE_CONFIG,
+        gate4Confidence: {
+          ...DEFAULT_PROMOTION_GATE_CONFIG.gate4Confidence,
+          minByClass: { ...DEFAULT_PROMOTION_GATE_CONFIG.gate4Confidence.minByClass, commitment: minCommitment },
+          empiricalPrecisionPath: path,
+        },
+      };
+    }
+
+    it("model 0.95 capped at empirical 0.81 lands in review, gate_result records the policy numbers", async () => {
+      const file = join(empiricalDir, "good.json");
+      await writeFile(
+        file,
+        JSON.stringify({ updatedAt: "2026-09-17T00:00:00.000Z", byClass: { commitment: 0.81 } }),
+        "utf8",
+      );
+      const candidateId = await insertCandidate({
+        proposedClass: "commitment",
+        assertionKind: "user_declared",
+        payload: { counterpartyText: "Acme", description: "Renew the support contract" },
+        confidence: 0.95,
+      });
+      const outcome = await promoteCandidate(db.pool, candidateId, {
+        egressRegistry: registry,
+        config: empiricalConfig(file),
+      });
+      expect(outcome).toMatchObject({ action: "in_review", gate: 4, reason: "low_confidence" });
+      expect(outcome.message).toContain("policy confidence 0.81");
+      const row = await candidateRow(candidateId);
+      expect((row.gate_result as Record<string, unknown>).confidencePolicy).toEqual({
+        model: 0.95,
+        policy: 0.81,
+        cap: 0.81,
+      });
+    });
+
+    it("missing empirical file fails closed to the 0.5 action cap (documented behavior)", async () => {
+      const candidateId = await insertCandidate({
+        proposedClass: "commitment",
+        assertionKind: "user_declared",
+        payload: { counterpartyText: "Acme", description: "Send the roadmap" },
+        confidence: 0.95,
+      });
+      const outcome = await promoteCandidate(db.pool, candidateId, {
+        egressRegistry: registry,
+        config: empiricalConfig(join(empiricalDir, "absent.json")),
+      });
+      expect(outcome).toMatchObject({ action: "in_review", gate: 4, reason: "low_confidence" });
+      const row = await candidateRow(candidateId);
+      expect((row.gate_result as Record<string, unknown>).confidencePolicy).toMatchObject({
+        model: 0.95,
+        policy: 0.5,
+      });
+    });
+
+    it("malformed empirical file throws fail-closed — no silent raw-confidence promote", async () => {
+      const file = join(empiricalDir, "malformed.json");
+      await writeFile(file, "{not json", "utf8");
+      const candidateId = await insertCandidate({
+        proposedClass: "commitment",
+        assertionKind: "user_declared",
+        payload: { counterpartyText: "Acme", description: "Sign the NDA" },
+        confidence: 0.95,
+      });
+      await expect(
+        promoteCandidate(db.pool, candidateId, {
+          egressRegistry: registry,
+          config: empiricalConfig(file),
+        }),
+      ).rejects.toThrow(EmpiricalPrecisionError);
+      // Fail CLOSED: the candidate was not silently promoted on raw confidence.
+      expect((await candidateRow(candidateId)).status).toBe("proposed");
+    });
   });
 });

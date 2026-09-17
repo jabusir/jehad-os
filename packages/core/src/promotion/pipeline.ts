@@ -13,6 +13,7 @@
 import type { ModelEgressPolicyRegistry, StorageMode } from "../egress/index.js";
 import { acceptEvent } from "../events/store.js";
 import type { AssertionKind, ProposedClass } from "../memory/candidate-contract.js";
+import { loadEmpiricalPrecision, type EmpiricalPrecision } from "../trust/index.js";
 import {
   DEFAULT_PROMOTION_GATE_CONFIG,
   validatePromotionGateConfig,
@@ -211,6 +212,7 @@ function gateResultJson(
     egressRuleId: evaluation.egressRuleId ?? null,
     conflict: evaluation.conflict,
     note: evaluation.note,
+    confidencePolicy: evaluation.confidencePolicy,
     write: write === null ? null : { target: write.target, targetId: write.targetId },
     review: review === undefined ? null : { approvedBy: review.approvedBy, at: now.toISOString() },
   });
@@ -296,6 +298,19 @@ async function withTransaction<T>(db: PromotionDb, fn: (tx: PromotionTx) => Prom
 }
 
 /**
+ * Loads the gate-4 empirical precision source when the config names one.
+ * Missing file → null (gate 4 fails action decisions closed at 0.5);
+ * malformed file → throws (fail closed — never silently trust the model's
+ * raw number). IO lives here, never in the gates.
+ */
+async function loadGate4Empirical(
+  config: PromotionGateConfig,
+): Promise<EmpiricalPrecision | null | undefined> {
+  if (config.gate4Confidence.empiricalPrecisionPath === null) return undefined;
+  return loadEmpiricalPrecision(config.gate4Confidence.empiricalPrecisionPath);
+}
+
+/**
  * Runs the five-gate pipeline for one candidate and persists the outcome.
  * Callable on status proposed/gated; on in_review only via the review-queue
  * approve path (opts.review.approvedBy) — never silently.
@@ -329,6 +344,7 @@ export async function promoteCandidate(
     sourceEventExists = found.rows.length > 0;
   }
   const existingConflict = await probeConflict(db, candidate, config);
+  const empirical = await loadGate4Empirical(config);
 
   // Gate 3 context: the classified sensitivity is the same value gate_result records.
   const sensitivity = classifySensitivity(candidate.payload, candidate.domain, config);
@@ -354,6 +370,7 @@ export async function promoteCandidate(
       sourceEventExists,
       egress,
       existingConflict,
+      empirical,
     },
     config,
     { overrideReview: opts.review !== undefined },

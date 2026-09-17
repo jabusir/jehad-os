@@ -14,6 +14,12 @@
 // Cycle note: cycles in the blocked_by graph (A blocked_by B, B blocked_by A)
 // are reported per-item (cycle: true) — the walk terminates via a visited set,
 // so no infinite loop.
+//
+// Date-trust audit (owner directive 2026-09-17): nothing here flags overdue —
+// the stalled derivation is progress-based (last meaningful event/updated_at)
+// and carries no due-date semantics, so no temporal trust gate applies. The
+// overdue gate and the needsReview: "ambiguous_due_date" surface live on the
+// waiting items (waiting.ts); review-queue/briefs consume them there.
 
 import { itemKey, toIso, type QueryExecutor } from "./executor.js";
 import { resolveItems, type ItemInfo, type ItemRef } from "./items.js";
