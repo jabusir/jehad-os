@@ -148,6 +148,7 @@ export function registerHarnessRoutes(
       const notification = await claimNextApprovedNotification(db, {
         claimedBy: principal.id,
         actor: actorFor(request),
+        grantId: request.harnessGrantId ?? null,
       });
       return await reply.code(200).send({ notification });
     },
@@ -166,6 +167,7 @@ export function registerHarnessRoutes(
         const notification = await markDelivered(db, id, {
           deliveredBy: principal.id,
           actor: actorFor(request),
+          grantId: request.harnessGrantId ?? null,
         });
         return await reply.code(200).send({ notification });
       } catch (err) {

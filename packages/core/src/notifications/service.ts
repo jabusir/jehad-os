@@ -349,6 +349,8 @@ export interface ClaimInput {
   /** Claiming harness principal id. */
   readonly claimedBy: string;
   readonly actor?: string;
+  /** Capability-grant id that authorized the claim (audit traceability). */
+  readonly grantId?: string | null;
   readonly now?: () => Date;
 }
 
@@ -395,6 +397,7 @@ export async function claimNextApprovedNotification(
     actor: input.actor ?? `principal:${input.claimedBy}`,
     action: "notification.claimed",
     reversible: true,
+    grantId: input.grantId ?? null,
     outputsRef: JSON.stringify({ notificationId: notification.id, claimedBy: input.claimedBy }),
   });
   return notification;
@@ -404,6 +407,8 @@ export interface MarkDeliveredInput {
   /** Reporting harness principal id. */
   readonly deliveredBy: string;
   readonly actor?: string;
+  /** Capability-grant id that authorized the delivery (audit traceability). */
+  readonly grantId?: string | null;
   readonly now?: () => Date;
 }
 
@@ -461,6 +466,7 @@ export async function markDelivered(
     actor: input.actor ?? `principal:${input.deliveredBy}`,
     action: "notification.delivered",
     reversible: false,
+    grantId: input.grantId ?? null,
     outputsRef: JSON.stringify({ notificationId, deliveredBy: input.deliveredBy }),
   });
   return notification;
