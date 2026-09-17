@@ -32,9 +32,11 @@ describe.skipIf(!TEST_DATABASE_URL)("extraction → promotion seam (integration)
 
   const fakeProvider = {
     id: "fake-eval",
-    async complete(request: any) {
+    // biome-ignore lint/suspicious/noExplicitAny: test double for the port
+    async complete(request: unknown) {
+      const req = request as { provider: string };
       return {
-        provider: request.provider,
+        provider: req.provider,
         model: "fake",
         promptVersion: "seam-test",
         text: JSON.stringify({

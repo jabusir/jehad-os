@@ -75,6 +75,12 @@ importers:
       '@jehad/adapters':
         specifier: workspace:*
         version: link:../../packages/adapters
+      '@jehad/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      pg:
+        specifier: ^8.13.0
+        version: 8.23.0
     devDependencies:
       '@jehad/api':
         specifier: workspace:*
@@ -85,9 +91,9 @@ importers:
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.3
-      pg:
-        specifier: ^8.13.0
-        version: 8.23.0
+      '@types/pg':
+        specifier: ^8.11.0
+        version: 8.23.1
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
@@ -178,9 +184,15 @@ importers:
       '@jehad/adapters':
         specifier: workspace:*
         version: link:../adapters
+      '@jehad/core':
+        specifier: workspace:*
+        version: link:../core
       inngest:
         specifier: ^4.20.0
         version: 4.20.0(@opentelemetry/core@2.11.0(@opentelemetry/api@1.9.1))(fastify@5.12.5)(supports-color@7.2.0)(typescript@5.9.3)(zod@4.6.5)
+      pg:
+        specifier: ^8.13.0
+        version: 8.23.0
     devDependencies:
       '@jehad/db':
         specifier: workspace:*
@@ -191,9 +203,6 @@ importers:
       '@types/pg':
         specifier: ^8.11.0
         version: 8.23.1
-      pg:
-        specifier: ^8.13.0
-        version: 8.23.0
       tsx:
         specifier: ^4.19.0
         version: 4.23.13

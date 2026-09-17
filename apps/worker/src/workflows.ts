@@ -1,10 +1,9 @@
 /**
- * Worker-registered workflows (M3): infrastructure validation only.
- * Domain workflows arrive with the core services that own them; until
- * then this exercises the full serve/dispatch path end to end.
+ * Worker-registered workflows: infrastructure smoke (M3) + the scheduled
+ * brief workflows (M6B: morning brief 07:00 UTC, evening close 21:00 UTC).
  */
 
-import { defineWorkflow } from "@jehad/workflow";
+import { defineWorkflow, briefWorkflows } from "@jehad/workflow";
 
 export const smokeWorkflow = defineWorkflow({
   name: "smoke",
@@ -14,4 +13,4 @@ export const smokeWorkflow = defineWorkflow({
   },
 });
 
-export const workflows = [smokeWorkflow];
+export const workflows = [smokeWorkflow, ...briefWorkflows];
