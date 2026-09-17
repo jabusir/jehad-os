@@ -175,10 +175,28 @@ importers:
 
   packages/workflow:
     dependencies:
+      '@jehad/adapters':
+        specifier: workspace:*
+        version: link:../adapters
       inngest:
         specifier: ^4.20.0
         version: 4.20.0(@opentelemetry/core@2.11.0(@opentelemetry/api@1.9.1))(fastify@5.12.5)(supports-color@7.2.0)(typescript@5.9.3)(zod@4.6.5)
     devDependencies:
+      '@jehad/db':
+        specifier: workspace:*
+        version: link:../db
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.3
+      '@types/pg':
+        specifier: ^8.11.0
+        version: 8.23.1
+      pg:
+        specifier: ^8.13.0
+        version: 8.23.0
+      tsx:
+        specifier: ^4.19.0
+        version: 4.23.13
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
