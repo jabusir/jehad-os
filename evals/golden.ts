@@ -46,11 +46,11 @@ export function loadGoldenSet(path: string): GoldenSet {
     }
     const e = item.expected;
     if (
-      e.commitment_state === undefined ||
-      typeof e.commitment_state !== "string" ||
-      !COMMITMENT_STATES.includes(e.commitment_state)
+      e.commitment_state !== undefined &&
+      e.commitment_state !== null &&
+      (typeof e.commitment_state !== "string" || !COMMITMENT_STATES.includes(e.commitment_state))
     ) {
-      throw new Error(`golden set: item ${item.id}: commitment_state must be one of ${COMMITMENT_STATES.join("|")}`);
+      throw new Error(`golden set: item ${item.id}: commitment_state must be one of ${COMMITMENT_STATES.join("|")} or null`);
     }
     if (e.resolution_status === undefined || !RESOLUTION_STATUSES.includes(e.resolution_status)) {
       throw new Error(`golden set: item ${item.id}: resolution_status must be one of ${RESOLUTION_STATUSES.join("|")}`);

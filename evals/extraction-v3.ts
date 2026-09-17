@@ -17,7 +17,7 @@ import type { ModelProvider } from "@jehad/adapters";
 import { buildExtractionPrompt } from "@jehad/core";
 import type { EventEnvelope } from "@jehad/core";
 import type { CommitmentState } from "@jehad/core";
-import { normalizeTemporalExpression } from "./normalizer.js";
+import { DEFAULT_ANCHOR_TIMEZONE, normalizeTemporalExpression } from "@jehad/core";
 import type { Direction, EvalPrediction, TemporalBlock } from "./metrics.js";
 
 export class EvalParseError extends Error {
@@ -129,7 +129,11 @@ export function temporalBlockFor(
   temporalExpression: string | null,
   anchorIso: string,
 ): TemporalBlock {
-  const result = normalizeTemporalExpression(temporalExpression, anchorIso);
+  const result = normalizeTemporalExpression({
+    expression: temporalExpression,
+    anchorTime: anchorIso,
+    anchorTimezone: DEFAULT_ANCHOR_TIMEZONE,
+  });
   return {
     rawExpression: temporalExpression,
     normalizedTime: result.normalizedTime,

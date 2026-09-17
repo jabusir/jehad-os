@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 import { loadDefaultGoldenSet, GOLDEN_SET_VERSION } from "./golden.js";
-import { normalizeTemporalExpression } from "./normalizer.js";
+import { DEFAULT_ANCHOR_TIMEZONE, normalizeTemporalExpression } from "@jehad/core";
 import { COMMITMENT_STATES } from "./metrics.js";
 
 const ANCHOR = "2026-09-17T09:00:00.000Z";
@@ -36,7 +36,14 @@ describe("golden-set.json v2 invariants", () => {
   it("uses the fixed anchor and the v2 expected shape on every item", () => {
     for (const item of set.items) {
       expect(item.occurredAt).toBe(ANCHOR);
-      expect(COMMITMENT_STATES).toContain(item.expected.commitment_state);
+      // Stance is recorded only where an obligation is expressed (null
+      // otherwise); is=true requires an open stance.
+      if (item.expected.commitment_state !== null) {
+        expect(COMMITMENT_STATES).toContain(item.expected.commitment_state);
+      }
+      if (item.expected.is_commitment) {
+        expect(["active", "renegotiated"]).toContain(item.expected.commitment_state);
+      }
       expect(["resolved", "ambiguous", "unsupported", "none"]).toContain(item.expected.resolution_status);
       if (item.expected.resolution_status === "resolved") {
         expect(item.expected.resolved_due_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
@@ -78,7 +85,11 @@ describe("golden-set.json v2 invariants", () => {
   it("every golden triple is exactly what the reference normalizer produces from the golden expression", () => {
     const mismatches: string[] = [];
     for (const item of set.items) {
-      const result = normalizeTemporalExpression(item.expected.temporal_expression ?? null, item.occurredAt);
+      const result = normalizeTemporalExpression({
+        expression: item.expected.temporal_expression ?? null,
+        anchorTime: item.occurredAt,
+        anchorTimezone: DEFAULT_ANCHOR_TIMEZONE,
+      });
       if (
         result.normalizedTime !== (item.expected.resolved_due_date ?? null) ||
         result.resolutionStatus !== item.expected.resolution_status

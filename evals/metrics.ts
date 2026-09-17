@@ -199,8 +199,14 @@ export function computeEvalReport(
       throw new Error(`computeEvalReport: no prediction for golden item ${item.id}`);
     }
     const expected = item.expected;
+    // OPEN is derived from stance, not from is_commitment alone (owner
+    // directive): only active/renegotiated obligations land as open
+    // commitments. A model "is=true, state=completed" is NOT an open-prediction.
     const real = expected.is_commitment;
-    const said = predicted.isCommitment;
+    const predictedState = predicted.commitmentState ?? (predicted.isCommitment ? "active" : null);
+    const said =
+      predicted.isCommitment === true &&
+      (predictedState === "active" || predictedState === "renegotiated");
 
     if (real && said) tp += 1;
     else if (!real && said) {
@@ -211,14 +217,22 @@ export function computeEvalReport(
       failures.push({ id: item.id, category: item.category, kind: "false-negative" });
     } else tn += 1;
 
-    // Commitment state: scored on EVERY item (golden v2 always defines it).
-    if (expected.commitment_state !== undefined) {
+    // Commitment state: scored ONLY where the golden records a stance (an
+    // obligation was expressed). No obligation -> no stance to get right;
+    // a model emitting a state where golden has none is penalized.
+    if (expected.commitment_state !== undefined && expected.commitment_state !== null) {
       const entry = stateCounts.get(expected.commitment_state) ?? { correct: 0, total: 0 };
       entry.total += 1;
-      const stateOk = predicted.commitmentState === expected.commitment_state;
+      const stateOk = predictedState === expected.commitment_state;
       if (stateOk) entry.correct += 1;
       else failures.push({ id: item.id, category: item.category, kind: "commitment-state" });
       stateCounts.set(expected.commitment_state, entry);
+    } else if (predictedState !== null && predictedState !== undefined) {
+      // Model claims a stance where the golden says no obligation exists.
+      const entry = stateCounts.get("none" as CommitmentState) ?? { correct: 0, total: 0 };
+      entry.total += 1;
+      failures.push({ id: item.id, category: item.category, kind: "commitment-state" });
+      stateCounts.set("none" as CommitmentState, entry);
     }
 
     // Confidence band: scored only on correctly classified items.

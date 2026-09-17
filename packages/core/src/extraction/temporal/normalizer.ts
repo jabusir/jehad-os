@@ -75,7 +75,16 @@ const MONTHS = [
   "december",
 ] as const;
 /** Undated hedges: recognized on purpose, never resolved (status ambiguous). */
-const VAGUE_MARKERS = ["sometime", "soon", "when i get to it", "next chance"] as const;
+const VAGUE_MARKERS = [
+  "sometime",
+  "soon",
+  "when i get to it",
+  "when i get a chance",
+  "when i can",
+  "eventually",
+  "at some point",
+  "next chance",
+] as const;
 const LATER_TODAY = [
   "later today",
   "this afternoon",
@@ -273,12 +282,20 @@ function matchRule(text: string, anchor: CivilDate): RuleMatch | "ambiguous" | n
     if (text.includes(marker)) return "ambiguous";
   }
 
+  // 2b. day-ambiguous qualifiers on week phrases: "early/late next week"
+  // pins no specific day — preserve ambiguity (owner directive).
+  if (/\b(early|late) (next|this|last) week\b/.test(text)) return "ambiguous";
+
   // 3. same-day references.
   if (LATER_TODAY.includes(text as (typeof LATER_TODAY)[number])) {
     return { method: "later-today", date: anchor };
   }
   if (text === "today") return { method: "today", date: anchor };
-  if (text === "tomorrow") return { method: "tomorrow", date: addDays(anchor, 1) };
+  // "tomorrow morning/afternoon/evening/night" — time-of-day is noise at
+  // date granularity; the date is still tomorrow.
+  if (/^(tomorrow|tmrw)\b/.test(text)) {
+    return { method: "tomorrow", date: addDays(anchor, 1) };
+  }
 
   // 4. "next <weekday>" — the week AFTER the upcoming one.
   for (let i = 0; i < WEEKDAYS.length; i += 1) {
@@ -294,12 +311,32 @@ function matchRule(text: string, anchor: CivilDate): RuleMatch | "ambiguous" | n
     }
   }
 
-  // 6. "in N days/weeks".
-  const inN = /\bin (\d+) (day|week)s?\b/.exec(text);
+  // 6. "in N days/weeks" — digits or word numbers ("in two weeks").
+  const inN = /\bin (a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+) (day|week)s?\b/.exec(text);
   if (inN !== null) {
-    const n = Number(inN[1]);
-    const days = inN[2] === "week" ? n * 7 : n;
-    return { method: inN[2] === "week" ? "in-n-weeks" : "in-n-days", date: addDays(anchor, days) };
+    const wordNums: Record<string, number> = {
+      a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5,
+      six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+    };
+    const n = /^\d+$/.test(inN[1]!) ? Number(inN[1]) : (wordNums[inN[1]!] ?? 0);
+    if (n > 0) {
+      const days = inN[2] === "week" ? n * 7 : n;
+      return { method: inN[2] === "week" ? "in-n-weeks" : "in-n-days", date: addDays(anchor, days) };
+    }
+  }
+
+  // 6b. "within N days/weeks" / "within a week" — deadline framing, same math.
+  const withinN = /\bwithin (a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+) (day|week)s?\b/.exec(text);
+  if (withinN !== null) {
+    const wordNums: Record<string, number> = {
+      a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5,
+      six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+    };
+    const n = /^\d+$/.test(withinN[1]!) ? Number(withinN[1]) : (wordNums[withinN[1]!] ?? 0);
+    if (n > 0) {
+      const days = withinN[2] === "week" ? n * 7 : n;
+      return { method: `within-n-${withinN[2] === "week" ? "weeks" : "days"}`, date: addDays(anchor, days) };
+    }
   }
 
   // 7. this weekend — the coming Saturday (today counts when it IS Saturday).
