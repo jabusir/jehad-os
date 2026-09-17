@@ -40,6 +40,7 @@ The edge node lives in a separate repo (`/Users/Shared/tito`).
 | `pnpm dev` | Run API + worker locally (builds first) |
 | `pnpm setup:db` | Create local `jehad` Postgres database (brew postgresql@16) |
 | `pnpm migrate` | Apply SQL migrations (lands M1 with packages/db) |
+| `pnpm eval` | Golden-set extraction eval, hermetic fake provider (M5B); live OpenRouter tier lands with M5A |
 
 ## Commit style
 

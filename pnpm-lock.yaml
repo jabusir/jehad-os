@@ -11,6 +11,12 @@ importers:
       '@eslint/js':
         specifier: ^9.20.0
         version: 9.39.5
+      '@jehad/adapters':
+        specifier: workspace:*
+        version: link:packages/adapters
+      '@jehad/core':
+        specifier: workspace:*
+        version: link:packages/core
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.3
