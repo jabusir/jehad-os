@@ -8,5 +8,6 @@ export * from "./model/index.js";
 export * from "./extraction/index.js";
 export * from "./promotion/index.js";
 export * from "./review/index.js";
+export * from "./escalations/index.js";
 export * from "./memory/candidate-contract.js";
 export * from "./queries/index.js";
