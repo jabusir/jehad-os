@@ -21,10 +21,11 @@ import {
 import { recordAudit, type SqlExecutor } from "./audit.js";
 import {
   assertAllowedByCeiling,
-  V1_AUTONOMY_POLICY,
+  resolveAutonomyPolicy,
   type AutonomyPolicy,
   type ExternalActionType,
 } from "./autonomy.js";
+import { verifyGrant, type GrantDenialReason } from "../policy/grants.js";
 
 export type IntentStatus = "proposed" | "approved" | "prepared" | "cancelled";
 
@@ -92,6 +93,28 @@ export class InvalidAttemptTransitionError extends Error {
   }
 }
 
+/**
+ * Raised when an outcome that certifies an observed effect (`succeeded`, and
+ * reconciliation's `reconciled`) is recorded without a non-empty providerRef
+ * — the audit trail must never claim an effect it cannot point at (T13).
+ */
+export class MissingProviderRefError extends Error {
+  constructor(attemptId: string, operation: string) {
+    super(`${operation} requires a non-empty providerRef (attempt ${attemptId})`);
+    this.name = "MissingProviderRefError";
+  }
+}
+
+/** Raised when startAttempt's capability token fails grant verification (M4). */
+export class GrantDeniedError extends Error {
+  readonly reason: GrantDenialReason;
+  constructor(intentId: string, reason: GrantDenialReason) {
+    super(`grant possession denied for intent ${intentId}: ${reason}`);
+    this.name = "GrantDeniedError";
+    this.reason = reason;
+  }
+}
+
 export interface CreateIntentInput {
   runId: string;
   actionType: ExternalActionType;
@@ -119,9 +142,25 @@ export interface ReconcileInput extends IntentRef {
   providerRef: string;
 }
 
+/**
+ * Dispatch input: possession of a capability grant is REQUIRED (plan §15 M4).
+ * `grantToken` is the opaque token minted by issueGrant; `principalId` is the
+ * authenticated principal presenting it.
+ */
+export interface StartAttemptInput extends IntentRef {
+  grantToken: string;
+  principalId: string;
+}
+
 export interface ActionServiceOptions {
-  /** Overrides the hardcoded v1 autonomy ceiling (policy.yaml lands with M4A). */
+  /**
+   * Explicit policy override (tests / operator pinning). When omitted, the
+   * service loads the ceiling from policy.yaml (default repo-root path or
+   * `policyPath`); the hardcoded V1 constant is only a missing-file fallback.
+   */
   policy?: AutonomyPolicy;
+  /** Overrides the default policy.yaml path (tests). */
+  policyPath?: string;
 }
 
 const INTENT_COLUMNS =
@@ -173,17 +212,31 @@ function jsonRef(value: unknown): string | null {
 export class ActionService {
   private readonly db: SqlExecutor;
   private readonly provider: ActionProvider;
-  private readonly policy: AutonomyPolicy;
+  private readonly explicitPolicy: AutonomyPolicy | undefined;
+  private readonly policyPath: string | undefined;
+  private policyLoad: Promise<AutonomyPolicy> | undefined;
 
   constructor(db: SqlExecutor, provider: ActionProvider, options: ActionServiceOptions = {}) {
     this.db = db;
     this.provider = provider;
-    this.policy = options.policy ?? V1_AUTONOMY_POLICY;
+    this.explicitPolicy = options.policy;
+    this.policyPath = options.policyPath;
+  }
+
+  /**
+   * ADR-0003: policy.yaml is the single source of the ceiling. Explicit
+   * policy wins; otherwise load the file (fallback constant + warning only
+   * when the file is missing — autonomy.test.ts pins file == fallback).
+   */
+  private resolvePolicy(): Promise<AutonomyPolicy> {
+    if (this.explicitPolicy !== undefined) return Promise.resolve(this.explicitPolicy);
+    this.policyLoad ??= resolveAutonomyPolicy(this.policyPath);
+    return this.policyLoad;
   }
 
   async createIntent(input: CreateIntentInput): Promise<ActionIntentRecord> {
     try {
-      assertAllowedByCeiling(this.policy, input.actionType);
+      assertAllowedByCeiling(await this.resolvePolicy(), input.actionType);
     } catch (err) {
       await recordAudit(this.db, {
         actor: input.actor,
@@ -281,17 +334,45 @@ export class ActionService {
   }
 
   /**
-   * Dispatch a new attempt of a prepared intent. Appends an attempt row
-   * (outcome 'executing') — the intent itself never enters an execution
-   * state. Writes the pre-effect audit entry (intent only — it proves
-   * intent, never completion), calls the provider, then records the
-   * observed outcome. A lost provider response yields outcome 'unknown'.
+   * Dispatch a new attempt of a prepared intent. Grant possession (plan §15
+   * M4) is verified BEFORE anything is written or dispatched: the presented
+   * capability token must resolve to a live grant for
+   * (principalId, `act:<provider>`, resource, domainId); a denial is a typed
+   * error plus an audit row, and no attempt row is created. On success the
+   * attempt row is appended (outcome 'executing') — the intent itself never
+   * enters an execution state. Writes the pre-effect audit entry (intent
+   * only — it proves intent, never completion), calls the provider, then
+   * records the observed outcome. A lost provider response yields outcome
+   * 'unknown'.
    */
-  async startAttempt(ref: IntentRef): Promise<ActionAttemptRecord> {
-    const intent = await this.getIntent(ref.intentId);
+  async startAttempt(input: StartAttemptInput): Promise<ActionAttemptRecord> {
+    const intent = await this.getIntent(input.intentId);
     if (intent.status !== "prepared") {
-      throw new InvalidIntentTransitionError(ref.intentId, intent.status, "executing");
+      throw new InvalidIntentTransitionError(input.intentId, intent.status, "executing");
     }
+    const capability = `act:${this.provider.id}`;
+    const decision = await verifyGrant(this.db, input.grantToken ?? "", {
+      principalId: input.principalId,
+      capability,
+      resource: intent.resource,
+      domainId: intent.domainId,
+    });
+    if (!decision.allowed) {
+      await recordAudit(this.db, {
+        actor: input.actor,
+        action: "action.attempt.grant_denied",
+        reversible: true,
+        intentId: intent.id,
+        outputsRef: jsonRef({ reason: decision.reason, capability, resource: intent.resource }),
+      });
+      throw new GrantDeniedError(intent.id, decision.reason);
+    }
+    await this.db.query(
+      `UPDATE action_intents
+       SET grant_id = $2, updated_at = now()
+       WHERE id = $1 AND grant_id IS NULL`,
+      [intent.id, decision.grant.id],
+    );
     const history = await this.listAttempts(intent.id);
     const idempotencyKey =
       history[0]?.idempotencyKey ?? `idem_${randomUUID()}`;
@@ -314,7 +395,7 @@ export class ActionService {
 
     // Pre-effect entry: intent only, no attempt reference, no outcome claim.
     await recordAudit(this.db, {
-      actor: ref.actor,
+      actor: input.actor,
       action: "action.attempt.pre_effect",
       reversible: false,
       intentId: intent.id,
@@ -337,7 +418,7 @@ export class ActionService {
       });
       return await this.recordOutcome({
         intentId: intent.id,
-        actor: ref.actor,
+        actor: input.actor,
         attemptId: attempt.id,
         outcome: response.status === "succeeded" ? "succeeded" : "failed",
         providerRef: response.providerRef,
@@ -347,7 +428,7 @@ export class ActionService {
       if (err instanceof ProviderResponseLostError) {
         return await this.recordOutcome({
           intentId: intent.id,
-          actor: ref.actor,
+          actor: input.actor,
           attemptId: attempt.id,
           outcome: "unknown",
           error: err.message,
@@ -355,7 +436,7 @@ export class ActionService {
       }
       return await this.recordOutcome({
         intentId: intent.id,
-        actor: ref.actor,
+        actor: input.actor,
         attemptId: attempt.id,
         outcome: "failed",
         error: err instanceof Error ? err.message : String(err),
@@ -365,6 +446,11 @@ export class ActionService {
 
   /** executing → succeeded | failed | unknown. Terminal outcomes are immutable. */
   async recordOutcome(input: RecordOutcomeInput): Promise<ActionAttemptRecord> {
+    // T13 honesty rule: a `succeeded` outcome certifies an observed effect —
+    // it must point at the provider's own reference for that effect.
+    if (input.outcome === "succeeded" && (typeof input.providerRef !== "string" || input.providerRef.length === 0)) {
+      throw new MissingProviderRefError(input.attemptId, "recordOutcome(outcome='succeeded')");
+    }
     const result = await this.db.query(
       `UPDATE action_attempts
        SET outcome = $2, provider_ref = $3, error = $4, finished_at = now(), updated_at = now()
@@ -400,6 +486,11 @@ export class ActionService {
 
   /** unknown → reconciled: the reconciliation workflow records the provider ref. */
   async reconcileAttempt(input: ReconcileInput): Promise<ActionAttemptRecord> {
+    // Reconciliation resolves an ambiguous effect by NAMING it — an empty
+    // ref would make 'reconciled' an unbacked success claim (T13).
+    if (typeof input.providerRef !== "string" || input.providerRef.trim().length === 0) {
+      throw new MissingProviderRefError(input.attemptId, "reconcileAttempt");
+    }
     const result = await this.db.query(
       `UPDATE action_attempts
        SET outcome = 'reconciled', provider_ref = $2, error = NULL, finished_at = now(), updated_at = now()

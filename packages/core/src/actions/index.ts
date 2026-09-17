@@ -7,4 +7,7 @@ export {
   ActionProhibitedError,
   V1_AUTONOMY_POLICY,
   assertAllowedByCeiling,
+  autonomyPolicyFromPolicyV1,
+  defaultPolicyYamlPath,
+  resolveAutonomyPolicy,
 } from "./autonomy.js";
