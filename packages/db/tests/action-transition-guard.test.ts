@@ -107,7 +107,7 @@ describe.skipIf(!TEST_DATABASE_URL)("002 action_attempts outcome guard (integrat
     const id = await insertAttempt("succeeded");
 
     const rolled = await migrateDown(db.pool, { to: "001_schema_core" });
-    expect(rolled).toEqual(["002_action_transition_guard"]);
+    expect(rolled).toEqual(["003_evidence_links", "002_action_transition_guard"]);
 
     // Without the trigger, the regressed write goes through — proving the
     // guard (not something else) was doing the blocking.
