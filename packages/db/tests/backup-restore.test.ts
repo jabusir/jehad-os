@@ -189,6 +189,10 @@ describe.skipIf(!TEST_DATABASE_URL)("backup → restore (integration)", () => {
     const migrations = await pool.query<{ name: string }>(
       "SELECT name FROM schema_migrations ORDER BY name",
     );
-    expect(migrations.rows.map((r) => r.name)).toEqual(["000_bootstrap_auth", "001_schema_core"]);
+    expect(migrations.rows.map((r) => r.name)).toEqual([
+      "000_bootstrap_auth",
+      "001_schema_core",
+      "002_action_transition_guard",
+    ]);
   });
 });

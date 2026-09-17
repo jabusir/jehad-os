@@ -17,7 +17,7 @@ const TABLES_001 = [
   "capability_grants", "audit_log", "escalations", "model_calls",
 ] as const;
 
-const ALL_MIGRATIONS = ["000_bootstrap_auth", "001_schema_core"] as const;
+const ALL_MIGRATIONS = ["000_bootstrap_auth", "001_schema_core", "002_action_transition_guard"] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
   const result = await pool.query<{ table_name: string }>(
@@ -51,6 +51,15 @@ describe("migration files (fs only)", () => {
     expect(bootstrap).toBeDefined();
     expect(bootstrap!.sql).toMatch(/CREATE TABLE principals\b/);
     expect(bootstrap!.downSql).toMatch(/DROP TABLE IF EXISTS principals\b/);
+  });
+
+  it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {
+    const migrations = await listMigrations();
+    const guard = migrations.find((m) => m.name === "002_action_transition_guard");
+    expect(guard).toBeDefined();
+    expect(guard!.sql).toMatch(/CREATE TRIGGER action_attempts_outcome_guard_trigger/);
+    expect(guard!.downSql).toMatch(/DROP TRIGGER IF EXISTS action_attempts_outcome_guard_trigger/);
+    expect(guard!.downSql).toMatch(/DROP FUNCTION IF EXISTS action_attempts_outcome_guard/);
   });
 });
 
