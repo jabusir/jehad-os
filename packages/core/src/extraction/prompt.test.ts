@@ -15,7 +15,7 @@ describe("buildExtractionPrompt", () => {
     // The verbatim text rides inside the JSON-encoded capture block.
     expect(prompt).toContain('"text":"I\'ll send Jehad the migration plan Friday."');
     // Third-party rule is stated in the prompt (docs/evals.md hard-case spec).
-    expect(prompt).toContain("John said yesterday");
+    expect(prompt).toContain("John said he would send the deck to the committee");
   });
 
   it("escapes capture content so it cannot forge the closing tag (T1)", () => {

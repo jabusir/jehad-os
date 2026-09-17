@@ -22,6 +22,7 @@
  */
 
 import path from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createOpenRouterProvider } from "@jehad/adapters";
@@ -275,7 +276,22 @@ function print(result: LiveEvalSuccess): void {
   }
 }
 
+/** Minimal .env loader (no dep): KEY=VALUE lines; env wins over file. */
+function loadDotEnv(file: string): void {
+  if (!existsSync(file)) return;
+  const lineRe = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    const match = lineRe.exec(line.trim());
+    const key = match?.[1];
+    const value = match?.[2];
+    if (key !== undefined && value !== undefined && process.env[key] === undefined) {
+      process.env[key] = value;
+    }
+  }
+}
+
 async function main(): Promise<number> {
+  loadDotEnv(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.env"));
   const result = await runLiveEval({
     apiKey: process.env.OPENROUTER_API_KEY ?? "",
     fakeLive: process.env.EVAL_FAKE_LIVE === "1",
