@@ -2,19 +2,21 @@ import { pathToFileURL } from "node:url";
 import Fastify from "fastify";
 import { setupAuth } from "./auth.js";
 import { registerEventRoutes } from "./routes/events.js";
-import type { SqlExecutor } from "@jehad/db";
+import { registerReviewRoutes } from "./routes/review.js";
+import type { PromotionDb } from "@jehad/core";
 
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = 3000;
 
 export interface AppOptions {
   /**
-   * Principal store. When provided, EVERY route except /healthz requires an
-   * authenticated principal (ADR-0009 — the API never exists unauthenticated;
-   * loopback is a network boundary, not identity). Omit only for tooling that
-   * never binds a port (none today).
+   * Principal + state store. When provided, EVERY route except /healthz
+   * requires an authenticated principal (ADR-0009 — the API never exists
+   * unauthenticated; loopback is a network boundary, not identity). Omit
+   * only for tooling that never binds a port (none today). Structural
+   * pg.Pool (query + connect — review/promotion paths run transactions).
    */
-  db?: SqlExecutor;
+  db?: PromotionDb;
 }
 
 export async function buildApp(opts: AppOptions = {}) {
@@ -23,6 +25,7 @@ export async function buildApp(opts: AppOptions = {}) {
   if (opts.db !== undefined) {
     setupAuth(app, { db: opts.db, publicPaths: ["/healthz"] });
     registerEventRoutes(app, { db: opts.db });
+    registerReviewRoutes(app, { db: opts.db });
   }
 
   app.get("/healthz", async () => ({ ok: true }) as const);
