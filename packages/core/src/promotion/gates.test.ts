@@ -6,7 +6,13 @@
 import { describe, expect, it } from "vitest";
 import { ModelEgressPolicyRegistry } from "../egress/index.js";
 import type { EgressDecision } from "../egress/index.js";
-import type { ProposedClass } from "../memory/candidate-contract.js";import { DEFAULT_PROMOTION_GATE_CONFIG, type PromotionGateConfig } from "./config.js";
+import type { ProposedClass } from "../memory/candidate-contract.js";
+import {
+  DEFAULT_PROMOTION_GATE_CONFIG,
+  PromotionConfigError,
+  validatePromotionGateConfig,
+  type PromotionGateConfig,
+} from "./config.js";
 import {
   classifySensitivity,
   evaluateGates,
@@ -387,6 +393,113 @@ describe("gate 5 — truth semantics (T14)", () => {
     );
     expect(result.action).toBe("in_review");
     expect(result.reason).toBe("invalid_write_payload");
+  });
+});
+
+describe("gate 4 — policy confidence (decalibration directive 2026-09-17)", () => {
+  const EMPIRICAL = {
+    updatedAt: "2026-09-17T00:00:00.000Z",
+    byClass: { commitment: 0.81 },
+    source: "test",
+  };
+
+  it("model confidence 0.95 capped at empirical 0.81 fails a 0.9 action threshold → review", () => {
+    const config: PromotionGateConfig = {
+      ...CONFIG,
+      gate4Confidence: {
+        ...CONFIG.gate4Confidence,
+        minByClass: { commitment: 0.9 },
+        empiricalPrecisionPath: "evals/.empirical-precision.json",
+      },
+    };
+    const result = evaluateGates(
+      makeInput({
+        candidate: makeCandidate({
+          proposedClass: "commitment",
+          assertionKind: "user_declared",
+          payload: { counterpartyText: "Acme", description: "d" },
+          confidence: 0.95,
+        }),
+        // The pipeline injects the parsed file; gates stay pure.
+        empirical: EMPIRICAL,
+      }),
+      config,
+    );
+    expect(result.action).toBe("in_review");
+    expect(result.gate).toBe(4);
+    expect(result.reason).toBe("low_confidence");
+    expect(result.message).toContain("policy confidence 0.81");
+    expect(result.confidencePolicy).toEqual({ model: 0.95, policy: 0.81, cap: 0.81 });
+  });
+
+  it("configured-but-missing empirical file fails closed to the 0.5 action cap", () => {
+    const config: PromotionGateConfig = {
+      ...CONFIG,
+      gate4Confidence: { ...CONFIG.gate4Confidence, empiricalPrecisionPath: "evals/.empirical-precision.json" },
+    };
+    const result = evaluateGates(
+      makeInput({
+        candidate: makeCandidate({
+          proposedClass: "commitment",
+          assertionKind: "user_declared",
+          payload: { counterpartyText: "Acme", description: "d" },
+          confidence: 0.95,
+        }),
+        empirical: null,
+      }),
+      config,
+    );
+    expect(result.action).toBe("in_review");
+    expect(result.reason).toBe("low_confidence");
+    expect(result.confidencePolicy).toEqual({ model: 0.95, policy: 0.5, cap: 0.5 });
+  });
+
+  it("an empirical cap above the model claim never boosts confidence", () => {
+    const result = evaluateGates(
+      makeInput({
+        candidate: makeCandidate({
+          proposedClass: "commitment",
+          assertionKind: "user_declared",
+          payload: { counterpartyText: "Acme", description: "d" },
+          confidence: 0.65,
+        }),
+        empirical: { ...EMPIRICAL, byClass: { commitment: 0.99 } },
+      }),
+      { ...CONFIG, gate4Confidence: { ...CONFIG.gate4Confidence, empiricalPrecisionPath: "x" } },
+    );
+    expect(result.action).toBe("promoted");
+    expect(result.confidencePolicy).toEqual({ model: 0.65, policy: 0.65, cap: null });
+  });
+
+  it("no empirical source configured keeps the legacy raw-confidence gate", () => {
+    const result = evaluateGates(
+      makeInput({
+        candidate: makeCandidate({
+          proposedClass: "commitment",
+          assertionKind: "user_declared",
+          payload: { counterpartyText: "Acme", description: "d" },
+          confidence: 0.95,
+        }),
+      }),
+      CONFIG,
+    );
+    expect(result.action).toBe("promoted");
+    expect(result.confidencePolicy).toBeNull();
+  });
+
+  it("config validation rejects an invalid empiricalPrecisionPath", () => {
+    expect(() =>
+      validatePromotionGateConfig({
+        ...CONFIG,
+        gate4Confidence: { ...CONFIG.gate4Confidence, empiricalPrecisionPath: 42 as unknown as string },
+      }),
+    ).toThrow(PromotionConfigError);
+    expect(() =>
+      validatePromotionGateConfig({
+        ...CONFIG,
+        gate4Confidence: { ...CONFIG.gate4Confidence, empiricalPrecisionPath: "" },
+      }),
+    ).toThrow(PromotionConfigError);
   });
 });
 

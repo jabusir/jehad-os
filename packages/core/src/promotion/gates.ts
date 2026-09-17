@@ -17,6 +17,7 @@ import type {
   CommitmentState,
   ProposedClass,
 } from "../memory/candidate-contract.js";
+import { policyConfidence, type EmpiricalPrecision } from "../trust/index.js";
 import type { PromotionGateConfig } from "./config.js";
 
 /** The candidate as the gate sees it (contract shape + row identity). */
@@ -60,6 +61,14 @@ export interface GateEvaluationInput {
   readonly egress: EgressDecision;
   /** Gate 4: newest canonical record for the same conflict key, if any. */
   readonly existingConflict: ExistingConflictRecord | null;
+  /**
+   * Gate 4 (decalibration directive): the injected empirical precision map
+   * (parsed by the pipeline from gate4Confidence.empiricalPrecisionPath).
+   * undefined = no empirical source configured (legacy raw-confidence gate);
+   * null = source configured but the file is missing (fails closed to the
+   * 0.5 action cap). Gates stay pure — no IO here.
+   */
+  readonly empirical?: EmpiricalPrecision | null;
 }
 
 export type GateNumber = 1 | 2 | 3 | 4 | 5;
@@ -93,6 +102,16 @@ export interface ConflictInfo {
   readonly material: boolean;
 }
 
+/** Gate 4 audit: how raw model confidence became policy confidence. */
+export interface ConfidencePolicyInfo {
+  /** The model's raw (uncalibrated) claim. */
+  readonly model: number;
+  /** The number the threshold was applied to. */
+  readonly policy: number;
+  /** The empirical cap applied, when any. */
+  readonly cap: number | null;
+}
+
 /** The gate pipeline's verdict — everything gate_result persists. */
 export interface GateEvaluation {
   readonly action: PromotionAction;
@@ -108,6 +127,8 @@ export interface GateEvaluation {
   readonly canonicalWrite: boolean;
   /** Human-readable routing note (e.g. "episodic: canonical store is the event log"). */
   readonly note: string | null;
+  /** Gate 4 decalibration audit; null when no empirical source is active. */
+  readonly confidencePolicy: ConfidencePolicyInfo | null;
 }
 
 /**
@@ -254,6 +275,7 @@ export function evaluateGates(
     conflict: null as ConflictInfo | null,
     canonicalWrite: false,
     note: null as string | null,
+    confidencePolicy: null as ConfidencePolicyInfo | null,
   };
 
   // ---- Gate 1: provenance attached ------------------------------------
@@ -318,16 +340,38 @@ export function evaluateGates(
   }
 
   // ---- Gate 4: confidence + conflict -----------------------------------
+  // Decalibration directive (2026-09-17): when an empirical source is
+  // configured, the threshold applies to POLICY confidence — the model's
+  // claim capped by observed precision — never to the raw number.
   const g4 = config.gate4Confidence;
+  const empiricalActive = input.empirical !== undefined || g4.empiricalPrecisionPath !== null;
+  const effectiveConfidence = empiricalActive
+    ? policyConfidence(candidate.confidence, {
+        class: cls,
+        empirical: input.empirical ?? null,
+        purpose: "action",
+      })
+    : candidate.confidence;
+  if (empiricalActive) {
+    base.confidencePolicy = {
+      model: candidate.confidence,
+      policy: effectiveConfidence,
+      cap: effectiveConfidence < candidate.confidence ? effectiveConfidence : null,
+    };
+  }
   const minConfidence = g4.minByClass[cls] ?? g4.defaultMin;
-  if (candidate.confidence < minConfidence) {
+  if (effectiveConfidence < minConfidence) {
     if (opts.overrideReview) {
-      base.note = `low confidence ${candidate.confidence} < ${minConfidence} overridden by review approval`;
+      base.note = empiricalActive
+        ? `low policy confidence ${effectiveConfidence} < ${minConfidence} overridden by review approval`
+        : `low confidence ${candidate.confidence} < ${minConfidence} overridden by review approval`;
     } else {
       return review(
         4,
         "low_confidence",
-        `confidence ${candidate.confidence} below minimum ${minConfidence} for class "${cls}"`,
+        empiricalActive
+          ? `policy confidence ${effectiveConfidence} (model claimed ${candidate.confidence}, empirical-capped) below minimum ${minConfidence} for class "${cls}"`
+          : `confidence ${candidate.confidence} below minimum ${minConfidence} for class "${cls}"`,
         base,
       );
     }

@@ -293,3 +293,50 @@ egress-denial test in `pnpm test` (plan §13).
 | Cross-domain composition policy | invariant recorded | aggregation engine (cleanup §4) |
 
 Every row keeps the same posture at every phase: **deny by default**.
+
+---
+
+## 9. Confidence and date-trust policy (owner directive 2026-09-17)
+
+Two rules from the owner's 2026-09-17 directive, both mechanical denials of
+model autonomy over judgment-sensitive state.
+
+### 9.1 Decalibration: policy_confidence is empirical-capped
+
+**`model_confidence` is uncalibrated evidence.** A model reporting 0.95 is
+making a claim about itself, not a probability. `policy_confidence` — the only
+number thresholds may act on — is derived from empirical eval history, never
+copied from the model:
+
+```text
+policy_confidence = min(model_confidence, empirical_by_class ?? model_confidence)
+```
+
+- The empirical precision (observed precision of past predictions, from
+  `evals/.empirical-precision.json` or derived from a live-run report) CAPS
+  the model's claim; it can never raise it.
+- Promotion gate 4 applies its thresholds to policy confidence whenever an
+  empirical source is configured (`gate4Confidence.empiricalPrecisionPath`).
+  **Never build "confidence > 0.9 → auto-promote" on raw model numbers.**
+- Fail-closed rules: a configured-but-missing empirical source caps
+  action-driving decisions at a conservative 0.5 (display-only numbers stay
+  raw); a malformed source throws. Gates stay pure — the pipeline loads the
+  source and injects the caps; `gate_result` records the model/policy/cap
+  audit trail.
+
+### 9.2 Date trust: three tiers for due dates
+
+Free-text dates never autonomously drive overdue logic. A commitment's
+`temporal` provenance (`TemporalProvenance`; extraction contract) places its
+due date in one of three tiers:
+
+| Tier | Provenance | Overdue automation |
+| --- | --- | --- |
+| **calendar-native** | `resolutionStatus="resolved"`, `resolutionMethod="calendar-native"` — structured calendar time | trusted |
+| **normalized** | resolved by the deterministic normalizer with `resolutionConfidence ≥ 0.9` (configurable) | confidence-gated |
+| **review** | ambiguous, unsupported, contradictory, malformed | never; surfaced as `needsReview: "ambiguous_due_date"` |
+
+Absent temporal provenance — legacy rows, or schemas before the `commitments.temporal`
+column lands — follows the strictest applicable rule: not calendar-native,
+never auto-overdue, `needsReview` instead. Queries and briefs may SHOW an
+untrusted past-due date for review; they must not ASSERT overdue from it.
