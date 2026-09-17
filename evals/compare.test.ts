@@ -1,7 +1,8 @@
-// Eval comparison unit tests (hermetic): metric diffing, per-category
-// pairing, report rendering (golden string — structure stability is the
-// contract the owner's step-2 decision relies on), cache round-trip
-// fidelity, and the fake-vs-fake zero-delta proof over the REAL pipeline.
+// Eval comparison unit tests (hermetic): metric diffing (incl. the new
+// normalizer + commitment-state rows), per-category pairing, report
+// rendering (golden string — structure stability is the contract the
+// owner's step-2 decision relies on), cache round-trip fidelity, and the
+// fake-vs-fake zero-delta proof over the REAL v3 eval pipeline.
 
 import { describe, expect, it } from "vitest";
 import { compareTiers, renderCompareConsole, renderCompareMarkdown, reportFileName } from "./compare.js";
@@ -23,34 +24,61 @@ const SYNTHETIC_ITEMS: readonly GoldenItem[] = [
     is_commitment: true,
     direction: "i_owe",
     counterparty: "Jehad",
-    due_date: "2026-09-18",
+    temporal_expression: "Friday",
+    resolved_due_date: "2026-09-18",
+    resolution_status: "resolved",
+    commitment_state: "active",
     confidence: [0.75, 1.0],
   }),
-  item("base-02", "base", { is_commitment: false }),
+  item("base-02", "base", {
+    is_commitment: false,
+    temporal_expression: null,
+    resolved_due_date: null,
+    resolution_status: "none",
+    commitment_state: "active",
+  }),
   item("hard-negation-01", "negation", {
     is_commitment: true,
     direction: "i_owe",
     counterparty: "Sara",
+    temporal_expression: null,
+    resolved_due_date: null,
+    resolution_status: "none",
+    commitment_state: "cancelled",
     confidence: [0.5, 0.7],
   }),
-  item("hard-injection-01", "prompt-injection", { is_commitment: false }),
+  item("hard-injection-01", "prompt-injection", {
+    is_commitment: false,
+    temporal_expression: null,
+    resolved_due_date: null,
+    resolution_status: "none",
+    commitment_state: "active",
+  }),
 ];
 
 function pred(overrides: Partial<EvalPrediction>): EvalPrediction {
-  return { isCommitment: false, direction: null, counterparty: null, dueDate: null, confidence: 0.2, ...overrides };
+  return {
+    isCommitment: false,
+    direction: null,
+    counterparty: null,
+    confidence: 0.2,
+    commitmentState: "active",
+    temporal: null,
+    ...overrides,
+  };
 }
 
 const HERMETIC_PREDS = new Map<string, EvalPrediction>([
-  ["base-01", pred({ isCommitment: true, direction: "i_owe", counterparty: "Jehad", dueDate: "2026-09-18", confidence: 0.9 })],
+  ["base-01", pred({ isCommitment: true, direction: "i_owe", counterparty: "Jehad", confidence: 0.9, temporal: { rawExpression: "Friday", normalizedTime: "2026-09-18", resolutionStatus: "resolved" } })],
   ["base-02", pred({ isCommitment: true, confidence: 0.8 })],
-  ["hard-negation-01", pred({ confidence: 0.3 })],
+  ["hard-negation-01", pred({ confidence: 0.3, commitmentState: "active" })], // state miss
   ["hard-injection-01", pred({})],
 ]);
 
 const LIVE_PREDS = new Map<string, EvalPrediction>([
-  ["base-01", pred({ isCommitment: true, direction: "i_owe", counterparty: "Jehad", dueDate: "2026-09-18", confidence: 0.9 })],
+  ["base-01", pred({ isCommitment: true, direction: "i_owe", counterparty: "Jehad", confidence: 0.9, temporal: { rawExpression: "Friday", normalizedTime: "2026-09-18", resolutionStatus: "resolved" } })],
   ["base-02", pred({ isCommitment: true, confidence: 0.8 })],
-  ["hard-negation-01", pred({ isCommitment: true, direction: "i_owe", counterparty: "Sara", confidence: 0.6 })],
+  ["hard-negation-01", pred({ isCommitment: true, direction: "i_owe", counterparty: "Sara", confidence: 0.6, commitmentState: "cancelled", temporal: { rawExpression: null, normalizedTime: null, resolutionStatus: "none" } })],
   ["hard-injection-01", pred({})],
 ]);
 
@@ -62,8 +90,9 @@ function tierRun(predictions: ReadonlyMap<string, EvalPrediction>, meta: TierMet
 const HERMETIC_META: TierMeta = {
   tier: "hermetic",
   provider: "eval-fake",
-  model: "eval-fake-heuristic-v1",
+  model: "eval-fake-heuristic-v2",
   ranAt: "2026-09-17T10:00:00.000Z",
+  goldenVersion: 2,
 };
 
 const LIVE_META: TierMeta = {
@@ -71,6 +100,7 @@ const LIVE_META: TierMeta = {
   provider: "openrouter",
   model: "openai/gpt-4o-mini",
   ranAt: "2026-09-17T10:05:00.000Z",
+  goldenVersion: 2,
 };
 
 function syntheticCompareInput() {
@@ -101,13 +131,16 @@ function syntheticCompareInput() {
 }
 
 describe("compareTiers", () => {
-  it("diffs fields, categories, and gates; flags non-identical tiers", () => {
+  it("diffs fields (incl. normalizer + state), categories, and gates; flags non-identical tiers", () => {
     const { hermetic, live } = syntheticCompareInput();
     const cmp = compareTiers(hermetic, live.run);
     const f1 = cmp.fields.find((f) => f.label === "F1")!;
     expect(f1.hermetic).toBeCloseTo(0.5);
     expect(f1.live).toBeCloseTo(0.8, 3);
     expect(f1.delta).toBeCloseTo(0.3, 3);
+    const stateAcc = cmp.fields.find((f) => f.label === "state acc")!;
+    expect(stateAcc.hermetic).toBeCloseTo(0.75);
+    expect(stateAcc.live).toBe(1);
     const negation = cmp.categories.find((c) => c.category === "negation")!;
     expect(negation.hermetic).toBe(0);
     expect(negation.live).toBe(1);
@@ -116,10 +149,11 @@ describe("compareTiers", () => {
     expect(cmp.gates.map((g) => [g.name, g.passed])).toEqual([
       ["overall-f1", true],
       ["action-precision", false],
+      ["commitment-state-accuracy", true],
     ]);
   });
 
-  it("fake-vs-fake over the REAL pipeline: numerically identical, zero delta everywhere, gates pass", async () => {
+  it("fake-vs-fake over the REAL v3 eval pipeline: numerically identical, zero delta everywhere, gates pass", async () => {
     const a = await runHermeticEval();
     const b = await runHermeticEval();
     const cmp = compareTiers(a, b);
@@ -137,8 +171,8 @@ describe("renderCompareMarkdown (golden structure)", () => {
     expect(markdown).toBe(`# Extraction eval report — live vs hermetic
 
 - Generated: 2026-09-17T10:06:00.000Z
-- Golden set: 4 items (v1)
-- Hermetic tier: eval-fake / eval-fake-heuristic-v1 — ran 2026-09-17T10:00:00.000Z
+- Golden set: 4 items (v2)
+- Hermetic tier: eval-fake / eval-fake-heuristic-v2 — ran 2026-09-17T10:00:00.000Z
 - Live tier: openrouter / openai/gpt-4o-mini — ran 2026-09-17T10:05:00.000Z — source: fresh run
 - Live spend: $0.0123 across 4 model_calls rows on isolated db \`jehad_test_evalive\` (0 error rows) · parse failures: none
 
@@ -150,11 +184,20 @@ describe("renderCompareMarkdown (golden structure)", () => {
 | precision | 0.500 | 0.667 | +0.167 |
 | recall | 0.500 | 1.000 | +0.500 |
 | FPR | 0.500 | 0.500 | 0.000 |
-| due-date acc | 1.000 | 1.000 | 0.000 |
+| due-date acc (e2e) | 1.000 | 1.000 | 0.000 |
+| normalizer acc | 1.000 | 1.000 | 0.000 |
+| state acc | 0.750 | 1.000 | +0.250 |
 | direction acc | 1.000 | 1.000 | 0.000 |
 | counterparty acc | 1.000 | 1.000 | 0.000 |
 | conf-in-band acc | 1.000 | 1.000 | 0.000 |
 | action-precision | 0.500 | 0.500 | 0.000 |
+
+## Commitment-state accuracy (per state; scored on every golden item)
+
+| State | n (H/L) | Hermetic | Live |
+| --- | --- | --- | --- |
+| active | 3/3 | 1.000 | 1.000 |
+| cancelled | 1/1 | 0.000 | 1.000 |
 
 ## Calibration (commitment predictions, bucketed)
 
@@ -186,10 +229,11 @@ describe("renderCompareMarkdown (golden structure)", () => {
 | --- | --- | --- | --- |
 | overall-f1 | >= 0.80 | 0.800 | PASS |
 | action-precision | >= 0.90 | 0.500 | FAIL |
+| commitment-state-accuracy | >= 0.80 | 1.000 | PASS |
 
 ## Verdict
 
-LIVE GATES FAIL — do NOT wire Calendar automation yet: the live tier must clear F1 ≥ 0.80 and action-precision ≥ 0.90 first.
+LIVE GATES FAIL — do NOT wire Calendar automation yet: the live tier must clear F1 ≥ 0.80, action-precision ≥ 0.90, and commitment-state accuracy ≥ 0.80 first.
 `);
   });
 
@@ -203,11 +247,12 @@ LIVE GATES FAIL — do NOT wire Calendar automation yet: the live tier must clea
 
   it("verdict flips to PASS when live gates clear", () => {
     const { hermetic } = syntheticCompareInput();
-    // All-correct high-confidence predictions: F1 1.0, action-precision 1.0.
+    // All-correct high-confidence predictions: F1 1.0, action-precision 1.0,
+    // state accuracy 1.0.
     const passingPreds = new Map<string, EvalPrediction>([
-      ["base-01", pred({ isCommitment: true, direction: "i_owe", counterparty: "Jehad", dueDate: "2026-09-18", confidence: 0.9 })],
+      ["base-01", pred({ isCommitment: true, direction: "i_owe", counterparty: "Jehad", confidence: 0.9, temporal: { rawExpression: "Friday", normalizedTime: "2026-09-18", resolutionStatus: "resolved" } })],
       ["base-02", pred({})],
-      ["hard-negation-01", pred({ isCommitment: true, direction: "i_owe", counterparty: "Sara", confidence: 0.9 })],
+      ["hard-negation-01", pred({ isCommitment: true, direction: "i_owe", counterparty: "Sara", confidence: 0.9, commitmentState: "cancelled", temporal: { rawExpression: null, normalizedTime: null, resolutionStatus: "none" } })],
       ["hard-injection-01", pred({})],
     ]);
     const passingLive = tierRun(passingPreds, LIVE_META);
@@ -218,7 +263,7 @@ LIVE GATES FAIL — do NOT wire Calendar automation yet: the live tier must clea
       generatedAt: "2026-09-17T10:06:00.000Z",
       liveFromCache: false,
     });
-    expect(markdown).toContain("LIVE GATES PASS — the live tier clears the step-2 bar");
+    expect(markdown).toContain("LIVE GATES PASS — the live tier clears the bar");
   });
 });
 
@@ -229,6 +274,7 @@ describe("renderCompareConsole", () => {
     const out = renderCompareConsole(cmp, true);
     expect(out).toMatch(/^ {2}metric\s+hermetic\s+live\s+Δ \(live−hermetic\)\s+\[live: cached \.last-live\.json\]$/m);
     expect(out).toMatch(/^ {2}F1\s+0\.500\s+0\.800\s+\+0\.300$/m);
+    expect(out).toMatch(/^ {2}state acc\s+0\.750\s+1\.000\s+\+0\.250$/m);
     expect(out).toMatch(/^\s\*negation\s+n=\s*1\s+0\.000\s+1\.000\s+\+1\.000$/m);
     expect(out).toMatch(/^\s\sbase\s+n=\s*2\s+0\.500\s+0\.500\s+0\.000$/m);
     expect(out).toMatch(/PASS {2}overall-f1 >= 0\.80 — live 0\.800$/m);
