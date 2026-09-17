@@ -78,7 +78,9 @@ describe.skipIf(!TEST_DATABASE_URL)("extraction service (integration)", () => {
       is_decision: false,
       direction: "i_owe",
       counterparty: "Jehad",
-      due_date: "2026-09-18",
+      temporal_expression: "Friday",
+      temporal_type: "relative",
+      commitment_state: "active",
       confidence: 0.93,
       description: "Send the migration plan",
     }));
@@ -96,11 +98,18 @@ describe.skipIf(!TEST_DATABASE_URL)("extraction service (integration)", () => {
     expect(row.assertion_kind).toBe("user_declared");
     expect(row.status).toBe("proposed");
     expect(row.gated_class).toBeNull(); // promotion is M5C's — never gated here
+    // occurredAt 2026-09-17 (Thursday) → deterministic weekday rule → 09-18.
     expect(row.payload).toMatchObject({
       kind: "commitment",
       direction: "i_owe",
       counterpartyText: "Jehad",
-      dueAt: "2026-09-18",
+      commitmentState: "active",
+      temporal: {
+        rawExpression: "Friday",
+        normalizedTime: "2026-09-18",
+        resolutionStatus: "resolved",
+        resolutionMethod: "weekday",
+      },
     });
     expect(row.provenance).toEqual({
       sourceEventId: envelope.id,
@@ -157,7 +166,9 @@ describe.skipIf(!TEST_DATABASE_URL)("extraction service (integration)", () => {
       is_decision: false,
       direction: null,
       counterparty: null,
-      due_date: null,
+      temporal_expression: null,
+      temporal_type: null,
+      commitment_state: null,
       confidence: 0.3,
       rationale: "third-party promise — the user is not a party",
     }));

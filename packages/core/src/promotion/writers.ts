@@ -4,7 +4,9 @@
  * model, and no write path exists outside these tables (schema v1):
  *
  *   commitment → commitments (+ optional counterparty entity link and
- *                relationship edge when the counterparty resolves as text)
+ *                relationship edge when the counterparty resolves as text;
+ *                carries the deterministic temporal block — due_at is the
+ *                NORMALIZED date only, status mapped from commitment_state)
  *   decision   → decisions
  *   preference / semantic claims / standalone assumptions → evidence rows
  *                (the claim primitive, review §20 — metadata marks class,
@@ -15,8 +17,14 @@
  *   episodic/working → no semantic write (the event log / harness own them)
  */
 
-import type { AssertionKind, ProposedClass } from "../memory/candidate-contract.js";
+import type {
+  AssertionKind,
+  ProposedClass,
+  TemporalProvenance,
+} from "../memory/candidate-contract.js";
 import type { ConflictInfo, GateEvaluation } from "./gates.js";
+import { commitmentStateFromPayload, commitmentStatusForState } from "./gates.js";
+import { normalizedTimeToInstant } from "../extraction/temporal/normalizer.js";
 import type { PromotionGateConfig } from "./config.js";
 
 /** Structural slice of a pg Pool client/Pool — no pg import in core. */
@@ -141,6 +149,35 @@ async function recordConflictEdge(
   );
 }
 
+/** The temporal block as stored (shape-validated TemporalProvenance), or null. */
+function temporalFromPayload(
+  payload: Readonly<Record<string, unknown>>,
+): TemporalProvenance | null {
+  const raw = payload.temporal;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const t = raw as Record<string, unknown>;
+  if (typeof t.anchorTime !== "string" || typeof t.anchorTimezone !== "string") return null;
+  return {
+    rawExpression: typeof t.rawExpression === "string" ? t.rawExpression : null,
+    anchorTime: t.anchorTime,
+    anchorTimezone: t.anchorTimezone,
+    normalizedTime: typeof t.normalizedTime === "string" ? t.normalizedTime : null,
+    resolutionStatus:
+      t.resolutionStatus === "resolved" ||
+      t.resolutionStatus === "ambiguous" ||
+      t.resolutionStatus === "unsupported" ||
+      t.resolutionStatus === "none"
+        ? t.resolutionStatus
+        : "none",
+    normalizerVersion: typeof t.normalizerVersion === "string" ? t.normalizerVersion : "",
+    resolutionConfidence:
+      typeof t.resolutionConfidence === "number" && Number.isFinite(t.resolutionConfidence)
+        ? t.resolutionConfidence
+        : 0,
+    resolutionMethod: typeof t.resolutionMethod === "string" ? t.resolutionMethod : null,
+  };
+}
+
 async function writeCommitment(
   tx: WriterSql,
   ctx: WriteContext,
@@ -165,10 +202,23 @@ async function writeCommitment(
     entityId = match.rows[0] !== undefined ? String(match.rows[0].id) : null;
   }
 
+  // Owner temporal directive 2026-09-17: due_at carries the NORMALIZED date
+  // only — never a model-resolved one, never a guess for ambiguous or
+  // unsupported expressions (those land null). Midnight is anchored in the
+  // temporal block's own timezone so overdue math matches the user's calendar.
+  const temporal = temporalFromPayload(ctx.payload);
+  const dueAt =
+    temporal !== null && temporal.resolutionStatus === "resolved" && temporal.normalizedTime !== null
+      ? normalizedTimeToInstant(temporal.normalizedTime, temporal.anchorTimezone)
+      : null;
+  // Commitment status comes from the extracted state: active/renegotiated →
+  // open (latest terms), completed → met, cancelled → void.
+  const status = commitmentStatusForState(commitmentStateFromPayload(ctx.payload));
+
   const inserted = await tx.query(
     `INSERT INTO commitments (domain_id, direction, counterparty_text, counterparty_entity_id, link_confidence,
-                              description, due_at, confidence, status, source_event_id, may_follow_up)
-     VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6, $7::timestamptz, $8, 'open', $9::uuid, $10)
+                              description, due_at, confidence, status, source_event_id, may_follow_up, temporal)
+     VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6, $7::timestamptz, $8, $9, $10::uuid, $11, $12::jsonb)
      RETURNING id`,
     [
       ctx.domainUuid,
@@ -177,10 +227,12 @@ async function writeCommitment(
       entityId,
       entityId !== null ? 1 : null,
       str(ctx.payload.description)!,
-      str(ctx.payload.dueAt),
+      dueAt,
       ctx.confidence,
+      status,
       ctx.sourceEventId,
       ctx.payload.mayFollowUp === true,
+      temporal === null ? null : JSON.stringify(temporal),
     ],
   );
   const commitmentId = String(inserted.rows[0]!.id);

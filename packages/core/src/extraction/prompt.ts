@@ -12,7 +12,7 @@
 import type { EventEnvelope } from "../events/envelope.js";
 
 /** Bumped on any prompt-shape change; recorded in candidate provenance (gate 1). */
-export const EXTRACTION_PROMPT_VERSION = "m5b-extraction-v2";
+export const EXTRACTION_PROMPT_VERSION = "m5b-extraction-v3";
 
 export interface ExtractionPrompt {
   readonly prompt: string;
@@ -33,29 +33,36 @@ Commitments are obligations BETWEEN the user and someone else, in either directi
 NOT commitments (is_commitment=false):
 - Pure third-party promises where NEITHER party is the user ("John said he would send it to the team" — John does not owe the user).
 - Quoted speech / forwarded email bodies, unless the speaker is addressing the user (rule (a) above).
-- Hypotheticals and conditionals: "if X, then I'll Y" is NOT a commitment until the condition actually resolves. This includes "should we", "assuming", "once approved" framings.
 - Jokes, hyperbole, flourishes.
-- Negations ("I won't", "cannot", "not going to").
-- Vague hedges ("maybe", "should", "we could", "sometime") with no concrete promise.
-- Historical/past commitments already completed long before the capture.
+- Vague hedges ("maybe", "we could", "should we") with no obligation expressed. An obligation with only a vague TIME ("I'll send it soon") IS a commitment — vagueness goes in temporal_type, never in is_commitment.
 - Email signatures and boilerplate.
 - Scheduled events and social plans with no owed action ("lunch with Mo", "call with the team", "meeting at 3") — these are calendar items, not obligations.
 
 Rules:
-- Renegotiated commitments: the LATEST terms count ("forget Friday, I'll send it Monday instead" -> the Monday commitment).
-- due_date resolution against capture_occurred_at: "today" = that date; "tomorrow" = +1 day; weekday names = the NEXT occurrence strictly AFTER the capture date; "this weekend"/"next week" = their next occurrence; explicit month-day dates = the NEXT future occurrence (if that date already passed this year, use next year). Output ISO YYYY-MM-DD; null when absent or too vague to pin down.
+- is_commitment stays true only when an obligation is EXPRESSED — including past-tense, conditional, or withdrawn ones. Those extract WITH their commitment_state; downstream routing decides what lands, not you.
+- commitment_state (required whenever is_commitment is true; use "active" when no other state fits):
+  - active: a standing obligation undertaken now ("I'll send it Monday").
+  - completed: already discharged ("I said I'd send it Friday, but I already did").
+  - historical: a PAST-TENSE REPORT of an obligation — "was supposed to", "had planned", "was going to", "told him last Friday I would". The obligation is being narrated, not undertaken.
+  - renegotiated: terms changed; the LATEST terms count ("forget Friday, Monday instead", "not Tuesday — I'll send it Thursday now").
+  - cancelled: withdrawn or negated ("I won't send it after all", "scratch that", "never mind the review").
+  - prospective: depends on a future trigger before it becomes standing ("once we kick off the project I'll order the parts", "when I'm back from the trip I'll file it").
+  - hypothetical: conditional framings ("if they approve it, I'll send it Tuesday", "assuming the budget lands", "once approved" plans). Extract them as commitments with state hypothetical — never drop them silently.
+- temporal_expression: the VERBATIM temporal phrase from the text ("Friday", "next Friday", "tomorrow", "in 3 days", "this weekend", "next week", "end of month", "April 15", "sometime next week"), or null when the text names no time. Do NOT resolve, compute, reformat, or complete dates — copy the phrase exactly; deterministic code resolves it against capture_occurred_at later. Include past phrases verbatim too ("last week").
+- temporal_type: "absolute" for explicit calendar dates ("April 15", "2026-10-01"); "relative" for phrases resolved against the capture time ("Friday", "tomorrow", "next week", "in 2 weeks", "this weekend", "end of month"); "vague" for undated hedges ("sometime", "soon", "when I get to it", "next chance"); null exactly when temporal_expression is null.
 - counterparty: the other party's name as written in the text; null when the text names none.
 - is_decision: true only when the capture records an explicit decision the user made (with question and chosen option when stated).
 - confidence: 0.0-1.0 — how confident you are that a real commitment/decision exists as classified.
 
 Examples:
-- "Dana will send me the invoice by Friday." -> is_commitment true, direction owes_me, counterparty Dana.
+- "Dana will send me the invoice by Friday." -> is_commitment true, direction owes_me, counterparty Dana, temporal_expression "Friday", temporal_type relative, commitment_state active.
 - "John said he would send the deck to the committee." -> is_commitment false (neither party is the user).
-- "If the client approves, I'll send the deposit within a week." -> is_commitment false (conditional).
-- "Don't forget: renew the domain by March 1." -> is_commitment true, direction i_owe.
+- "If the client approves, I'll send the deposit within a week." -> is_commitment true, direction i_owe, temporal_expression "within a week", temporal_type relative, commitment_state hypothetical.
+- "I was supposed to send it last week." -> is_commitment true, direction i_owe, temporal_expression "last week", temporal_type relative, commitment_state historical.
+- "Don't forget: renew the domain by March 1." -> is_commitment true, direction i_owe, temporal_expression "March 1", temporal_type absolute, commitment_state active.
 
 Respond with ONLY one JSON object, no prose, with exactly these keys:
-{"is_commitment": boolean, "is_decision": boolean, "direction": "i_owe"|"owes_me"|null, "counterparty": string|null, "due_date": "YYYY-MM-DD"|null, "confidence": number, "description": string|null, "question": string|null, "chosen": string|null, "rationale": string|null}`;
+{"is_commitment": boolean, "is_decision": boolean, "direction": "i_owe"|"owes_me"|null, "counterparty": string|null, "temporal_expression": string|null, "temporal_type": "relative"|"absolute"|"vague"|null, "commitment_state": "prospective"|"active"|"completed"|"historical"|"renegotiated"|"cancelled"|"hypothetical"|null, "confidence": number, "description": string|null, "question": string|null, "chosen": string|null, "rationale": string|null}`;
 
 export function buildExtractionPrompt(envelope: EventEnvelope): ExtractionPrompt {
   const text = envelope.payload.text;

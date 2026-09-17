@@ -6,6 +6,8 @@ export {
   type PromotionGateConfig,
 } from "./config.js";
 export {
+  commitmentStateFromPayload,
+  commitmentStatusForState,
   InvalidWritePayloadError,
   classifySensitivity,
   evaluateGates,

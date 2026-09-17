@@ -7,7 +7,9 @@
  *
  * Mapping rules (deterministic, auditable):
  * - isCommitment → one "commitment" candidate (payload mirrors the columns
- *   M5C will land in `commitments`).
+ *   M5C will land in `commitments`; the temporal block is built HERE by the
+ *   deterministic normalizer anchored at envelope.occurredAt, tz JEHAD_TZ
+ *   default "UTC" — the model never resolves dates).
  * - isDecision   → one "decision" candidate (question/chosen).
  * - neither      → one "discard" candidate — extraction ran and found
  *   nothing; the row preserves the run's provenance (every accepted capture
@@ -23,14 +25,43 @@
 import type { EventEnvelope } from "../events/envelope.js";
 import type {
   AssertionKind,
+  CommitmentState,
   MemoryCandidateContract,
   ProposedClass,
+  TemporalProvenance,
 } from "../memory/candidate-contract.js";
 import { EXTRACTION_PROMPT_VERSION } from "./prompt.js";
 import type { ExtractionDirection, ExtractionProposal } from "./parse.js";
+import {
+  DEFAULT_ANCHOR_TIMEZONE,
+  normalizeTemporalExpression,
+} from "./temporal/normalizer.js";
 
 /** Cap for the description fallback (the captured text itself). */
 const DESCRIPTION_MAX = 500;
+
+/**
+ * Anchor timezone for temporal normalization. Config via JEHAD_TZ (IANA name,
+ * e.g. "America/New_York"); default "UTC". Recorded inside every
+ * TemporalProvenance block so re-normalization is fully deterministic.
+ */
+export function anchorTimezone(): string {
+  const tz = process.env.JEHAD_TZ;
+  return typeof tz === "string" && tz.trim().length > 0 ? tz.trim() : DEFAULT_ANCHOR_TIMEZONE;
+}
+
+/** Deterministic resolution of the extracted expression against the capture time. */
+export function buildTemporalProvenance(
+  proposal: Pick<ExtractionProposal, "temporalExpression">,
+  envelope: EventEnvelope,
+  timezone: string = anchorTimezone(),
+): TemporalProvenance {
+  return normalizeTemporalExpression({
+    expression: proposal.temporalExpression,
+    anchorTime: envelope.occurredAt,
+    anchorTimezone: timezone,
+  });
+}
 
 export function assertionKindForSource(source: string): AssertionKind {
   if (source === "cli.capture") return "user_declared";
@@ -45,8 +76,10 @@ export interface CommitmentCandidatePayload {
   readonly direction: ExtractionDirection | null;
   readonly counterpartyText: string;
   readonly description: string;
-  /** ISO date (YYYY-MM-DD) or null — M5C converts to timestamptz on landing. */
-  readonly dueAt: string | null;
+  /** Deterministic temporal block (raw expression + normalized resolution). */
+  readonly temporal: TemporalProvenance;
+  /** Missing/invalid states default to active (a standing obligation). */
+  readonly commitmentState: CommitmentState;
   readonly confidence: number;
 }
 
@@ -92,7 +125,7 @@ function candidate(
 export function proposalToCandidates(
   proposal: ExtractionProposal,
   envelope: EventEnvelope,
-  opts: { model?: string | null } = {},
+  opts: { model?: string | null; anchorTimezone?: string } = {},
 ): MemoryCandidateContract[] {
   const model = opts.model ?? null;
   const candidates: MemoryCandidateContract[] = [];
@@ -108,7 +141,8 @@ export function proposalToCandidates(
           direction: proposal.direction,
           counterpartyText: proposal.counterparty ?? "",
           description: proposal.description ?? text.slice(0, DESCRIPTION_MAX),
-          dueAt: proposal.dueDate,
+          temporal: buildTemporalProvenance(proposal, envelope, opts.anchorTimezone),
+          commitmentState: proposal.commitmentState ?? "active",
           confidence: proposal.confidence,
         },
         proposal.confidence,

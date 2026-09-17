@@ -2,10 +2,13 @@ export {
   type ExtractionDirection,
   type ExtractionProposal,
   type ParsedExtraction,
+  type TemporalType,
   parseExtractionOutput,
 } from "./parse.js";
 export {
+  anchorTimezone,
   assertionKindForSource,
+  buildTemporalProvenance,
   type CommitmentCandidatePayload,
   type DecisionCandidatePayload,
   type DiscardCandidatePayload,
@@ -26,3 +29,13 @@ export {
   UnsupportedEventError,
   type WrittenCandidate,
 } from "./service.js";
+export {
+  civilToUtcInstant,
+  DEFAULT_ANCHOR_TIMEZONE,
+  NORMALIZER_VERSION,
+  normalizeTemporalExpression,
+  normalizedTimeToInstant,
+  TemporalNormalizerError,
+  type TemporalNormalizerInput,
+} from "./temporal/normalizer.js";
+export { renormalizeTemporal, type RenormalizeResult, type RenormalizeSql } from "./temporal/renormalize.js";
