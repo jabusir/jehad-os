@@ -1,6 +1,7 @@
 import { pathToFileURL } from "node:url";
 import Fastify from "fastify";
 import { setupAuth } from "./auth.js";
+import { registerEventRoutes } from "./routes/events.js";
 import type { SqlExecutor } from "@jehad/db";
 
 const HOST = "127.0.0.1";
@@ -21,6 +22,7 @@ export async function buildApp(opts: AppOptions = {}) {
 
   if (opts.db !== undefined) {
     setupAuth(app, { db: opts.db, publicPaths: ["/healthz"] });
+    registerEventRoutes(app, { db: opts.db });
   }
 
   app.get("/healthz", async () => ({ ok: true }) as const);
