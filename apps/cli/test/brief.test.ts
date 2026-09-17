@@ -92,6 +92,11 @@ const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 describe.skipIf(!TEST_DATABASE_URL)("runBriefCommand (integration)", () => {
   let dbName: string;
   let baseUrl: string;
+  let cleanup: (() => Promise<void>) | null = null;
+
+  afterAll(async () => {
+    await cleanup?.();
+  });
 
   beforeAll(async () => {
     // Isolated DB via the db package's test helper (relative import — test-only).
@@ -101,6 +106,9 @@ describe.skipIf(!TEST_DATABASE_URL)("runBriefCommand (integration)", () => {
     const db = await createIsolatedTestDb(TEST_DATABASE_URL!, "m6clibrief");
     dbName = db.dbName;
     baseUrl = TEST_DATABASE_URL!;
+    cleanup = async () => {
+      await dropIsolatedTestDb(TEST_DATABASE_URL!, { pool: db.pool, dbName: db.dbName });
+    };
     await migrateUp(db.pool);
     await seedDomains(db.pool);
     // Minimal world: one overdue i_owe commitment (makes the morning brief
@@ -124,9 +132,6 @@ describe.skipIf(!TEST_DATABASE_URL)("runBriefCommand (integration)", () => {
                0.9, 'open', $1::uuid, $2::timestamptz, $2::timestamptz)`,
       [eventId, at],
     );
-    afterAll(async () => {
-      await dropIsolatedTestDb(TEST_DATABASE_URL!, { pool: db.pool, dbName });
-    });
   });
 
   it("renders the morning brief to stdout (exit 0) and persists the artifact", async () => {
