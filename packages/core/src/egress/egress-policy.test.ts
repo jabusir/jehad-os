@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { ModelProvider, ModelRequest } from "@jehad/adapters";
+import type { SqlExecutor } from "../policy/grants.js";
 import {
   EgressDenialError,
   EgressPolicyError,
@@ -153,21 +154,84 @@ describe("pre-dispatch enforcement (egressGatedModelProvider)", () => {
     },
   };
 
+  /** Fake domains table: key → storage mode; missing key = unknown domain. */
+  function domainsDb(modes: Readonly<Record<string, string>>): SqlExecutor {
+    return {
+      async query(_text: string, values?: readonly unknown[]) {
+        const key = String(values?.[0] ?? "");
+        const mode = modes[key];
+        return { rows: mode === undefined ? [] : [{ storage_mode: mode }] };
+      },
+    };
+  }
+
   it("denied request raises before dispatch — provider is never invoked", async () => {
     const registry = await loadEgressPolicyRegistry();
-    const gated = egressGatedModelProvider(recordingProvider, registry);
+    const gated = egressGatedModelProvider(recordingProvider, registry, domainsDb({ personal: "local" }));
     await expect(
-      gated.complete({ domainId: "finance", sensitivity: "sensitive", provider: "openrouter", model: "m", prompt: "p" }),
+      gated.complete({ domainId: "finance", sensitivity: "sensitive", provider: "recording", model: "m", prompt: "p" }),
     ).rejects.toBeInstanceOf(EgressDenialError);
     expect(dispatched).toHaveLength(0);
   });
 
   it("allowed request is dispatched exactly once", async () => {
     const registry = await loadEgressPolicyRegistry();
-    const gated = egressGatedModelProvider(recordingProvider, registry);
+    const db = domainsDb({ personal: "local", finance: "local" });
+    const gated = egressGatedModelProvider(
+      { id: "openrouter", async complete(request: ModelRequest) { dispatched.push(request); return { text: "ok" }; } },
+      registry,
+      db,
+    );
     const result = await gated.complete({ domainId: "personal", sensitivity: "normal", provider: "openrouter", model: "m", prompt: "p" });
     expect(result.text).toBe("ok");
     expect(dispatched).toHaveLength(1);
+  });
+
+  it("R5: a request naming a different provider throws and never dispatches", async () => {
+    const registry = await loadEgressPolicyRegistry();
+    const db = domainsDb({ personal: "local" });
+    const gated = egressGatedModelProvider(recordingProvider, registry, db);
+    const before = dispatched.length;
+    await expect(
+      gated.complete({ domainId: "personal", sensitivity: "normal", provider: "not-recording", model: "m", prompt: "p" }),
+    ).rejects.toBeInstanceOf(EgressPolicyError);
+    expect(dispatched).toHaveLength(before);
+  });
+
+  it("R1: non-local storage mode is resolved from the db and denied under allowRemote=false — no caller opt-out", async () => {
+    const registry = new ModelEgressPolicyRegistry([
+      { id: "personal-normal", domainId: "personal", sensitivity: "normal", allowedProviders: ["openrouter"], allowRemote: false, requireRedaction: false },
+    ]);
+    const gated = egressGatedModelProvider(
+      { id: "openrouter", async complete(request: ModelRequest) { dispatched.push(request); return { text: "ok" }; } },
+      registry,
+      domainsDb({ personal: "opaque" }),
+    );
+    // The request itself carries NO storageMode — the gated provider must
+    // resolve it. Before R1 this call was ALLOWED (fail-open).
+    const before = dispatched.length;
+    await expect(
+      gated.complete({ domainId: "personal", sensitivity: "normal", provider: "openrouter", model: "m", prompt: "p" }),
+    ).rejects.toMatchObject({ name: "EgressDenialError", audit: { reason: "remote_content_forbidden" } });
+    expect(dispatched).toHaveLength(before);
+  });
+
+  it("R1: unknown domain denies fail-closed with an auditable reason", async () => {
+    const registry = await loadEgressPolicyRegistry();
+    const gated = egressGatedModelProvider(recordingProvider, registry, domainsDb({}));
+    const before = dispatched.length;
+    const denial = gated.complete({ domainId: "ghost", sensitivity: "normal", provider: "recording", model: "m", prompt: "p" });
+    await expect(denial).rejects.toBeInstanceOf(EgressDenialError);
+    await expect(denial).rejects.toMatchObject({ audit: { reason: "unknown_domain" } });
+    expect(dispatched).toHaveLength(before);
+  });
+
+  it("R1: a garbage storage_mode row is a configuration error, never a silent pass", async () => {
+    const registry = await loadEgressPolicyRegistry();
+    const gated = egressGatedModelProvider(recordingProvider, registry, domainsDb({ personal: "localish" }));
+    await expect(
+      gated.complete({ domainId: "personal", sensitivity: "normal", provider: "recording", model: "m", prompt: "p" }),
+    ).rejects.toBeInstanceOf(EgressPolicyError);
   });
 });
 
