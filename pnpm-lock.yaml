@@ -87,7 +87,14 @@ importers:
         version: 3.2.7(@types/node@22.20.3)(supports-color@7.2.0)(tsx@4.23.13)
 
   packages/core:
+    dependencies:
+      '@jehad/adapters':
+        specifier: workspace:*
+        version: link:../adapters
     devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.3
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
