@@ -5,7 +5,9 @@
  * Cycle: claim pending rows (SELECT ... FOR UPDATE SKIP LOCKED + attempts
  * bump in one statement — no leasing status exists in the v1 vocabulary
  * pending/dispatched/failed) → dispatch each envelope to the handler →
- * mark dispatched (status + dispatched_at) or failed (last_error).
+ * mark dispatched (status + dispatched_at + last_error cleared) or failed
+ * (last_error, control-stripped and capped at 500 chars — never a payload
+ * dump).
  *
  * At-least-once, not exactly-once: a crash between handler success and the
  * mark leaves the row pending and it is dispatched AGAIN on the next drain;
@@ -51,7 +53,7 @@ const CLAIM_SQL = `
 
 const MARK_DISPATCHED_SQL = `
   UPDATE outbox
-  SET status = 'dispatched', dispatched_at = now(), updated_at = now()
+  SET status = 'dispatched', dispatched_at = now(), last_error = NULL, updated_at = now()
   WHERE id = $1::uuid
 `;
 
@@ -60,6 +62,23 @@ const MARK_FAILED_SQL = `
   SET status = 'failed', last_error = $2, updated_at = now()
   WHERE id = $1::uuid
 `;
+
+/** last_error is operator-facing diagnostics, not a payload dump (T4). */
+const MAX_LAST_ERROR_LENGTH = 500;
+
+/**
+ * Sanitizes an error for the `last_error` column: strips control characters
+ * (a raw err.message can embed payloads/secrets) and caps the length. Never
+ * throws — a failure to record a failure must not lose the dispatch result.
+ */
+export function sanitizeOutboxError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  // eslint-disable-next-line no-control-regex -- stripping control chars is the point
+  const stripped = raw.replace(/[\u0000-\u001f\u007f]/g, "");
+  return stripped.length > MAX_LAST_ERROR_LENGTH
+    ? stripped.slice(0, MAX_LAST_ERROR_LENGTH)
+    : stripped;
+}
 
 export async function markOutboxDispatched(db: SqlExecutor, outboxId: string): Promise<void> {
   await db.query(MARK_DISPATCHED_SQL, [outboxId]);
@@ -70,7 +89,7 @@ export async function markOutboxFailed(
   outboxId: string,
   error: string,
 ): Promise<void> {
-  await db.query(MARK_FAILED_SQL, [outboxId, error]);
+  await db.query(MARK_FAILED_SQL, [outboxId, sanitizeOutboxError(error)]);
 }
 
 /**
@@ -113,6 +132,5 @@ export async function drainOutbox(
       failed += 1;
     }
   }
-
   return { claimed: rows.length, dispatched, failed };
 }
