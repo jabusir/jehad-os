@@ -9,3 +9,4 @@ export * from "./extraction/index.js";
 export * from "./promotion/index.js";
 export * from "./review/index.js";
 export * from "./memory/candidate-contract.js";
+export * from "./queries/index.js";
