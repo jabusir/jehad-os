@@ -5,12 +5,15 @@ export {
   type ModelBudget,
   modelBudgetFromEnv,
   monthlyModelSpendUsd,
+  type StaleModelReservation,
+  staleReservations,
 } from "./budget.js";
 export {
   MODEL_CALL_RESULT_STATUSES,
   MissingRunError,
   type ModelBudgetDenialAudit,
   ModelBudgetExceededError,
+  type ModelCallDb,
   type ModelCallDeps,
   type ModelCallInput,
   callModel,

@@ -48,11 +48,62 @@ export function modelBudgetFromEnv(
   return { softUsd, hardUsd };
 }
 
-/** Calendar-month spend to date (UTC month boundary; A13 "monthly" caps). */
+/**
+ * Calendar-month spend to date (UTC month boundary; A13 "monthly" caps).
+ *
+ * Counts BOTH finalized rows and in-flight 'reserved' rows: a reservation
+ * provisionally holds the remaining hard-cap headroom (see call-model.ts),
+ * so concurrent racers see committed spend plus outstanding exposure the
+ * moment the winner's reservation commits — that closes the check-then-
+ * dispatch budget race. Stale reservations (crash between reserve and
+ * finalize) keep holding their headroom — fail closed until swept.
+ */
 export async function monthlyModelSpendUsd(db: SqlExecutor): Promise<number> {
   const result = await db.query(
     "SELECT COALESCE(SUM(cost_usd), 0) AS spent FROM model_calls WHERE created_at >= date_trunc('month', now())",
   );
   const spent = Number(result.rows[0]?.spent ?? 0);
   return Number.isFinite(spent) ? spent : 0;
+}
+
+/** One outstanding ('reserved') model_calls row — a call dispatched but never finalized. */
+export interface StaleModelReservation {
+  readonly id: string;
+  readonly runId: string;
+  readonly provider: string;
+  readonly model: string;
+  /** Headroom the reservation still holds against the caps (USD). */
+  readonly reservedUsd: number;
+  /** When the reservation was written (ISO timestamp). */
+  readonly createdAt: string;
+}
+
+/**
+ * Finds reservations older than `olderThanMs` — rows left 'reserved' by a
+ * process crash between reserve and finalize. Read-only on purpose: ops
+ * decides what to do with them (the held headroom keeps the budget fail
+ * closed until they are reconciled).
+ */
+export async function staleReservations(
+  db: SqlExecutor,
+  opts: { readonly olderThanMs: number },
+): Promise<StaleModelReservation[]> {
+  if (!Number.isFinite(opts.olderThanMs) || opts.olderThanMs < 0) {
+    throw new RangeError(`staleReservations: olderThanMs must be a non-negative finite number (got ${opts.olderThanMs})`);
+  }
+  const result = await db.query(
+    `SELECT id::text AS id, run_id::text AS run_id, provider, model, cost_usd AS reserved_usd, created_at
+       FROM model_calls
+      WHERE result_status = 'reserved' AND created_at < now() - ($1::bigint * interval '1 millisecond')
+      ORDER BY created_at`,
+    [Math.round(opts.olderThanMs)],
+  );
+  return result.rows.map((row) => ({
+    id: String(row.id),
+    runId: String(row.run_id),
+    provider: String(row.provider),
+    model: String(row.model),
+    reservedUsd: Number(row.reserved_usd),
+    createdAt: new Date(row.created_at as string).toISOString(),
+  }));
 }
