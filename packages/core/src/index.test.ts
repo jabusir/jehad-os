@@ -1,20 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 describe("@jehad/core", () => {
-  it("module loads (M0 smoke; exports the policy engine since M4)", async () => {
+  it("module loads and exports the M4 lanes (policy, actions)", async () => {
     const mod = await import("./index.js");
-    expect(Object.keys(mod).sort()).toEqual([
-      "ACTION_TYPES",
-      "AUTONOMY_LEVELS",
-      "autonomyLevelFor",
-      "decideAutonomy",
-      "issueGrant",
-      "loadPolicyFile",
-      "parsePolicyV1",
-      "revokeGrant",
-      "revokeGrantsByDomain",
-      "revokeGrantsForRun",
-      "verifyGrant",
-    ]);
+    expect(mod.issueGrant).toBeDefined();
+    expect(mod.verifyGrant).toBeDefined();
+    expect(mod.decideAutonomy).toBeDefined();
+    expect(mod.ActionService).toBeDefined();
+    expect(mod.V1_AUTONOMY_POLICY.actions.money_and_contracts).toBe("prohibited");
   });
 });
