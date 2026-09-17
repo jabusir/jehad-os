@@ -197,6 +197,7 @@ describe.skipIf(!TEST_DATABASE_URL)("backup → restore (integration)", () => {
       "004_commitments_domain",
       "005_commitments_temporal",
       "006_notifications",
+      "007_calendar",
     ]);
   });
 });

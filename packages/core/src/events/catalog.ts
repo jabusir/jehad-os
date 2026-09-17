@@ -24,6 +24,13 @@ export const EVENT_CATALOG_V1 = [
   "grant.issued",
   "grant.revoked",
   "brief.generated",
+  // E3 additive (calendar sensor): one observation type per real-world change
+  // kind; field-level detail (start_end_changed vs attendees_changed …) rides
+  // in payload.changeClass. Additive names only (ADR-0006); schemaVersion
+  // stays 1 — additive types are allowed without a payload-schema bump.
+  "calendar.event.created",
+  "calendar.event.updated",
+  "calendar.event.cancelled",
 ] as const;
 
 export type EventTypeName = (typeof EVENT_CATALOG_V1)[number];

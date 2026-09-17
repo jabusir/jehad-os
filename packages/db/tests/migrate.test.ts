@@ -19,7 +19,7 @@ const TABLES_001 = [
 
 const ALL_MIGRATIONS = [
   "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
-  "004_commitments_domain", "005_commitments_temporal", "006_notifications",
+  "004_commitments_domain", "005_commitments_temporal", "006_notifications", "007_calendar",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -92,6 +92,20 @@ describe("migration files (fs only)", () => {
     expect(notifications!.downSql).toMatch(/DROP TABLE IF EXISTS notifications\b/);
   });
 
+  it("007 creates the calendar sensor projection + sync cursor with a down path", async () => {
+    const migrations = await listMigrations();
+    const calendar = migrations.find((m) => m.name === "007_calendar");
+    expect(calendar).toBeDefined();
+    expect(calendar!.sql).toMatch(/CREATE TABLE calendar_events\b/);
+    expect(calendar!.sql).toMatch(/CREATE TABLE calendar_sync_state\b/);
+    expect(calendar!.sql).toMatch(/UNIQUE \(google_calendar_id, google_event_id\)/);
+    expect(calendar!.sql).toMatch(/CHECK \(status IN \('confirmed', 'tentative', 'cancelled'\)\)/);
+    expect(calendar!.sql).toMatch(/source_event_id\s+uuid NOT NULL REFERENCES events\(id\)/);
+    expect(calendar!.sql).toMatch(/CHECK \(id = 1\)/);
+    expect(calendar!.downSql).toMatch(/DROP TABLE IF EXISTS calendar_sync_state\b/);
+    expect(calendar!.downSql).toMatch(/DROP TABLE IF EXISTS calendar_events\b/);
+  });
+
   it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {
     const migrations = await listMigrations();
     const guard = migrations.find((m) => m.name === "002_action_transition_guard");
@@ -122,6 +136,9 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate up/down (integration)", () => {
     for (const table of TABLES_001) expect(afterUp.has(table)).toBe(true);
     expect(afterUp.has("principals")).toBe(true);
     expect(afterUp.has("schema_migrations")).toBe(true);
+    expect(afterUp.has("notifications")).toBe(true);
+    expect(afterUp.has("calendar_events")).toBe(true);
+    expect(afterUp.has("calendar_sync_state")).toBe(true);
 
     const records = await pool.query<{ name: string }>("SELECT name FROM schema_migrations");
     expect(records.rows.map((r) => r.name)).toEqual([...ALL_MIGRATIONS]);
