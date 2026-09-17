@@ -12,7 +12,9 @@
     "test": "vitest run",
     "lint": "eslint .",
     "dev": "pnpm run build && pnpm -r --parallel --if-present run dev",
-    "setup:db": "bash infra/dev/setup-db.sh"
+    "setup:db": "bash infra/dev/setup-db.sh",
+    "backup": "bash infra/dev/backup.sh",
+    "restore": "bash infra/dev/restore.sh"
   },
   "devDependencies": {
     "@eslint/js": "^9.20.0",
