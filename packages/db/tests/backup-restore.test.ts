@@ -193,6 +193,7 @@ describe.skipIf(!TEST_DATABASE_URL)("backup → restore (integration)", () => {
       "000_bootstrap_auth",
       "001_schema_core",
       "002_action_transition_guard",
+      "003_evidence_links",
     ]);
   });
 });

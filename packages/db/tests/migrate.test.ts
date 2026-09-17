@@ -17,7 +17,9 @@ const TABLES_001 = [
   "capability_grants", "audit_log", "escalations", "model_calls",
 ] as const;
 
-const ALL_MIGRATIONS = ["000_bootstrap_auth", "001_schema_core", "002_action_transition_guard"] as const;
+const ALL_MIGRATIONS = [
+  "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
+] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
   const result = await pool.query<{ table_name: string }>(
