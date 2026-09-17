@@ -32,6 +32,12 @@ importers:
 
   apps/api:
     dependencies:
+      '@jehad/adapters':
+        specifier: workspace:*
+        version: link:../../packages/adapters
+      '@jehad/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@jehad/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -51,6 +57,31 @@ importers:
       tsx:
         specifier: ^4.19.0
         version: 4.23.13
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.7(@types/node@22.20.3)(supports-color@7.2.0)(tsx@4.23.13)
+
+  apps/cli:
+    dependencies:
+      '@jehad/adapters':
+        specifier: workspace:*
+        version: link:../../packages/adapters
+    devDependencies:
+      '@jehad/api':
+        specifier: workspace:*
+        version: link:../api
+      '@jehad/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.3
+      pg:
+        specifier: ^8.13.0
+        version: 8.23.0
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
