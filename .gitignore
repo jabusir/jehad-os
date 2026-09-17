@@ -22,3 +22,8 @@ data/
 
 # orchestration worktrees
 wt/
+
+# eval run artifacts (generated locally; never committed)
+evals/.last-hermetic.json
+evals/.last-live.json
+evals/.eval-report-*.md

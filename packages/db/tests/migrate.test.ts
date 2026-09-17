@@ -19,6 +19,7 @@ const TABLES_001 = [
 
 const ALL_MIGRATIONS = [
   "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
+  "004_commitments_domain",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -53,6 +54,18 @@ describe("migration files (fs only)", () => {
     expect(bootstrap).toBeDefined();
     expect(bootstrap!.sql).toMatch(/CREATE TABLE principals\b/);
     expect(bootstrap!.downSql).toMatch(/DROP TABLE IF EXISTS principals\b/);
+  });
+
+  it("004 adds commitments.domain_id with backfill, NOT NULL, and an index; down drops them", async () => {
+    const migrations = await listMigrations();
+    const domain = migrations.find((m) => m.name === "004_commitments_domain");
+    expect(domain).toBeDefined();
+    expect(domain!.sql).toMatch(/ALTER TABLE commitments ADD COLUMN domain_id uuid REFERENCES domains\(id\)/);
+    expect(domain!.sql).toMatch(/SET domain_id = e\.domain_id\s+FROM events e/);
+    expect(domain!.sql).toMatch(/ALTER COLUMN domain_id SET NOT NULL/);
+    expect(domain!.sql).toMatch(/CREATE INDEX commitments_domain_status_idx ON commitments \(domain_id, status\)/);
+    expect(domain!.downSql).toMatch(/DROP INDEX IF EXISTS commitments_domain_status_idx/);
+    expect(domain!.downSql).toMatch(/ALTER TABLE commitments DROP COLUMN IF EXISTS domain_id/);
   });
 
   it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {

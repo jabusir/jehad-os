@@ -9,6 +9,11 @@
  * (last_error, control-stripped and capped at 500 chars — never a payload
  * dump).
  *
+ * Retry (state-verifier defect S2): failed rows are no longer terminal.
+ * `requeueFailed` flips failed→pending once a row's backoff window has
+ * elapsed; exhausted rows (attempts >= policy.maxAttempts) stay failed
+ * permanently and surface via `exhaustedOutboxRows` for alerting.
+ *
  * At-least-once, not exactly-once: a crash between handler success and the
  * mark leaves the row pending and it is dispatched AGAIN on the next drain;
  * concurrent drains may also overlap. Handlers must therefore be idempotent
@@ -23,15 +28,74 @@ import { getEventEnvelopesByIds, type EventEnvelope } from "@jehad/core";
 /** Receives one envelope; resolving = success, rejecting = failed attempt. */
 export type OutboxHandler = (envelope: EventEnvelope) => Promise<void>;
 
+/**
+ * Retry policy for failed outbox rows (S2). Backoff before a row with
+ * `attempts` failures becomes requeue-eligible is
+ * min(backoffCapMs, backoffBaseMs * 2^(attempts - 1)).
+ */
+export interface OutboxRetryPolicy {
+  /** Max claim attempts before a failed row is permanently failed. */
+  maxAttempts: number;
+  /** Backoff for the first failure (ms). */
+  backoffBaseMs: number;
+  /** Upper bound on any single backoff window (ms). */
+  backoffCapMs: number;
+}
+
+/** Defaults: 5 attempts, 30s → 60s → 120s → 240s (cap 15min never binds). */
+export const DEFAULT_OUTBOX_RETRY_POLICY: OutboxRetryPolicy = {
+  maxAttempts: 5,
+  backoffBaseMs: 30_000,
+  backoffCapMs: 15 * 60_000,
+};
+
+/** Backoff window (ms) a row must sit failed for before requeue. */
+export function outboxBackoffMs(
+  attempts: number,
+  policy: OutboxRetryPolicy = DEFAULT_OUTBOX_RETRY_POLICY,
+): number {
+  const exponent = Math.max(attempts - 1, 0);
+  return Math.min(policy.backoffCapMs, policy.backoffBaseMs * 2 ** exponent);
+}
+
+export interface RequeueOptions {
+  policy?: OutboxRetryPolicy;
+  /** Injectable clock (tests); defaults to now. */
+  now?: Date;
+}
+
+export interface RequeueResult {
+  requeued: number;
+}
+
 export interface DrainOptions {
   /** Max rows claimed per pass (default 100). */
   limit?: number;
+  /** Requeue backoff-eligible failed rows before claiming. */
+  requeue?: boolean;
+  retryPolicy?: OutboxRetryPolicy;
+  now?: Date;
 }
 
 export interface DrainResult {
+  requeued: number;
   claimed: number;
   dispatched: number;
   failed: number;
+}
+
+export interface ExhaustedOutboxRow {
+  id: string;
+  eventId: string;
+  attempts: number;
+  lastError: string | null;
+  updatedAt: Date;
+}
+
+export interface ExhaustedOptions {
+  policy?: OutboxRetryPolicy;
+  /** Max rows returned (default 100). */
+  limit?: number;
 }
 
 const CLAIM_SQL = `
@@ -61,6 +125,32 @@ const MARK_FAILED_SQL = `
   UPDATE outbox
   SET status = 'failed', last_error = $2, updated_at = now()
   WHERE id = $1::uuid
+`;
+
+/**
+ * Failed→pending for backoff-eligible rows, in one atomic statement.
+ * Eligible: status='failed' AND attempts < maxAttempts AND
+ * updated_at <= now - min(cap, base * 2^(attempts-1)). last_error is
+ * deliberately retained (forensics); success clears it (existing behavior).
+ */
+const REQUEUE_SQL = `
+  UPDATE outbox
+  SET status = 'pending', updated_at = $4::timestamptz
+  WHERE status = 'failed'
+    AND attempts < $1::int
+    AND updated_at <= $4::timestamptz
+        - LEAST($3::double precision, $2::double precision * 2 ^ (attempts - 1))
+          * interval '1 millisecond'
+  RETURNING id
+`;
+
+/** Permanently failed rows (attempts exhausted) for alerting. Oldest first. */
+const EXHAUSTED_SQL = `
+  SELECT id, event_id, attempts, last_error, updated_at
+  FROM outbox
+  WHERE status = 'failed' AND attempts >= $1::int
+  ORDER BY updated_at, id
+  LIMIT $2::int
 `;
 
 /** last_error is operator-facing diagnostics, not a payload dump (T4). */
@@ -93,15 +183,61 @@ export async function markOutboxFailed(
 }
 
 /**
+ * Requeues failed rows whose backoff window has elapsed (failed→pending).
+ * Never requeues exhausted rows (attempts >= policy.maxAttempts).
+ */
+export async function requeueFailed(
+  db: SqlExecutor,
+  opts: RequeueOptions = {},
+): Promise<RequeueResult> {
+  const policy = opts.policy ?? DEFAULT_OUTBOX_RETRY_POLICY;
+  const now = opts.now ?? new Date();
+  const result = await db.query(REQUEUE_SQL, [
+    policy.maxAttempts,
+    policy.backoffBaseMs,
+    policy.backoffCapMs,
+    now.toISOString(),
+  ]);
+  return { requeued: result.rows.length };
+}
+
+/**
+ * Permanently failed rows (attempts >= policy.maxAttempts) — they stay
+ * failed forever; this surfaces them for alerting.
+ */
+export async function exhaustedOutboxRows(
+  db: SqlExecutor,
+  opts: ExhaustedOptions = {},
+): Promise<ExhaustedOutboxRow[]> {
+  const policy = opts.policy ?? DEFAULT_OUTBOX_RETRY_POLICY;
+  const limit = opts.limit ?? 100;
+  const result = await db.query(EXHAUSTED_SQL, [policy.maxAttempts, limit]);
+  return result.rows.map((row) => ({
+    id: String(row.id),
+    eventId: String(row.event_id),
+    attempts: Number(row.attempts),
+    lastError: row.last_error === null ? null : String(row.last_error),
+    updatedAt: new Date(row.updated_at as string | Date),
+  }));
+}
+
+/**
  * Drains up to `limit` pending outbox rows. Never throws for a handler
  * failure (recorded as status='failed' + last_error); only infrastructure
- * errors (db) propagate.
+ * errors (db) propagate. With `requeue: true`, backoff-eligible failed
+ * rows are flipped to pending first, then the pass claims everything
+ * pending — one combined "process" call.
  */
 export async function drainOutbox(
   db: SqlExecutor,
   handler: OutboxHandler,
   opts: DrainOptions = {},
 ): Promise<DrainResult> {
+  let requeued = 0;
+  if (opts.requeue === true) {
+    ({ requeued } = await requeueFailed(db, { policy: opts.retryPolicy, now: opts.now }));
+  }
+
   const limit = opts.limit ?? 100;
   const claimed = await db.query(CLAIM_SQL, [limit]);
   const rows = claimed.rows.map((row) => ({
@@ -109,7 +245,7 @@ export async function drainOutbox(
     eventId: String(row.event_id),
   }));
   if (rows.length === 0) {
-    return { claimed: 0, dispatched: 0, failed: 0 };
+    return { requeued, claimed: 0, dispatched: 0, failed: 0 };
   }
 
   const envelopes = await getEventEnvelopesByIds(db, rows.map((row) => row.eventId));
@@ -132,5 +268,5 @@ export async function drainOutbox(
       failed += 1;
     }
   }
-  return { claimed: rows.length, dispatched, failed };
+  return { requeued, claimed: rows.length, dispatched, failed };
 }

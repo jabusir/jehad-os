@@ -126,11 +126,11 @@ describe.skipIf(!TEST_DATABASE_URL)("runBriefCommand (integration)", () => {
       [eventId, at, `sha256:${randomUUID()}`, domainId],
     );
     await db.pool.query(
-      `INSERT INTO commitments (direction, counterparty_text, description, due_at, confidence,
+      `INSERT INTO commitments (domain_id, direction, counterparty_text, description, due_at, confidence,
                                 status, source_event_id, created_at, updated_at)
-       VALUES ('i_owe', 'Landlord', 'Pay October rent', '2026-09-16T12:00:00.000Z'::timestamptz,
-               0.9, 'open', $1::uuid, $2::timestamptz, $2::timestamptz)`,
-      [eventId, at],
+       VALUES ($1::uuid, 'i_owe', 'Landlord', 'Pay October rent', '2026-09-16T12:00:00.000Z'::timestamptz,
+               0.9, 'open', $2::uuid, $3::timestamptz, $3::timestamptz)`,
+      [domainId, eventId, at],
     );
   });
 

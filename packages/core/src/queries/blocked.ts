@@ -125,15 +125,15 @@ function participatesInCycle(
 // quoted full-uuid match cannot false-positive), or the row's updated_at —
 // whichever is newer. (Note: jsonb `@>` scalar containment does NOT match
 // object values in Postgres — only array members — hence the text match.)
+// Commitment domain is the direct commitments.domain_id column (004).
 const STALLED_COMMITMENTS_SQL = `
   SELECT c.id, c.description AS label, c.updated_at, dom.key AS domain_key,
          (SELECT MAX(GREATEST(ev.occurred_at, ev.recorded_at))
           FROM events ev
-          WHERE ev.domain_id = src.domain_id
+          WHERE ev.domain_id = c.domain_id
             AND ev.payload::text LIKE concat('%"', c.id::text, '"%')) AS last_event_at
   FROM commitments c
-  JOIN events src ON src.id = c.source_event_id
-  JOIN domains dom ON dom.id = src.domain_id
+  JOIN domains dom ON dom.id = c.domain_id
   WHERE c.status = 'open'
     AND ($1::text IS NULL OR dom.key = $1)
 `;

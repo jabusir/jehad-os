@@ -112,6 +112,12 @@ describe.skipIf(!TEST_DATABASE_URL)("callModel (integration)", () => {
       result_status: "ok",
     });
     expect(Number(row!.latency_ms)).toBeGreaterThanOrEqual(0);
+
+    // The reservation is finalized in place — none left in flight.
+    const leftover = await db.pool.query(
+      `SELECT count(*)::int AS n FROM model_calls WHERE result_status = 'reserved'`,
+    );
+    expect(Number(leftover.rows[0]!.n)).toBe(0);
   });
 
   it("egress denial → NO dispatch, NO model_calls row, audited (T12)", async () => {

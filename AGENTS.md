@@ -40,7 +40,9 @@ The edge node lives in a separate repo (`/Users/Shared/tito`).
 | `pnpm dev` | Run API + worker locally (builds first) |
 | `pnpm setup:db` | Create local `jehad` Postgres database (brew postgresql@16) |
 | `pnpm migrate` | Apply SQL migrations (lands M1 with packages/db) |
-| `pnpm eval` | Golden-set extraction eval, hermetic fake provider (M5B); live OpenRouter tier lands with M5A |
+| `pnpm eval` | Golden-set extraction eval, hermetic fake provider (M5B); writes `evals/.last-hermetic.json` baseline |
+| `pnpm eval:live` | Same golden set through the real OpenRouter path (skips cleanly without `OPENROUTER_API_KEY`; budget + egress gated, spend reported) |
+| `pnpm eval:compare` | Hermetic-vs-live per-field comparison + `evals/.eval-report-<ts>.md`; gates (F1 ≥ 0.80, action-precision ≥ 0.90) enforced against the live numbers |
 
 ## Commit style
 
