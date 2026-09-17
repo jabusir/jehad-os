@@ -91,13 +91,58 @@ describe("validateEventIngest", () => {
   });
 });
 
+describe("payload depth/size guards (R7)", () => {
+  function nested(depth: number): Record<string, unknown> {
+    let value: Record<string, unknown> = { text: "leaf" };
+    for (let i = 1; i < depth; i += 1) value = { a: value };
+    return value;
+  }
+
+  it("accepts a payload nested exactly at the max depth (64)", () => {
+    const result = validateEventIngest({ ...validBody(), payload: nested(64) });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects a payload nested 65 levels deep with PAYLOAD_INVALID", () => {
+    const result = validateEventIngest({ ...validBody(), payload: nested(65) });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("PAYLOAD_INVALID");
+  });
+
+  it("rejects pathologically deep payloads without stack overflow", () => {
+    let deep: unknown = { text: "leaf" };
+    for (let i = 0; i < 10_000; i += 1) deep = { a: deep };
+    const result = validateEventIngest({ ...validBody(), payload: deep as Record<string, unknown> });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("PAYLOAD_INVALID");
+  });
+
+  it("accepts a payload just under the 256KB size cap", () => {
+    // {"text":"…"} adds 10 bytes of JSON framing around the string.
+    const result = validateEventIngest({
+      ...validBody(),
+      payload: { text: "x".repeat(256 * 1024 - 64) },
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects a payload serializing beyond 256KB with PAYLOAD_INVALID", () => {
+    const result = validateEventIngest({
+      ...validBody(),
+      payload: { text: "x".repeat(256 * 1024 + 1) },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("PAYLOAD_INVALID");
+  });
+});
+
 describe("idempotencyKeyFor", () => {
-  it("derives sha256(source + externalId) — fixed vectors", () => {
+  it('derives sha256(source + "\\u0000" + externalId) — fixed vectors', () => {
     expect(idempotencyKeyFor("cli.capture", "abc")).toBe(
-      "73ca3f10da75d843521c98ce55a161778d3498bc965567571cce87274a3d5edc",
+      "2a49283958d96c215e373e055fcf205b9b5fbf4b0a3391fdc6e475098e71dfe3",
     );
     expect(idempotencyKeyFor("internal", "11111111-1111-4111-8111-111111111111")).toBe(
-      "690e3a03af7c80c572d21ef78cc6a74fc94c3c963f8be3dc50b1497698f425cb",
+      "7fb9168bad38a954f930210be829af7393849c8a64d25b69c580799119bc932b",
     );
   });
 
@@ -106,6 +151,15 @@ describe("idempotencyKeyFor", () => {
     expect(idempotencyKeyFor("cli.capture", "same-external-id")).toBe(retry);
     expect(idempotencyKeyFor("cli.capture", "other-external-id")).not.toBe(retry);
     expect(idempotencyKeyFor("adapter:github", "same-external-id")).not.toBe(retry);
+  });
+
+  it("regression (R4): the separator kills the cross-source concatenation collision", () => {
+    // Before the fix both pairs hashed the identical string "adapter:abc"
+    // (sha256 31e3a876…) — one source's event could dedupe against another's.
+    expect(idempotencyKeyFor("adapter:a", "bc")).not.toBe(idempotencyKeyFor("adapter:ab", "c"));
+    // More of the collision family:
+    expect(idempotencyKeyFor("adapter:x", "yz")).not.toBe(idempotencyKeyFor("adapter:xy", "z"));
+    expect(idempotencyKeyFor("cli.capture", "abc")).not.toBe(idempotencyKeyFor("cli.captureabc", ""));
   });
 });
 

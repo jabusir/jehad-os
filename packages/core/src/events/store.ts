@@ -128,10 +128,10 @@ export function rowToEventEnvelope(row: Record<string, unknown>): EventEnvelope 
 
 /**
  * Accepts one validated occurrence: mints id (uuid v7), idempotency key
- * (sha256(source + externalId)), and recordedAt; inserts the events row and
- * its pending outbox row atomically. A duplicate idempotency_key is a no-op
- * returning the existing envelope with accepted=false (200-noop, plan §15 M2)
- * — the accepted row is never modified (immutability).
+ * (sha256(source + "\u0000" + externalId)), and recordedAt; inserts the events
+ * row and its pending outbox row atomically. A duplicate idempotency_key is a
+ * no-op returning the existing envelope with accepted=false (200-noop, plan
+ * §15 M2) — the accepted row is never modified (immutability).
  */
 export async function acceptEvent(
   db: EventStoreExecutor,
