@@ -19,7 +19,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@jehad/adapters": "workspace:*"
+    "@jehad/adapters": "workspace:*",
+    "yaml": "^2.8.0"
   },
   "devDependencies": {
     "@jehad/db": "workspace:*",
