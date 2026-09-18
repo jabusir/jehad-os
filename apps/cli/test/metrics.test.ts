@@ -37,7 +37,14 @@ function fakeFactory(fail?: Error): { factory: MetricsDbFactory; recording: Reco
       return [{ run_id: "r-1", reason: "approval_required", duration_ms: 5_490_000 }];
     }
     if (text.includes("resolved_at IS NULL")) return [{ n: 1 }];
-    if (text.includes("count(DISTINCT")) return [{ resolved: 11, days: 3 }];
+    if (text.includes("both_days")) return [{ resolved: 11, interruptive: 2, days: 3 }];
+    if (text.includes("fa_noise")) {
+      // signal quality: 5 verdicts, false-attention 1/(1+2).
+      return [{ useful: 2, noise: 1, missed: 0, incorrect: 0, interruptive: 2, total: 5, fa_noise: 1, fa_useful: 2 }];
+    }
+    if (text.includes("GROUP BY item_type")) {
+      return [{ item_type: "notification", total: 5, useful: 2, noise: 1, missed: 0, incorrect: 0, interruptive: 2 }];
+    }
     if (text.includes("FROM runs")) {
       if (text.includes("ended_at")) return [{ completed: 3, cancelled: 1, ended_total: 5 }];
       return [{ status: "completed", runs: 3 }];
@@ -109,6 +116,10 @@ describe("runMetricsCommand", () => {
     expect(text).toContain("human blocked time (derived from human_waits — plan §14)");
     expect(text).toContain("total blocked: 1h 31m  (open waits now: 1)");
     expect(text).toContain("interruptions");
+    expect(text).toContain("resolved waits 11 + interruptive verdicts 2 = 13 over 3 distinct days → 4.33/day");
+    expect(text).toContain("signal quality (dogfooding feedback");
+    expect(text).toContain("verdicts: 5 (useful 2, noise 1, missed 0, incorrect 0, interruptive 2)");
+    expect(text).toContain("false attention rate: 33.3% (noise / (noise + useful) on notification/attention items)");
     expect(text).toContain("completed 3 / 4 ended runs (1 cancelled excluded) → 75.0%");
     expect(text).toContain("not_needed 1 / 3 resolved → 33.3%");
     expect(text).toContain("total: $0.0425 across 5 calls");

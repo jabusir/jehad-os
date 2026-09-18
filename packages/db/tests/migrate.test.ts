@@ -20,6 +20,7 @@ const TABLES_001 = [
 const ALL_MIGRATIONS = [
   "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
   "004_commitments_domain", "005_commitments_temporal", "006_notifications",
+  "007_calendar", "008_feedback",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -92,6 +93,39 @@ describe("migration files (fs only)", () => {
     expect(notifications!.downSql).toMatch(/DROP TABLE IF EXISTS notifications\b/);
   });
 
+  it("007 creates the calendar sensor projection + sync cursor with a down path", async () => {
+    const migrations = await listMigrations();
+    const calendar = migrations.find((m) => m.name === "007_calendar");
+    expect(calendar).toBeDefined();
+    expect(calendar!.sql).toMatch(/CREATE TABLE calendar_events\b/);
+    expect(calendar!.sql).toMatch(/CREATE TABLE calendar_sync_state\b/);
+    expect(calendar!.sql).toMatch(/UNIQUE \(google_calendar_id, google_event_id\)/);
+    expect(calendar!.sql).toMatch(/CHECK \(status IN \('confirmed', 'tentative', 'cancelled'\)\)/);
+    expect(calendar!.sql).toMatch(/source_event_id\s+uuid NOT NULL REFERENCES events\(id\)/);
+    expect(calendar!.sql).toMatch(/CHECK \(id = 1\)/);
+    expect(calendar!.downSql).toMatch(/DROP TABLE IF EXISTS calendar_sync_state\b/);
+    expect(calendar!.downSql).toMatch(/DROP TABLE IF EXISTS calendar_events\b/);
+  });
+
+  it("008 creates the append-only feedback table with verdict/item_type CHECKs and a down path", async () => {
+    const migrations = await listMigrations();
+    const feedback = migrations.find((m) => m.name === "008_feedback");
+    expect(feedback).toBeDefined();
+    expect(feedback!.sql).toMatch(/CREATE TABLE feedback\b/);
+    for (const column of ["item_type", "item_id", "verdict", "note", "created_by", "created_at"]) {
+      expect(feedback!.sql).toMatch(new RegExp(`\\b${column}\\s+`));
+    }
+    expect(feedback!.sql).toMatch(
+      /CHECK \(item_type IN \('notification', 'attention_item', 'review_item', 'brief_section', 'event'\)\)/,
+    );
+    expect(feedback!.sql).toMatch(
+      /CHECK \(verdict IN \('useful', 'noise', 'missed', 'incorrect', 'interruptive'\)\)/,
+    );
+    // append-only: no updated_at column, no mutable surface
+    expect(feedback!.sql).not.toMatch(/updated_at/);
+    expect(feedback!.downSql).toMatch(/DROP TABLE IF EXISTS feedback\b/);
+  });
+
   it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {
     const migrations = await listMigrations();
     const guard = migrations.find((m) => m.name === "002_action_transition_guard");
@@ -121,7 +155,12 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate up/down (integration)", () => {
     const afterUp = await tableNames(pool);
     for (const table of TABLES_001) expect(afterUp.has(table)).toBe(true);
     expect(afterUp.has("principals")).toBe(true);
+    expect(afterUp.has("notifications")).toBe(true);
+    expect(afterUp.has("feedback")).toBe(true);
     expect(afterUp.has("schema_migrations")).toBe(true);
+    expect(afterUp.has("notifications")).toBe(true);
+    expect(afterUp.has("calendar_events")).toBe(true);
+    expect(afterUp.has("calendar_sync_state")).toBe(true);
 
     const records = await pool.query<{ name: string }>("SELECT name FROM schema_migrations");
     expect(records.rows.map((r) => r.name)).toEqual([...ALL_MIGRATIONS]);

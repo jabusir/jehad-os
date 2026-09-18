@@ -51,8 +51,13 @@ export interface HumanBlockedMetrics {
 
 export interface InterruptionsMetrics {
   readonly resolvedWaits: number;
+  /** Owner-judged interruptions: feedback rows with verdict 'interruptive'. */
+  readonly interruptiveVerdicts: number;
+  /** resolvedWaits + interruptiveVerdicts. */
+  readonly total: number;
+  /** Distinct UTC days across BOTH sources (waits by started_at, verdicts by created_at). */
   readonly distinctDays: number;
-  /** resolvedWaits / distinctDays (0 when no days). */
+  /** total / distinctDays (0 when no days). */
   readonly perDay: number;
 }
 
@@ -106,6 +111,45 @@ export interface FailureMetrics {
   readonly outboxErrors: readonly OutboxErrorSignature[];
 }
 
+/**
+ * Signal quality from dogfooding feedback (E3-B) — the owner's verdicts on
+ * what the system surfaced. Verdict counts map 1:1 to the owner's five
+ * measurement targets: useful → useful surfaced changes; noise → false
+ * attention items; missed → missed meaningful changes; incorrect → incorrect
+ * commitments/state; interruptive → unnecessary interruptions.
+ */
+export interface SignalQualityMetrics {
+  /** Feedback rows in window (post-dedupe taps). */
+  readonly total: number;
+  readonly counts: {
+    readonly useful: number;
+    readonly noise: number;
+    readonly missed: number;
+    readonly incorrect: number;
+    readonly interruptive: number;
+  };
+  /** Per-verdict share of total (counts.v / total); null when total is 0. */
+  readonly rates: {
+    readonly useful: number | null;
+    readonly noise: number | null;
+    readonly missed: number | null;
+    readonly incorrect: number | null;
+    readonly interruptive: number | null;
+  };
+  /** Per item_type verdict breakdown; empty when no feedback in window. */
+  readonly byItemType: readonly {
+    readonly itemType: string;
+    readonly total: number;
+    readonly counts: SignalQualityMetrics["counts"];
+  }[];
+  /**
+   * noise / (noise + useful) over notification + attention_item verdicts —
+   * the false-attention rate. Null when that denominator is 0 (guarded: no
+   * data is not 0% noise).
+   */
+  readonly falseAttentionRate: number | null;
+}
+
 export interface MetricsReport {
   readonly window: { readonly since: string | null; readonly generatedAt: string };
   readonly humanBlocked: HumanBlockedMetrics;
@@ -115,6 +159,11 @@ export interface MetricsReport {
   readonly modelCost: ModelCostMetrics;
   readonly workflowStatus: WorkflowStatusSnapshot;
   readonly failures: FailureMetrics;
+  /**
+   * Signal quality from dogfooding feedback (E3-B). NULL — not zeros — when
+   * there is no feedback in window: an unmeasured signal is not a 0% one.
+   */
+  readonly signalQuality: SignalQualityMetrics | null;
 }
 
 export interface ComputeMetricsOptions {
@@ -193,7 +242,7 @@ export async function computeMetrics(
   const topErrorSignatures = opts.topErrorSignatures ?? 5;
   const args = [since];
 
-  const [waits, openWaits, interruptions, completion, escalations, costByModel, costTotal, costTopRuns, statusSnapshot, outboxErrors, attempts] =
+  const [waits, openWaits, interruptions, completion, escalations, costByModel, costTotal, costTopRuns, statusSnapshot, outboxErrors, attempts, feedbackTotals, feedbackByType] =
     await Promise.all([
       db.query(
         `SELECT hw.run_id::text AS run_id,
@@ -207,10 +256,22 @@ export async function computeMetrics(
       ),
       db.query("SELECT count(*)::int AS n FROM human_waits WHERE resolved_at IS NULL", []),
       db.query(
-        `SELECT count(*) FILTER (WHERE resolved_at IS NOT NULL)::int AS resolved,
-                count(DISTINCT (started_at AT TIME ZONE 'UTC')::date)::int AS days
-         FROM human_waits
-         WHERE ($1::timestamptz IS NULL OR started_at >= $1::timestamptz)`,
+        // interruptions count BOTH derived human_waits and owner-judged
+        // 'interruptive' feedback verdicts (E3-B); days span both sources.
+        `SELECT (SELECT count(*) FROM human_waits
+                  WHERE resolved_at IS NOT NULL
+                    AND ($1::timestamptz IS NULL OR started_at >= $1::timestamptz))::int AS resolved,
+                (SELECT count(*) FROM feedback
+                  WHERE verdict = 'interruptive'
+                    AND ($1::timestamptz IS NULL OR created_at >= $1::timestamptz))::int AS interruptive,
+                (SELECT count(*) FROM (
+                   SELECT (started_at AT TIME ZONE 'UTC')::date AS d FROM human_waits
+                    WHERE ($1::timestamptz IS NULL OR started_at >= $1::timestamptz)
+                   UNION
+                   SELECT (created_at AT TIME ZONE 'UTC')::date AS d FROM feedback
+                    WHERE verdict = 'interruptive'
+                      AND ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)
+                 ) both_days)::int AS days`,
         args,
       ),
       db.query(
@@ -276,6 +337,32 @@ export async function computeMetrics(
          GROUP BY outcome`,
         args,
       ),
+      db.query(
+        `SELECT count(*) FILTER (WHERE verdict = 'useful')::int AS useful,
+                count(*) FILTER (WHERE verdict = 'noise')::int AS noise,
+                count(*) FILTER (WHERE verdict = 'missed')::int AS missed,
+                count(*) FILTER (WHERE verdict = 'incorrect')::int AS incorrect,
+                count(*) FILTER (WHERE verdict = 'interruptive')::int AS interruptive,
+                count(*)::int AS total,
+                count(*) FILTER (WHERE verdict = 'noise' AND item_type IN ('notification', 'attention_item'))::int AS fa_noise,
+                count(*) FILTER (WHERE verdict = 'useful' AND item_type IN ('notification', 'attention_item'))::int AS fa_useful
+         FROM feedback
+         WHERE ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)`,
+        args,
+      ),
+      db.query(
+        `SELECT item_type, count(*)::int AS total,
+                count(*) FILTER (WHERE verdict = 'useful')::int AS useful,
+                count(*) FILTER (WHERE verdict = 'noise')::int AS noise,
+                count(*) FILTER (WHERE verdict = 'missed')::int AS missed,
+                count(*) FILTER (WHERE verdict = 'incorrect')::int AS incorrect,
+                count(*) FILTER (WHERE verdict = 'interruptive')::int AS interruptive
+         FROM feedback
+         WHERE ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)
+         GROUP BY item_type
+         ORDER BY count(*) DESC, item_type ASC`,
+        args,
+      ),
     ]);
 
   // human_blocked_ms: per-run sums (multi-wait runs sum BOTH waits) + total
@@ -298,7 +385,9 @@ export async function computeMetrics(
   }
 
   const resolvedWaits = toCount(interruptions.rows[0]?.resolved);
+  const interruptiveVerdicts = toCount(interruptions.rows[0]?.interruptive);
   const distinctDays = toCount(interruptions.rows[0]?.days);
+  const interruptionTotal = resolvedWaits + interruptiveVerdicts;
 
   const endedTotal = toCount(completion.rows[0]?.ended_total);
   const cancelled = toCount(completion.rows[0]?.cancelled);
@@ -338,8 +427,10 @@ export async function computeMetrics(
     },
     interruptions: {
       resolvedWaits,
+      interruptiveVerdicts,
+      total: interruptionTotal,
       distinctDays,
-      perDay: distinctDays === 0 ? 0 : resolvedWaits / distinctDays,
+      perDay: distinctDays === 0 ? 0 : interruptionTotal / distinctDays,
     },
     autonomousCompletion: {
       completedRuns: completed,
@@ -379,6 +470,51 @@ export async function computeMetrics(
       },
       outboxErrors: topErrors,
     },
+    signalQuality: signalQualityOf(feedbackTotals.rows[0], feedbackByType.rows),
+  };
+}
+
+function signalQualityOf(
+  totals: Record<string, unknown> | undefined,
+  byTypeRows: readonly Record<string, unknown>[],
+): SignalQualityMetrics | null {
+  if (totals === undefined) return null;
+  const counts = {
+    useful: toCount(totals.useful),
+    noise: toCount(totals.noise),
+    missed: toCount(totals.missed),
+    incorrect: toCount(totals.incorrect),
+    interruptive: toCount(totals.interruptive),
+  };
+  const total = toCount(totals.total);
+  // Guarded: zero feedback → the whole section is null (not zeros) — an
+  // unmeasured signal is not a 0%-noise signal.
+  if (total === 0) return null;
+  const faNoise = toCount(totals.fa_noise);
+  const faUseful = toCount(totals.fa_useful);
+  const faDenominator = faNoise + faUseful;
+  return {
+    total,
+    counts,
+    rates: {
+      useful: counts.useful / total,
+      noise: counts.noise / total,
+      missed: counts.missed / total,
+      incorrect: counts.incorrect / total,
+      interruptive: counts.interruptive / total,
+    },
+    byItemType: byTypeRows.map((row) => ({
+      itemType: toString_(row.item_type),
+      total: toCount(row.total),
+      counts: {
+        useful: toCount(row.useful),
+        noise: toCount(row.noise),
+        missed: toCount(row.missed),
+        incorrect: toCount(row.incorrect),
+        interruptive: toCount(row.interruptive),
+      },
+    })),
+    falseAttentionRate: faDenominator === 0 ? null : faNoise / faDenominator,
   };
 }
 

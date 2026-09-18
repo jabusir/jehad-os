@@ -183,6 +183,7 @@ const MORNING_FULL: MorningBriefData = {
       { reason: "approval_required", count: 2 },
     ],
   },
+  todaySchedule: [],
 };
 
 const MORNING_EMPTY: MorningBriefData = {
@@ -193,6 +194,29 @@ const MORNING_EMPTY: MorningBriefData = {
   stalled: [],
   unlock: null,
   escalations: { pending: 0, batched: 0, byReason: [] },
+  todaySchedule: [],
+};
+
+const MORNING_WITH_SCHEDULE: MorningBriefData = {
+  ...MORNING_EMPTY,
+  todaySchedule: [
+    {
+      googleEventId: "evt-dentist-001",
+      summary: "Dentist",
+      startTime: "2026-09-17T13:00:00.000Z",
+      endTime: "2026-09-17T14:00:00.000Z",
+      timezone: "America/New_York",
+      location: "12 Creek Rd",
+    },
+    {
+      googleEventId: "evt-call-002",
+      summary: "",
+      startTime: "2026-09-17T17:30:00.000Z",
+      endTime: "2026-09-17T18:00:00.000Z",
+      timezone: null,
+      location: null,
+    },
+  ],
 };
 
 const EVENING_FULL: EveningCloseData = {
@@ -272,6 +296,9 @@ WHILE YOU WERE AWAY
 - relationships changed: 1
   - commitment blocked_by decision ×1
 
+TODAY'S SCHEDULE
+- nothing on the calendar
+
 WAITING ON YOU
 - OVERDUE Pay October rent — due 2026-09-16T12:00:00.000Z (i_owe Landlord)
 - DUE SOON Submit quarter-end paperwork — due 2026-09-19T12:00:00.000Z (i_owe Bank)
@@ -304,6 +331,34 @@ delta since 2026-09-16T20:00:00.000Z
 
 WHILE YOU WERE AWAY
 - no changes in window
+
+TODAY'S SCHEDULE
+- nothing on the calendar
+
+WAITING ON YOU
+- nothing overdue or due soon
+
+BLOCKED OR SILENTLY STALLED
+- nothing blocked or stalled
+
+TODAY'S HIGHEST-LEVERAGE UNLOCK
+- no blocked downstream work to unlock
+
+OPEN ESCALATIONS
+- none open
+`);
+  });
+
+  it("renders today's schedule section from the calendar projection (E3)", () => {
+    expect(renderMorningBriefText(MORNING_WITH_SCHEDULE)).toBe(`MORNING BRIEF — 2026-09-17 (personal)
+delta since 2026-09-16T20:00:00.000Z
+
+WHILE YOU WERE AWAY
+- no changes in window
+
+TODAY'S SCHEDULE
+- Dentist — 2026-09-17T13:00:00.000Z → 2026-09-17T14:00:00.000Z (12 Creek Rd)
+- (untitled) — 2026-09-17T17:30:00.000Z → 2026-09-17T18:00:00.000Z
 
 WAITING ON YOU
 - nothing overdue or due soon
@@ -385,6 +440,8 @@ describe("suppression predicates (§31 nothing-meaningful-changed)", () => {
     expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, unlock: MORNING_FULL.unlock })).toBe(true);
     expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, escalations: { pending: 1, batched: 0, byReason: [] } })).toBe(true);
     expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, escalations: { pending: 0, batched: 1, byReason: [] } })).toBe(true);
+    // E3 owner call: a schedule is real attention — presence alone un-suppresses.
+    expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, todaySchedule: MORNING_WITH_SCHEDULE.todaySchedule })).toBe(true);
   });
 
   it("evening: calm world suppressed; each §31 signal alone makes it meaningful", () => {

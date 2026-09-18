@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateUp, seedDomains } from "@jehad/db";
 import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../../../db/tests/test-db.js";
+import { recordFeedback } from "../feedback/service.js";
 import { computeMetrics, computeWeeklyRollup, percentile, type MetricsReport } from "./compute.js";
 import { renderMetricsText } from "./render.js";
 
@@ -249,10 +250,14 @@ describe.skipIf(!TEST_DATABASE_URL)("metrics rollup (integration)", () => {
     expect(perRun[0]!.runId).toBe(runIds.r4!);
   });
 
-  it("interruptions_per_day = resolved waits / distinct UTC days", async () => {
-    expect(allTime.interruptions.resolvedWaits).toBe(11);
-    expect(allTime.interruptions.distinctDays).toBe(3);
-    expect(allTime.interruptions.perDay).toBeCloseTo(11 / 3, 10);
+  it("interruptions_per_day = (resolved waits + interruptive verdicts) / distinct UTC days", async () => {
+    expect(allTime.interruptions).toEqual({
+      resolvedWaits: 11,
+      interruptiveVerdicts: 0, // no feedback seeded in this suite
+      total: 11,
+      distinctDays: 3,
+      perDay: 11 / 3,
+    });
   });
 
   it("autonomous_completion_rate excludes cancelled from ended runs", async () => {
@@ -266,6 +271,7 @@ describe.skipIf(!TEST_DATABASE_URL)("metrics rollup (integration)", () => {
 
   it("false_escalation_rate counts not_needed resolutions / resolved", async () => {
     expect(allTime.falseEscalation).toEqual({ resolved: 3, notNeeded: 1, rate: 1 / 3 });
+    expect(allTime.signalQuality).toBeNull(); // no feedback seeded here — guarded null
   });
 
   it("model cost: total, by provider/model, top runs", async () => {
@@ -315,6 +321,8 @@ describe.skipIf(!TEST_DATABASE_URL)("metrics rollup (integration)", () => {
     // resolved waits in window: 6 approval + 1 unknown (day2) + 1
     // missing_credentials (day3) = 8 across 2 days
     expect(report.interruptions.resolvedWaits).toBe(8);
+    expect(report.interruptions.interruptiveVerdicts).toBe(0);
+    expect(report.interruptions.total).toBe(8);
     expect(report.interruptions.distinctDays).toBe(2);
     // ended runs in window: r2, r3, r4, r6 → completed r2+r6, cancelled r4
     expect(report.autonomousCompletion).toEqual({
@@ -334,7 +342,15 @@ describe.skipIf(!TEST_DATABASE_URL)("metrics rollup (integration)", () => {
     expect(report.humanBlocked.totalMs).toBe(0);
     expect(report.humanBlocked.byReason).toEqual([]);
     expect(report.humanBlocked.perRun).toEqual([]);
-    expect(report.interruptions).toEqual({ resolvedWaits: 0, distinctDays: 0, perDay: 0 });
+    expect(report.interruptions).toEqual({
+      resolvedWaits: 0,
+      interruptiveVerdicts: 0,
+      total: 0,
+      distinctDays: 0,
+      perDay: 0,
+    });
+    // guarded: zero feedback → signalQuality is null, not zeros
+    expect(report.signalQuality).toBeNull();
     expect(report.autonomousCompletion).toEqual({
       completedRuns: 0,
       endedRuns: 0,
@@ -367,3 +383,145 @@ describe.skipIf(!TEST_DATABASE_URL)("metrics rollup (integration)", () => {
     expect(text).not.toMatch(/ +\n/); // no trailing whitespace
   });
 });
+
+describe.skipIf(!TEST_DATABASE_URL)("signal quality from feedback (integration)", () => {
+  let db: IsolatedDb;
+
+  beforeAll(async () => {
+    db = await createIsolatedTestDb(TEST_DATABASE_URL!, "e3bsignal");
+    await migrateUp(db.pool);
+    // Seed via the service itself (dogfoods the append-only write path). The
+    // dedupe re-tap proves deduped taps don't inflate the metrics.
+    const seed: readonly [itemType: string, itemId: string, verdict: string, at: string][] = [
+      ["notification", "n1", "useful", at(DAY1, "10:00:00")],
+      ["notification", "n1", "useful", at(DAY1, "18:00:00")], // idempotent re-tap
+      ["notification", "n1", "noise", at(DAY3, "09:30:00")], // distinct verdict, same item
+      ["notification", "n2", "noise", at(DAY1, "11:00:00")],
+      ["notification", "n3", "noise", at(DAY2, "10:00:00")],
+      ["notification", "n4", "interruptive", at(DAY3, "10:00:00")],
+      ["attention_item", "a1", "useful", at(DAY2, "11:00:00")],
+      ["review_item", "r1", "incorrect", at(DAY2, "12:00:00")],
+      ["brief_section", "b1", "missed", at(DAY3, "09:00:00")],
+      ["event", "e1", "interruptive", at(DAY1, "12:00:00")],
+    ];
+    for (const [itemType, itemId, verdict, atTime] of seed) {
+      await recordFeedback(
+        db.pool,
+        { itemType: itemType as "notification", itemId, verdict: verdict as "useful" },
+        { now: () => new Date(atTime) },
+      );
+    }
+  });
+
+  afterAll(async () => {
+    await dropIsolatedTestDb(TEST_DATABASE_URL!, db);
+  });
+
+  it("no feedback at all → signalQuality null (unmeasured, not zero)", async () => {
+    // this db HAS feedback; a window after all of it proves the guard
+    const report = await computeMetrics(db.pool, {
+      since: "2027-01-01T00:00:00Z",
+      now: () => new Date("2027-01-02T00:00:00Z"),
+    });
+    expect(report.signalQuality).toBeNull();
+  });
+
+  it("counts + per-verdict rates + per-item_type breakdown on seeded feedback", async () => {
+    const report = await computeMetrics(db.pool, { now: () => new Date(at(DAY3, "18:00:00")) });
+    const sq = report.signalQuality!;
+    expect(sq).not.toBeNull();
+    // useful: n1, a1 = 2 · noise: n1-noise, n2, n3 = 3 · missed: b1 ·
+    // incorrect: r1 · interruptive: e1, n4 = 2 → total 9 (re-tap deduped)
+    expect(sq.total).toBe(9);
+    expect(sq.counts).toEqual({ useful: 2, noise: 3, missed: 1, incorrect: 1, interruptive: 2 });
+    expect(sq.rates).toEqual({
+      useful: 2 / 9,
+      noise: 3 / 9,
+      missed: 1 / 9,
+      incorrect: 1 / 9,
+      interruptive: 2 / 9,
+    });
+    // false attention: noise 3 / (noise 3 + useful 2) on notification/attention
+    expect(sq.falseAttentionRate).toBeCloseTo(3 / 5, 10);
+    expect(sq.byItemType).toEqual([
+      { itemType: "notification", total: 5, counts: { useful: 1, noise: 3, missed: 0, incorrect: 0, interruptive: 1 } },
+      { itemType: "attention_item", total: 1, counts: { useful: 1, noise: 0, missed: 0, incorrect: 0, interruptive: 0 } },
+      { itemType: "brief_section", total: 1, counts: { useful: 0, noise: 0, missed: 1, incorrect: 0, interruptive: 0 } },
+      { itemType: "event", total: 1, counts: { useful: 0, noise: 0, missed: 0, incorrect: 0, interruptive: 1 } },
+      { itemType: "review_item", total: 1, counts: { useful: 0, noise: 0, missed: 0, incorrect: 1, interruptive: 0 } },
+    ]);
+  });
+
+  it("falseAttentionRate is null without noise/useful verdicts on notification/attention items", async () => {
+    await recordFeedback(
+      db.pool,
+      { itemType: "review_item", itemId: "r2", verdict: "incorrect" },
+      { now: () => new Date(at(DAY3, "17:00:00")) },
+    );
+    const report = await computeMetrics(db.pool, {
+      since: `${DAY3}T16:00:00Z`,
+      now: () => new Date(at(DAY3, "18:00:00")),
+    });
+    // in-window feedback exists (r2) but none of it is noise/useful on the
+    // attention-shaped item types → denominator 0 → null, not 0
+    expect(report.signalQuality!.total).toBe(1);
+    expect(report.signalQuality!.falseAttentionRate).toBeNull();
+  });
+
+  it("interruptions also count interruptive verdicts, days span both sources", async () => {
+    const report = await computeMetrics(db.pool, { now: () => new Date(at(DAY3, "18:00:00")) });
+    expect(report.interruptions.resolvedWaits).toBe(0); // no human_waits seeded here
+    expect(report.interruptions.interruptiveVerdicts).toBe(2);
+    expect(report.interruptions.total).toBe(2);
+    // interruptive verdict days: day1 (e1), day3 (n4)
+    expect(report.interruptions.distinctDays).toBe(2);
+    expect(report.interruptions.perDay).toBeCloseTo(1, 10);
+  });
+
+  it("window filter rescopes signal quality (since day2)", async () => {
+    const report = await computeMetrics(db.pool, {
+      since: `${DAY2}T00:00:00Z`,
+      now: () => new Date(at(DAY3, "18:00:00")),
+    });
+    const sq = report.signalQuality!;
+    // in-window: n3 noise, n1-noise, n4 interruptive, a1 useful, r1 incorrect,
+    // b1 missed, r2 incorrect (seeded by the previous test) → 7 rows;
+    // falseAttention = 2 / (2 + 1)
+    expect(sq.total).toBe(7);
+    expect(sq.counts).toEqual({ useful: 1, noise: 2, missed: 1, incorrect: 2, interruptive: 1 });
+    expect(sq.falseAttentionRate).toBeCloseTo(2 / 3, 10);
+    expect(report.interruptions.interruptiveVerdicts).toBe(1); // only n4 (day3)
+  });
+
+  it("renders the signal-quality section", () => {
+    const text = renderMetricsText(
+      computeMetricsReportFixture({ resolvedWaits: 0, interruptiveVerdicts: 2, total: 2, distinctDays: 2, perDay: 1 }),
+    );
+    expect(text).toContain("signal quality (dogfooding feedback");
+    expect(text).toContain("false attention rate: 60.0%");
+    expect(text).not.toMatch(/ +\n/);
+  });
+});
+
+/** Minimal MetricsReport with empty sections + injected interruptions. */
+function computeMetricsReportFixture(
+  interruptions: MetricsReport["interruptions"],
+): MetricsReport {
+  return {
+    window: { since: null, generatedAt: at(DAY3, "18:00:00") },
+    humanBlocked: { totalMs: 0, openWaits: 0, byReason: [], perRun: [] },
+    interruptions,
+    autonomousCompletion: { completedRuns: 0, endedRuns: 0, cancelledExcluded: 0, rate: 0 },
+    falseEscalation: { resolved: 0, notNeeded: 0, rate: 0 },
+    modelCost: { totalUsd: 0, calls: 0, byProviderModel: [], topRuns: [] },
+    workflowStatus: { statuses: [] },
+    failures: { actionAttempts: { failed: 0, unknown: 0 }, outboxErrors: [] },
+    signalQuality: {
+      total: 9,
+      counts: { useful: 2, noise: 3, missed: 1, incorrect: 1, interruptive: 2 },
+      rates: { useful: 2 / 9, noise: 3 / 9, missed: 1 / 9, incorrect: 1 / 9, interruptive: 2 / 9 },
+      byItemType: [{ itemType: "notification", total: 5, counts: { useful: 1, noise: 3, missed: 0, incorrect: 0, interruptive: 1 } }],
+      falseAttentionRate: 3 / 5,
+    },
+  };
+}

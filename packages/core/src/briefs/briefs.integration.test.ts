@@ -11,6 +11,7 @@ import { migrateUp, seedDomains } from "@jehad/db";
 import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../../../db/tests/test-db.js";
 import { seedQueryFixtureWorld, type FixtureIds } from "../queries/fixtures.js";
 import { raiseEscalation } from "../escalations/service.js";
+import { syncCalendar, type CalendarSourcePort } from "../calendar/sync.js";
 import { renderEveningClose, renderMorningBrief } from "./service.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -156,6 +157,51 @@ describe.skipIf(!TEST_DATABASE_URL)("briefs (integration)", () => {
     const second = await renderMorningBrief(db.pool, { now });
     expect(second.content).toBe(first.content);
     expect(second.artifactId).not.toBe(first.artifactId);
+  });
+
+  it("E3: today's schedule section renders from the calendar projection after a sync", async () => {
+    // One calendar event today (2026-09-17 per NOW), one tomorrow, one cancelled today.
+    const googleEvents = [
+      {
+        id: "brief-evt-1",
+        iCalUID: "brief-evt-1@google.com",
+        status: "confirmed",
+        summary: "Calendar sync review",
+        start: { dateTime: "2026-09-17T15:00:00Z", timeZone: "UTC" },
+        end: { dateTime: "2026-09-17T16:00:00Z", timeZone: "UTC" },
+        updated: "2026-09-17T07:00:00.000Z",
+      },
+      {
+        id: "brief-evt-2",
+        status: "confirmed",
+        summary: "Tomorrow thing",
+        start: { dateTime: "2026-09-18T09:00:00Z", timeZone: "UTC" },
+        end: { dateTime: "2026-09-18T10:00:00Z", timeZone: "UTC" },
+        updated: "2026-09-17T07:00:00.000Z",
+      },
+      {
+        id: "brief-evt-3",
+        status: "cancelled",
+        summary: "Cancelled today",
+        start: { dateTime: "2026-09-17T18:00:00Z", timeZone: "UTC" },
+        end: { dateTime: "2026-09-17T19:00:00Z", timeZone: "UTC" },
+        updated: "2026-09-17T07:00:00.000Z",
+      },
+    ];
+    const source: CalendarSourcePort = {
+      id: "adapter:google-calendar",
+      calendarId: "brief-cal",
+      listEvents: async () => ({ events: googleEvents, nextPageToken: null, nextSyncToken: "bt-1" }),
+    };
+    await syncCalendar(db.pool, source, { now });
+
+    const outcome = await renderMorningBrief(db.pool, { now });
+    expect(outcome.suppressed).toBe(false);
+    const content = outcome.content!;
+    expect(content).toContain("TODAY'S SCHEDULE");
+    expect(content).toContain("- Calendar sync review — 2026-09-17T15:00:00.000Z → 2026-09-17T16:00:00.000Z");
+    expect(content).not.toContain("Tomorrow thing");
+    expect(content).not.toContain("Cancelled today");
   });
 
   it("morning brief on an empty world → suppressed, no artifact", async () => {
