@@ -127,13 +127,67 @@ export function renderMetricsText(metrics: MetricsReport): string {
 
   // -- interruptions --------------------------------------------------------
   lines.push("interruptions");
-  if (metrics.interruptions.distinctDays === 0) {
-    lines.push("  resolved waits: 0 (no human_waits in window)");
+  if (metrics.interruptions.total === 0) {
+    lines.push("  resolved waits: 0, interruptive verdicts: 0 (nothing in window)");
   } else {
     lines.push(
-      `  resolved waits: ${metrics.interruptions.resolvedWaits}` +
-        ` over ${metrics.interruptions.distinctDays} distinct days` +
+      `  resolved waits ${metrics.interruptions.resolvedWaits}` +
+        ` + interruptive verdicts ${metrics.interruptions.interruptiveVerdicts}` +
+        ` = ${metrics.interruptions.total} over ${metrics.interruptions.distinctDays} distinct days` +
         ` → ${formatPerDay(metrics.interruptions.perDay)}`,
+    );
+  }
+  lines.push(blank());
+
+  // -- signal quality (dogfooding feedback) ---------------------------------
+  lines.push("signal quality (dogfooding feedback — plan: signal, not parsing)");
+  if (metrics.signalQuality === null) {
+    lines.push("  no feedback recorded in window (rates null, not zero)");
+  } else {
+    const sq = metrics.signalQuality;
+    lines.push(
+      `  verdicts: ${sq.total}` +
+        ` (useful ${sq.counts.useful}, noise ${sq.counts.noise}, missed ${sq.counts.missed},` +
+        ` incorrect ${sq.counts.incorrect}, interruptive ${sq.counts.interruptive})`,
+    );
+    lines.push(
+      `  rates: useful ${formatPercent(sq.rates.useful ?? 0)}` +
+        ` · noise ${formatPercent(sq.rates.noise ?? 0)}` +
+        ` · missed ${formatPercent(sq.rates.missed ?? 0)}` +
+        ` · incorrect ${formatPercent(sq.rates.incorrect ?? 0)}` +
+        ` · interruptive ${formatPercent(sq.rates.interruptive ?? 0)}`,
+    );
+    if (sq.falseAttentionRate === null) {
+      lines.push("  false attention rate: n/a (no noise/useful verdicts on notification or attention items)");
+    } else {
+      lines.push(
+        `  false attention rate: ${formatPercent(sq.falseAttentionRate)}` +
+          " (noise / (noise + useful) on notification/attention items)",
+      );
+    }
+    lines.push("  by item type:");
+    lines.push(
+      ...tableLines(
+        "    ",
+        [
+          { header: "item_type", align: "left" },
+          { header: "total", align: "right" },
+          { header: "useful", align: "right" },
+          { header: "noise", align: "right" },
+          { header: "missed", align: "right" },
+          { header: "incorrect", align: "right" },
+          { header: "interruptive", align: "right" },
+        ],
+        sq.byItemType.map((row) => [
+          row.itemType,
+          String(row.total),
+          String(row.counts.useful),
+          String(row.counts.noise),
+          String(row.counts.missed),
+          String(row.counts.incorrect),
+          String(row.counts.interruptive),
+        ]),
+      ),
     );
   }
   lines.push(blank());

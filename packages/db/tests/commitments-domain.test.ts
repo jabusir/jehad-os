@@ -55,6 +55,7 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
     //    roll back exactly 004 — its down path drops the column.
     await migrateUp(pool, defaultMigrationsDir());
     expect(await migrateDown(pool, { to: "003_evidence_links" }, defaultMigrationsDir())).toEqual([
+      "008_feedback",
       "007_calendar",
       "006_notifications",
       "005_commitments_temporal",
@@ -71,12 +72,12 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
     const personalId = await insertLegacyCommitment("personal", "Pay October rent");
     const workId = await insertLegacyCommitment("work", "Ship the quarterly review deck");
 
-    // 3. Re-up applies 004 (+005–007), backfilling every row.
     expect(await migrateUp(pool, defaultMigrationsDir())).toEqual([
       "004_commitments_domain",
       "005_commitments_temporal",
       "006_notifications",
       "007_calendar",
+      "008_feedback",
     ]);
 
     const rows = (
@@ -103,6 +104,7 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
 
     // 5. A post-backfill down path still reverses 004 cleanly (005+ first).
     expect(await migrateDown(pool, { to: "003_evidence_links" }, defaultMigrationsDir())).toEqual([
+      "008_feedback",
       "007_calendar",
       "006_notifications",
       "005_commitments_temporal",

@@ -42,7 +42,18 @@ const FIXTURE: MetricsReport = {
       { runId: run(0xeeeeeeee), waits: 1, totalMs: 60_000 },
     ],
   },
-  interruptions: { resolvedWaits: 11, distinctDays: 3, perDay: 11 / 3 },
+  interruptions: { resolvedWaits: 11, interruptiveVerdicts: 2, total: 13, distinctDays: 3, perDay: 13 / 3 },
+  signalQuality: {
+    total: 10,
+    counts: { useful: 6, noise: 2, missed: 1, incorrect: 1, interruptive: 0 },
+    rates: { useful: 0.6, noise: 0.2, missed: 0.1, incorrect: 0.1, interruptive: 0 },
+    byItemType: [
+      { itemType: "notification", total: 6, counts: { useful: 3, noise: 2, missed: 0, incorrect: 1, interruptive: 0 } },
+      { itemType: "attention_item", total: 3, counts: { useful: 3, noise: 0, missed: 0, incorrect: 0, interruptive: 0 } },
+      { itemType: "brief_section", total: 1, counts: { useful: 0, noise: 0, missed: 1, incorrect: 0, interruptive: 0 } },
+    ],
+    falseAttentionRate: 0.25,
+  },
   autonomousCompletion: { completedRuns: 3, endedRuns: 4, cancelledExcluded: 1, rate: 0.75 },
   falseEscalation: { resolved: 3, notNeeded: 1, rate: 1 / 3 },
   modelCost: {
@@ -80,12 +91,13 @@ const FIXTURE: MetricsReport = {
 const EMPTY: MetricsReport = {
   window: { since: null, generatedAt: "2026-09-17T06:00:00.000Z" },
   humanBlocked: { totalMs: 0, openWaits: 0, byReason: [], perRun: [] },
-  interruptions: { resolvedWaits: 0, distinctDays: 0, perDay: 0 },
+  interruptions: { resolvedWaits: 0, interruptiveVerdicts: 0, total: 0, distinctDays: 0, perDay: 0 },
   autonomousCompletion: { completedRuns: 0, endedRuns: 0, cancelledExcluded: 0, rate: 0 },
   falseEscalation: { resolved: 0, notNeeded: 0, rate: 0 },
   modelCost: { totalUsd: 0, calls: 0, byProviderModel: [], topRuns: [] },
   workflowStatus: { statuses: [] },
   failures: { actionAttempts: { failed: 0, unknown: 0 }, outboxErrors: [] },
+  signalQuality: null,
 };
 
 describe("renderMetricsText", () => {
@@ -108,7 +120,17 @@ human blocked time (derived from human_waits — plan §14)
     eeeeeeee      1    1m 0s
 
 interruptions
-  resolved waits: 11 over 3 distinct days → 3.67/day
+  resolved waits 11 + interruptive verdicts 2 = 13 over 3 distinct days → 4.33/day
+
+signal quality (dogfooding feedback — plan: signal, not parsing)
+  verdicts: 10 (useful 6, noise 2, missed 1, incorrect 1, interruptive 0)
+  rates: useful 60.0% · noise 20.0% · missed 10.0% · incorrect 10.0% · interruptive 0.0%
+  false attention rate: 25.0% (noise / (noise + useful) on notification/attention items)
+  by item type:
+    item_type       total  useful  noise  missed  incorrect  interruptive
+    notification        6       3      2       0          1             0
+    attention_item      3       3      0       0          0             0
+    brief_section       1       0      0       1          0             0
 
 autonomous completion
   completed 3 / 4 ended runs (1 cancelled excluded) → 75.0%
@@ -152,7 +174,8 @@ failures
     expect(text).toContain("total blocked: 0ms  (open waits now: 0)");
     expect(text).toContain("no resolved waits in window");
     expect(text).toContain("no blocked runs in window");
-    expect(text).toContain("resolved waits: 0 (no human_waits in window)");
+    expect(text).toContain("resolved waits: 0, interruptive verdicts: 0 (nothing in window)");
+    expect(text).toContain("no feedback recorded in window (rates null, not zero)");
     expect(text).toContain("→ 0.0%");
     expect(text).toContain("total: $0.0000 across 0 calls");
     expect(text).toContain("no runs");

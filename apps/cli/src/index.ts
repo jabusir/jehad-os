@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { runCli } from "./commands.js";
 import { runBriefCommand } from "./commands/brief.js";
+import { runFeedbackCommand } from "./commands/feedback.js";
 import { runMetricsCommand } from "./commands/metrics.js";
 import { readJosctlCredential } from "./keychain.js";
 
@@ -14,6 +15,12 @@ if (process.argv[2] === "metrics") {
 } else if (process.argv[2] === "brief") {
   // josctl brief [--close] — direct DB read until a brief API route lands (M6B).
   process.exitCode = await runBriefCommand(process.argv, {
+    databaseUrl: process.env.DATABASE_URL ?? "postgres://localhost:5432/jehad",
+  });
+} else if (process.argv[2] === "feedback") {
+  // josctl feedback — direct-DB append-only taps until a feedback API route
+  // lands (E3-B; same Phase-1 pattern as metrics/brief).
+  process.exitCode = await runFeedbackCommand(process.argv, {
     databaseUrl: process.env.DATABASE_URL ?? "postgres://localhost:5432/jehad",
   });
 } else {
