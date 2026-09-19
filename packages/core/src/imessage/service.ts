@@ -21,6 +21,8 @@
 // matching joins later (Phase B pairing); hash + window only for now.
 
 import { recordAudit, type SqlExecutor } from "../actions/audit.js";
+import { attemptPairingInTx, canonicalizeHandle, principalForHandle } from "./pairing.js";
+import type { InboundConversationMessage } from "./conversation.js";
 
 /** Structural slice of pg.Pool — connect() yields a transaction client. */
 export interface ImessageDb {
@@ -70,6 +72,18 @@ export interface ImessageTransportEventInput {
   /** Present ONLY for is_from_me rows (privacy rule; nulled otherwise). */
   readonly normalized_text_sha256?: string | null;
   readonly observed_at: string;
+  /**
+   * Decoded text — present ONLY on rows whose handle is paired (multi-
+   * principal Lane P). TRANSIENT: routed to the conversation handler in
+   * memory and NEVER persisted — no content column exists anywhere.
+   * Mutually exclusive with pairing_attempt_hash.
+   */
+  readonly content?: string | null;
+  /**
+   * sha256(canonicalNormalize(content)) on an UNPAIRED handle — the §5.1.1
+   * pre-auth pairing probe, EXACT hash match only (no parsing, no LLM).
+   */
+  readonly pairing_attempt_hash?: string | null;
 }
 
 export interface ImessageCursorInput {
@@ -102,7 +116,18 @@ export interface ImessageHealthInput {
 export interface ImessageServiceOptions {
   readonly actor?: string;
   readonly now?: () => Date;
+  /**
+   * Conversation sink for paired-handle inbound (multi-principal Lane P):
+   * invoked AFTER the ingest transaction commits, once per message that
+   * passed routing (paired handle + unexpired imessage:converse grant).
+   * Content is transient — it never touches any table; handler failures
+   * are audited, never thrown through ingest.
+   */
+  readonly onInbound?: (message: InboundConversationMessage) => Promise<void>;
 }
+
+/** Upper bound on transient inbound content (the sensor's decode cap). */
+export const MAX_IMESSAGE_INBOUND_CONTENT = 4000;
 
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 
@@ -146,6 +171,10 @@ interface ValidatedTransportEvent {
   readonly text_length: number | null;
   readonly normalized_text_sha256: string | null;
   readonly observed_at: Date;
+  /** Transient paired-handle content; NEVER persisted (own rows: dropped). */
+  readonly content: string | null;
+  /** §5.1.1 pairing probe hash; stored on the metadata row for audit. */
+  readonly pairingAttemptHash: string | null;
 }
 
 function validateTransportEvent(
@@ -192,6 +221,30 @@ function validateTransportEvent(
     // rows; a hash on a third-party row is dropped, never stored.
     normalizedTextSha256 = input.is_from_me ? hash : null;
   }
+  const hasContent = input.content !== undefined && input.content !== null;
+  const hasAttempt = input.pairing_attempt_hash !== undefined && input.pairing_attempt_hash !== null;
+  if (hasContent && hasAttempt) {
+    // Sensor contract: content rides PAIRED rows, the pairing probe rides
+    // UNPAIRED rows — both at once is malformed; fail closed.
+    throw new ImessageInputError("content and pairing_attempt_hash are mutually exclusive");
+  }
+  let content: string | null = null;
+  if (hasContent) {
+    if (typeof input.content !== "string" || input.content.length > MAX_IMESSAGE_INBOUND_CONTENT) {
+      throw new ImessageInputError(
+        `content must be a string of at most ${MAX_IMESSAGE_INBOUND_CONTENT} chars`,
+      );
+    }
+    content = input.content;
+  }
+  let pairingAttemptHash: string | null = null;
+  if (hasAttempt) {
+    const hash = String(input.pairing_attempt_hash).toLowerCase();
+    if (!SHA256_HEX_RE.test(hash)) {
+      throw new ImessageInputError("pairing_attempt_hash must be a sha256 hex string");
+    }
+    pairingAttemptHash = hash;
+  }
   return {
     guid: input.guid,
     rowid: input.rowid,
@@ -204,6 +257,10 @@ function validateTransportEvent(
     text_length: input.text_length ?? null,
     normalized_text_sha256: normalizedTextSha256,
     observed_at: parseInstant(input.observed_at, "observed_at"),
+    // Own rows ride the unchanged Phase-A path; transient fields are dead
+    // weight there — dropped at the door.
+    content: input.is_from_me ? null : content,
+    pairingAttemptHash: input.is_from_me ? null : pairingAttemptHash,
   };
 }
 
@@ -225,8 +282,8 @@ function validateCursor(cursor: ImessageCursorInput): void {
 const INSERT_EVENT_SQL = `
   INSERT INTO imessage_transport_events
     (guid, rowid, is_from_me, transport_handle, service, has_text, has_attributed_body,
-     decoded_status, text_length, normalized_text_sha256, observed_at)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz)
+     decoded_status, text_length, normalized_text_sha256, observed_at, pairing_attempt_hash)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz, $12)
   ON CONFLICT (guid) DO NOTHING
   RETURNING id
 `;
@@ -255,13 +312,31 @@ const CURSOR_UPSERT_SQL = `
     updated_at        = EXCLUDED.updated_at
 `;
 
+const CONVERSE_GRANT_SQL = `
+  SELECT 1 FROM capability_grants
+   WHERE principal_id = $1::uuid AND capability = 'imessage:converse' AND resource = 'imessage'
+     AND revoked_at IS NULL AND expires_at > $2::timestamptz
+   LIMIT 1
+`;
+
 /**
- * Ingests one shadow-sensor batch + cursor in a single transaction.
+ * Ingests one sensor batch + cursor in a single transaction.
  * Dedupe on guid (at-least-once → exactly-once); duplicates counted.
  * Own-message rows (normalized_text_sha256 set) are correlated against
  * sent_message_fingerprints on hash + the 10-minute delivery→observation
  * window; matches set fingerprint_id, backfill the fingerprint's
  * imessage_guid (first correlation wins), and ride the report.
+ *
+ * Multi-principal routing (Lane P) per NON-own row, inside the same tx:
+ *   paired handle + content   → converse-grant check; granted messages are
+ *                                queued for the conversation handler (run
+ *                                AFTER commit — content stays transient);
+ *                                ungranted content is dropped + audited.
+ *   unpaired + content        → DISCARD + audit violation (server-side
+ *                                enforcement regardless of the sensor).
+ *   unpaired + pairing hash   → attemptPairingInTx (§5.1.1 EXACT match
+ *                                only — no parsing, no LLM).
+ *   unpaired, neither         → drop + audit metadata row.
  */
 export async function ingestBatch(
   db: ImessageDb,
@@ -278,13 +353,23 @@ export async function ingestBatch(
   validateCursor(cursor);
   const rows = batch.map(validateTransportEvent);
   const now = (opts.now?.() ?? new Date()).toISOString();
+  const actor = opts.actor ?? "harness:imessage-sensor";
 
   const client = await db.connect();
   let accepted = 0;
   const matches: ImessageFingerprintMatch[] = [];
+  const inbound: InboundConversationMessage[] = [];
+  const routeAudit = (action: string, outputs: Record<string, unknown>): Promise<void> =>
+    recordAudit(client, {
+      actor,
+      action,
+      reversible: true,
+      outputsRef: JSON.stringify(outputs),
+    });
   try {
     await client.query("BEGIN");
     for (const row of rows) {
+      const canonicalHandle = canonicalizeHandle(row.transport_handle);
       const inserted = await client.query(INSERT_EVENT_SQL, [
         row.guid,
         row.rowid,
@@ -297,12 +382,19 @@ export async function ingestBatch(
         row.text_length,
         row.normalized_text_sha256,
         row.observed_at.toISOString(),
+        row.pairingAttemptHash,
       ]);
       const eventId =
         inserted.rows[0] !== undefined
           ? String(inserted.rows[0].id)
           : null;
       if (eventId !== null) accepted += 1;
+      if (eventId !== null && !row.is_from_me) {
+        // Routing runs only on FIRST acceptance (redelivered guids are
+        // duplicates — a conversation turn must never dispatch twice, and
+        // a consumed pairing code must not be re-attempted).
+        await routeRow(client, row, canonicalHandle, now, routeAudit, inbound);
+      }
       if (row.normalized_text_sha256 === null) continue;
 
       // Correlate on hash + window — accepted rows (fingerprint_id NULL by
@@ -357,11 +449,89 @@ export async function ingestBatch(
   } finally {
     client.release();
   }
+
+  // Transient conversation dispatch — strictly AFTER commit: content lives
+  // in memory only, and a handler failure can never roll ingest back.
+  if (opts.onInbound !== undefined) {
+    for (const message of inbound) {
+      try {
+        await opts.onInbound(message);
+      } catch (err) {
+        await recordAudit(db, {
+          actor: "system:imessage-gateway",
+          action: "imessage.inbound.handler_error",
+          reversible: true,
+          outputsRef: JSON.stringify({
+            principalId: message.principalId,
+            handle: message.handle,
+            error: err instanceof Error ? err.name : "unknown",
+          }),
+        });
+      }
+    }
+  }
   return {
     accepted,
     duplicates: rows.length - accepted,
     fingerprint_matches: matches,
   };
+}
+
+/**
+ * The non-own-row routing ladder (runs INSIDE the ingest transaction, so
+ * pairing consumption and violation audits are atomic with the metadata
+ * row). Queues granted conversation messages for post-commit dispatch.
+ */
+async function routeRow(
+  client: ImessageTx,
+  row: { readonly content: string | null; readonly pairingAttemptHash: string | null },
+  canonicalHandle: string,
+  nowIso: string,
+  audit: (action: string, outputs: Record<string, unknown>) => Promise<void>,
+  inbound: InboundConversationMessage[],
+): Promise<void> {
+  const principal = await principalForHandle(client, canonicalHandle);
+  if (principal !== null) {
+    if (row.content === null || row.content.length === 0) {
+      return; // paired handle, no content: metadata only
+    }
+    const grant = await client.query(CONVERSE_GRANT_SQL, [principal.principalId, nowIso]);
+    if (grant.rows[0] === undefined) {
+      await audit("imessage.inbound.dropped", {
+        reason: "no-converse-grant",
+        handle: canonicalHandle,
+        principalId: principal.principalId,
+      });
+      return;
+    }
+    await audit("imessage.inbound.routed", {
+      handle: canonicalHandle,
+      principalId: principal.principalId,
+    });
+    inbound.push({ principalId: principal.principalId, handle: canonicalHandle, text: row.content });
+    return;
+  }
+
+  // Unpaired handle. Content here is a PRIVACY VIOLATION (the sensor may
+  // only send content for paired handles) — discarded, never forwarded.
+  if (row.content !== null && row.content.length > 0) {
+    await audit("imessage.content_violation", {
+      handle: canonicalHandle,
+      textLength: row.content.length,
+    });
+    return;
+  }
+  if (row.pairingAttemptHash !== null) {
+    // §5.1.1 pre-auth exception, whole and entire: EXACT hash match against
+    // the active pairing session — attemptPairingInTx audits every branch.
+    await attemptPairingInTx(
+      client,
+      { handle: canonicalHandle, attemptHash: row.pairingAttemptHash },
+      { actor: "harness:imessage-sensor" },
+    );
+    return;
+  }
+  await audit("imessage.inbound.unpaired", { handle: canonicalHandle });
 }
 
 const HEALTH_UPSERT_SQL = `

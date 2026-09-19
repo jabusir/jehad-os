@@ -204,7 +204,23 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage harness routes (integration)", () 
 
   // ------------------------------------------------------------- health
 
-  it("health with the grant: 204, state upsert, audit entry", async () => {
+  it("health with the grant: 200 + paired_handles body, state upsert, audit entry", async () => {
+    // Pair one handle so the response body carries a real canonical handle.
+    const paired = await db.pool.query(
+      "INSERT INTO principals (type, name) VALUES ('user', $1) RETURNING id",
+      [`yusra-${randomUUID().slice(0, 8)}`],
+    );
+    const session = await db.pool.query(
+      `INSERT INTO imessage_pairing_sessions (principal_id, purpose, code_hash, expires_at)
+       VALUES ($1::uuid, 'pair', $2, now() + interval '5 minutes') RETURNING id`,
+      [paired.rows[0].id, "c".repeat(64)],
+    );
+    await db.pool.query(
+      `INSERT INTO transport_identities (principal_id, transport, handle, verified_at, last_seen_at, paired_via_session)
+       VALUES ($1::uuid, 'imessage', '+15550003333', now(), now(), $2::uuid)`,
+      [paired.rows[0].id, session.rows[0].id],
+    );
+
     const health = {
       health_process: "healthy",
       health_database: "healthy",
@@ -219,8 +235,8 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage harness routes (integration)", () 
       headers: { ...sensorHeaders(ingestToken), "content-type": "application/json" },
       payload: JSON.stringify(health),
     });
-    expect(res.statusCode).toBe(204);
-    expect(res.body).toBe("");
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ paired_handles: ["+15550003333"] });
 
     const state = (
       await db.pool.query("SELECT * FROM imessage_sensor_state")
@@ -235,7 +251,8 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage harness routes (integration)", () 
       headers: { ...sensorHeaders(ingestToken), "content-type": "application/json" },
       payload: JSON.stringify({ ...health, health_decoder: "degraded" }),
     });
-    expect(degraded.statusCode).toBe(204);
+    expect(degraded.statusCode).toBe(200);
+    expect(degraded.json()).toEqual({ paired_handles: ["+15550003333"] });
     const after = (await db.pool.query("SELECT health_decoder FROM imessage_sensor_state")).rows[0];
     expect(after.health_decoder).toBe("degraded");
 

@@ -37,3 +37,15 @@ notifications:
   autoApproveKinds: ["brief", "calendar-change"]
   escalationMinUrgency: high
   defaultTtlMinutes: 240
+
+# gateway — iMessage multi-principal conversational budgets (Lane P; keyed by
+# principal NAME). A principal absent here is DENIED conversation (fail
+# closed): caps are owner-tuned config, not state (§5.4). Enforcement counts
+# model_calls rows (principal_id + surface='imessage') over rolling-hour and
+# UTC-day windows BEFORE dispatch. Model id must pass the egress policy for
+# personal/normal. NOTE (deviation from the contracts sketch): the sketched
+# `openrouter/auto-fast` is not in the repo's allowlisted model ids; the
+# cheapest fast allowlisted model is the evals-pinned openai/gpt-4o-mini.
+gateway:
+  principals:
+    yusra: { model: openai/gpt-4o-mini, requests_per_hour: 20, cost_per_day: 2.0 }

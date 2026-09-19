@@ -141,3 +141,84 @@ describe("decideAutonomy (ceiling from the real policy.yaml shape)", () => {
     }
   });
 });
+
+// ------------------------------------------------------- gateway (Lane P)
+
+describe("policy gateway section (multi-principal Lane P)", () => {
+  const BASE = [
+    "version: 1",
+    "autonomy_ceiling:",
+    "  read: autonomous",
+    "  propose: autonomous",
+    "  write_canonical: gated",
+    "  external_side_effect: approval_required",
+    "  money_and_contracts: prohibited",
+  ].join("\n");
+
+  it("parses gateway.principals entries with budgets keyed by principal name", () => {
+    const policy = parsePolicyV1(
+      BASE +
+        "\ngateway:\n  principals:\n" +
+        "    yusra: { model: openai/gpt-4o-mini, requests_per_hour: 20, cost_per_day: 2.0 }",
+    );
+    expect(policy.gateway?.principals).toEqual({
+      yusra: { model: "openai/gpt-4o-mini", requestsPerHour: 20, costPerDay: 2 },
+    });
+  });
+
+  it("a gateway section without principals = no budgets (absent principal denies later)", () => {
+    const policy = parsePolicyV1(BASE + "\ngateway:\n  principals:\n");
+    expect(policy.gateway?.principals).toEqual({});
+  });
+
+  it("multiple principals parse independently", () => {
+    const policy = parsePolicyV1(
+      BASE +
+        "\ngateway:\n  principals:\n" +
+        "    yusra: { model: m-a, requests_per_hour: 20, cost_per_day: 2.0 }\n" +
+        "    jehad: { model: m-b, requests_per_hour: 60, cost_per_day: 5.5 }",
+    );
+    expect(Object.keys(policy.gateway?.principals ?? {})).toEqual(["yusra", "jehad"]);
+  });
+
+  it("unknown gateway keys fail closed", () => {
+    expect(() => parsePolicyV1(BASE + "\ngateway:\n  frobnicate: true")).toThrow(
+      /unknown gateway key 'frobnicate'/,
+    );
+  });
+
+  it("malformed principal entries fail closed (shape, positivity, duplicates)", () => {
+    const cases = [
+      "    yusra: { model: m, requests_per_hour: 0, cost_per_day: 2.0 }",
+      "    yusra: { model: m, requests_per_hour: 20 }",
+      "    yusra: just a string",
+      "    yusra: { model: m, requests_per_hour: 20, cost_per_day: -1.0 }",
+    ];
+    for (const entry of cases) {
+      expect(() => parsePolicyV1(BASE + "\ngateway:\n  principals:\n" + entry)).toThrow();
+    }
+    expect(() =>
+      parsePolicyV1(
+        BASE +
+          "\ngateway:\n  principals:\n" +
+          "    yusra: { model: m, requests_per_hour: 20, cost_per_day: 2.0 }\n" +
+          "    yusra: { model: m, requests_per_hour: 20, cost_per_day: 2.0 }",
+      ),
+    ).toThrow(/duplicate gateway principal/);
+  });
+
+  it("the repo-root policy.yaml parses with the gateway section present", async () => {
+    const path = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const policyYaml = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../../../../policy.yaml",
+    );
+    const policy = await loadPolicyFile(policyYaml);
+    expect(policy.gateway?.principals.yusra).toEqual({
+      model: "openai/gpt-4o-mini",
+      requestsPerHour: 20,
+      costPerDay: 2,
+    });
+  });
+});

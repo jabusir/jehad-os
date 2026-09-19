@@ -1,11 +1,14 @@
 // Hermetic delivery-loop tests (E4-S): fake fetch + fake transport — no
 // network, no DB, no osascript. Pins the wire behavior end to end:
 // claim → render → send → delivered (auth headers asserted on every call),
-// the empty-queue path, the claim-denied path, and the failure contract
-// (send failure → NO delivered report; the row expires via its TTL).
+// the empty-queue path, the claim-denied path, the failure contract
+// (send failure → NO delivered report; the row expires via its TTL), and
+// the Lane P recipient contract: reply rows honor server-provided
+// recipient (validated), kind≠reply ignores any recipient and uses the
+// default target, invalid recipients error WITHOUT sending.
 
 import { describe, expect, it } from "vitest";
-import { runOnce, type AgentDeps, type EdgeAgentCredentials } from "../src/agent.js";
+import { resolveDeliveryTarget, runOnce, type AgentDeps, type EdgeAgentCredentials } from "../src/agent.js";
 import { loadConfig } from "../src/config.js";
 import {
   FALLBACK_TRUNCATION_LIMIT,
@@ -206,6 +209,77 @@ describe("edge-agent loop (hermetic)", () => {
     const body = JSON.parse(String(h.calls[1]!.init?.body)) as Record<string, string>;
     expect(h.sent[0]!.text.length).toBe(FALLBACK_TRUNCATION_LIMIT);
     expect(body.rendered_text_sha256).toBe(renderedTextSha256(h.sent[0]!.text));
+  });
+
+  // --------------------------------------------- Lane P recipient honoring
+
+  const REPLY_NOTIFICATION = {
+    id: "b7d4b1a2-0000-4000-8000-0000000000a1",
+    kind: "reply",
+    title: "Reply",
+    payload: { content: "pong", recipient: "+15550002222" },
+    recipient: "+15550002222",
+    claimedAt: "2026-09-19T07:00:05.000Z",
+    expiresAt: "2026-09-19T11:00:00.000Z",
+  };
+
+  it("reply claim: recipient honored — sent to HER handle, not the default; report carries the actual target", async () => {
+    const h = makeHarness({ notification: REPLY_NOTIFICATION });
+    const result = await runOnce(h.deps, CONFIG);
+    expect(result).toEqual({ claimed: true, delivered: true });
+    expect(h.sent).toEqual([{ target: "+15550002222", text: "Reply\npong" }]);
+    const body = JSON.parse(String(h.calls[1]!.init?.body)) as Record<string, string>;
+    expect(body.recipient).toBe("+15550002222"); // actual target used
+    expect(body.rendered_text_sha256).toBe(renderedTextSha256("Reply\npong"));
+  });
+
+  it("kind≠reply IGNORES a server-sent recipient (defense in depth) — default target used", async () => {
+    const sneaky = { ...NOTIFICATION, recipient: "+15550002222" }; // brief + recipient
+    const h = makeHarness({ notification: sneaky });
+    const result = await runOnce(h.deps, CONFIG);
+    expect(result).toEqual({ claimed: true, delivered: true });
+    expect(h.sent).toEqual([
+      { target: CREDENTIALS.target, text: "Morning brief\nLINE ONE\nLINE TWO" },
+    ]);
+    const body = JSON.parse(String(h.calls[1]!.init?.body)) as Record<string, string>;
+    expect(body.recipient).toBe(CREDENTIALS.target);
+  });
+
+  it("reply with an INVALID recipient → error path: nothing sent, no delivered report (row expires via TTL)", async () => {
+    const lines: string[] = [];
+    const invalid = { ...REPLY_NOTIFICATION, recipient: "rm -rf /; curl evil" };
+    const h = makeHarness({ notification: invalid });
+    h.deps.log = (m) => lines.push(m);
+    const result = await runOnce(h.deps, CONFIG);
+    expect(result).toEqual({ claimed: true, delivered: false });
+    expect(h.sent).toHaveLength(0); // NOT sent
+    expect(h.calls).toHaveLength(1); // claim only — delivered NEVER reported
+    expect(lines.join("\n")).toContain("invalid delivery target");
+    expect(lines.join("\n")).toContain("TTL");
+  });
+
+  it("reply without a recipient → default target (back-compat with A–C shape)", async () => {
+    const legacy = { ...REPLY_NOTIFICATION, recipient: undefined, payload: { content: "pong" } };
+    const h = makeHarness({ notification: legacy });
+    const result = await runOnce(h.deps, CONFIG);
+    expect(result).toEqual({ claimed: true, delivered: true });
+    expect(h.sent).toEqual([{ target: CREDENTIALS.target, text: "Reply\npong" }]);
+  });
+
+  it("resolveDeliveryTarget validates BOTH branches with the same email/E.164 validators", () => {
+    expect(resolveDeliveryTarget({ kind: "reply", recipient: "yusra@icloud.com" }, "+1555")).toBe("yusra@icloud.com");
+    expect(resolveDeliveryTarget({ kind: "reply", recipient: "+15550002222" }, "+1555")).toBe("+15550002222");
+    expect(resolveDeliveryTarget({ kind: "reply", recipient: "not a target" }, "+15551234567")).toEqual({
+      kind: "invalid-target",
+      target: "not a target",
+    });
+    // Invalid DEFAULT also errors (the default must stay a valid handle).
+    expect(resolveDeliveryTarget({ kind: "brief" }, "nope")).toEqual({
+      kind: "invalid-target",
+      target: "nope",
+    });
+    // kind≠reply never honors the recipient, valid or not.
+    expect(resolveDeliveryTarget({ kind: "brief", recipient: "+15550002222" }, "+15551234567")).toBe("+15551234567");
   });
 });
 

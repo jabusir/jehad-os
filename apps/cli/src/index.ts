@@ -2,6 +2,7 @@
 import { runCli } from "./commands.js";
 import { runBriefCommand } from "./commands/brief.js";
 import { runFeedbackCommand } from "./commands/feedback.js";
+import { runImessageCommand } from "./commands/imessage.js";
 import { runMetricsCommand } from "./commands/metrics.js";
 import { readJosctlCredential } from "./keychain.js";
 
@@ -21,6 +22,12 @@ if (process.argv[2] === "metrics") {
   // josctl feedback — direct-DB append-only taps until a feedback API route
   // lands (E3-B; same Phase-1 pattern as metrics/brief).
   process.exitCode = await runFeedbackCommand(process.argv, {
+    databaseUrl: process.env.DATABASE_URL ?? "postgres://localhost:5432/jehad",
+  });
+} else if (process.argv[2] === "imessage") {
+  // josctl imessage pair|identities — direct-DB pairing admin (Lane P; the
+  // code is printed ONCE and never persisted plaintext).
+  process.exitCode = await runImessageCommand(process.argv, {
     databaseUrl: process.env.DATABASE_URL ?? "postgres://localhost:5432/jehad",
   });
 } else {
