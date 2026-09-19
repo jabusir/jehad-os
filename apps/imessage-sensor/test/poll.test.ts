@@ -271,6 +271,36 @@ describe("multi-principal classification (paired handles)", () => {
     expect(result.event.content).toBeUndefined();
   });
 
+  // ADVERSARIAL (heartbeat-response poisoning): the sensor's ONLY trust
+  // root for the paired-handle cache is the health response itself (the
+  // request is bearer+capability authenticated; the RESPONSE body is
+  // unsigned). A poisoned response listing an attacker handle makes this
+  // process put that handle's CONTENT on the wire. This pin documents that
+  // local fact — the security boundary is server-side: the attacker
+  // handle is unpaired in transport_identities, so ingest discards +
+  // audits (imessage.content_violation; pinned in
+  // packages/core/src/imessage/routing.integration.test.ts). Content
+  // transits one authenticated hop; it never persists.
+  it("adversarial: poisoned paired_handles cache DOES forward attacker content locally — server is the boundary", () => {
+    const poisoned = cacheWith("+15550000001", "+1555ATTACK9"); // MITM-injected entry
+    const result = classifyRow(
+      row({ rowid: 99, isFromMe: false, text: "POISONED-FORWARD", handleId: "+1555ATTACK9" }),
+      observedAt,
+      poisoned,
+    );
+    expect(result.event.content).toBe("POISONED-FORWARD");
+    expect(result.event.pairing_attempt_hash).toBeUndefined();
+    // The un-poisoned cache with the same server list stays hash-only.
+    const clean = cacheWith("+15550000001");
+    const cleanResult = classifyRow(
+      row({ rowid: 100, isFromMe: false, text: "POISONED-FORWARD", handleId: "+1555ATTACK9" }),
+      observedAt,
+      clean,
+    );
+    expect(cleanResult.event.content).toBeUndefined();
+    expect(cleanResult.event.pairing_attempt_hash).toBe(canonicalTextSha256("POISONED-FORWARD"));
+  });
+
   it("paired decode-failure row → NO content field, decoded_status records the failure", () => {
     const result = classifyRow(
       row({ rowid: 5, isFromMe: false, text: null, attributedBody: malformedBody() }),

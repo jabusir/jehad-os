@@ -80,4 +80,38 @@ describe("PairedHandleCache", () => {
     expect(cache.has("+15550000001")).toBe(false);
     expect(cache.size).toBe(0);
   });
+
+  // ADVERSARIAL (normalization collision, sensor side): the sensor
+  // lowercases NON-email passthrough handles, so a paired canonical
+  // "AppleIDUser" collides with raw "appleiduser" HERE — this over-match
+  // is a sensor-side fact, not authority: the server canonicalizes
+  // passthrough handles case-SENSITIVELY (pairing.ts canonicalizeHandle),
+  // so the colliding sender is unpaired server-side and its content is
+  // discarded + audited (pinned in
+  // packages/core/src/imessage/routing.integration.test.ts). This pin
+  // exists so the divergence is a documented contract, not an accident.
+  it("adversarial: non-email case collision over-matches sensor-side (server stays authoritative)", () => {
+    expect(normalizeHandle("AppleIDUser")).toBe("appleiduser");
+    expect(normalizeHandle("appleiduser")).toBe("appleiduser");
+    const cache = new PairedHandleCache();
+    cache.refresh(["AppleIDUser"]); // server canonical (passthrough, case preserved)
+    expect(cache.has("appleiduser")).toBe(true); // over-match: content WOULD be forwarded…
+    // …but the server's canonical form of the raw handle differs from the
+    // paired canonical — the discard+audit path is the security boundary.
+  });
+
+  // ADVERSARIAL (digit-threshold divergence): the sensor forces +digits on
+  // ANY digit-bearing handle (even <7 digits), while the server treats
+  // short digit strings as opaque passthrough. Again server-authoritative:
+  // the divergent forms are unpaired server-side → fail closed.
+  it("adversarial: short-digit divergence — sensor +digits vs server passthrough", () => {
+    expect(normalizeHandle("5551234")).toBe("+5551234");
+    const cache = new PairedHandleCache();
+    cache.refresh(["+5551234"]); // would only exist if the owner paired exactly this
+    expect(cache.has("5551234")).toBe(true); // same-normalization match
+    cache.refresh(["5551234"]); // server canonical (passthrough)
+    expect(cache.has("+5551234")).toBe(true); // sensor normalizes BOTH sides → match
+    // Neither direction creates server-side pairing that pairing.ts did
+    // not authorize; false-pair attempts die at ingest (content_violation).
+  });
 });
