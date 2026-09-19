@@ -113,7 +113,7 @@ export async function runFeedbackCommand(
       return 0;
     }
     if (parsed.candidates) {
-      return renderCandidates(db, out);
+      return await renderCandidates(db, out);
     }
     const { feedback, deduped } = await recordFeedback(
       db,
