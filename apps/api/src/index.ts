@@ -4,6 +4,7 @@ import { setupAuth } from "./auth.js";
 import { registerEventRoutes } from "./routes/events.js";
 import { registerReviewRoutes } from "./routes/review.js";
 import { registerHarnessRoutes } from "./routes/harness.js";
+import { registerImessageHarnessRoutes } from "./routes/harness-imessage.js";
 import { registerNotificationRoutes } from "./routes/notifications.js";
 import type { PromotionDb } from "@jehad/core";
 
@@ -29,6 +30,7 @@ export async function buildApp(opts: AppOptions = {}) {
     registerEventRoutes(app, { db: opts.db });
     registerReviewRoutes(app, { db: opts.db });
     registerHarnessRoutes(app, { db: opts.db });
+    registerImessageHarnessRoutes(app, { db: opts.db });
     registerNotificationRoutes(app, { db: opts.db });
   }
 

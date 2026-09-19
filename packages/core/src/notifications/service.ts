@@ -18,6 +18,7 @@ import {
   DEFAULT_NOTIFICATIONS_CONFIG,
   isNotificationKind,
   loadNotificationsConfig,
+  REPLY_NOTIFICATION_KIND,
   type NotificationKind,
   type NotificationsConfig,
 } from "./config.js";
@@ -49,6 +50,14 @@ export interface NotificationRow {
   readonly expiresAt: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+  /** Delivery surface (gateway §4 reply conjunction; null on legacy rows). */
+  readonly surface: string | null;
+  /** Principal that requested the reply (paired owner for auto-approval). */
+  readonly requestingPrincipalId: string | null;
+  /** Principal the reply conversation belongs to. */
+  readonly conversationPrincipalId: string | null;
+  /** True when the delivery target is outside the owner's verified identity. */
+  readonly thirdPartyRecipient: boolean | null;
 }
 
 /** The claim projection: exactly what a granted harness may take. */
@@ -137,12 +146,26 @@ function rowToNotification(row: Record<string, unknown>): NotificationRow {
     expiresAt: toIso(row.expires_at),
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
+    surface: row.surface === null || row.surface === undefined ? null : String(row.surface),
+    requestingPrincipalId:
+      row.requesting_principal_id === null || row.requesting_principal_id === undefined
+        ? null
+        : String(row.requesting_principal_id),
+    conversationPrincipalId:
+      row.conversation_principal_id === null || row.conversation_principal_id === undefined
+        ? null
+        : String(row.conversation_principal_id),
+    thirdPartyRecipient:
+      row.third_party_recipient === null || row.third_party_recipient === undefined
+        ? null
+        : Boolean(row.third_party_recipient),
   };
 }
 
 const NOTIFICATION_COLUMNS = `id, kind, title, payload, domain_id, status, source_type, source_id,
        created_by, approved_by, approved_at, claimed_at, claimed_by,
-       delivered_by, delivered_at, expires_at, created_at, updated_at`;
+       delivered_by, delivered_at, expires_at, created_at, updated_at,
+       surface, requesting_principal_id, conversation_principal_id, third_party_recipient`;
 
 export interface CreateNotificationInput {
   readonly kind: NotificationKind;
@@ -155,19 +178,141 @@ export interface CreateNotificationInput {
   readonly createdBy: string;
   /** Overrides the config-derived expiry (absolute). */
   readonly expiresAt?: Date;
+  /** Delivery surface (gateway replies: 'imessage'). */
+  readonly surface?: string | null;
+  /** Reply-rule leg: the principal that requested the reply. */
+  readonly requestingPrincipalId?: string | null;
+  /** Reply-rule leg: the principal the conversation belongs to. */
+  readonly conversationPrincipalId?: string | null;
+  /** Reply-rule leg: false = recipient is the owner's verified identity. */
+  readonly thirdPartyRecipient?: boolean | null;
 }
 
 export interface NotificationServiceOptions {
   readonly config?: NotificationsConfig;
   readonly actor?: string;
   readonly now?: () => Date;
+  /**
+   * The owner's verified transport identity for the reply conjunction's
+   * recipient leg (gateway Phases A–C: the fixed EDGE_IMESSAGE_TARGET).
+   * Defaults to process.env.EDGE_IMESSAGE_TARGET; unset fails closed
+   * (replies route to the approval queue).
+   */
+  readonly replyVerifiedRecipient?: string | null;
+}
+
+/** What evaluateReplyApproval needs from a notification (input or row shape). */
+export interface ReplyApprovalNotification {
+  readonly kind: NotificationKind;
+  readonly surface?: string | null;
+  readonly requestingPrincipalId?: string | null;
+  readonly conversationPrincipalId?: string | null;
+  readonly thirdPartyRecipient?: boolean | null;
+  /** The reply recipient rides payload.recipient (A–C: the fixed target). */
+  readonly payload: Record<string, unknown>;
+}
+
+/** One entry per failing conjunction leg (empty when all legs hold). */
+export type ReplyApprovalLeg =
+  | "kind"
+  | "surface"
+  | "requesting-principal"
+  | "recipient"
+  | "conversation-principal"
+  | "third-party-recipient";
+
+export interface ReplyApprovalDecision {
+  readonly approved: boolean;
+  readonly failedLegs: readonly ReplyApprovalLeg[];
+}
+
+export interface ReplyApprovalOptions {
+  /**
+   * The owner's verified transport identity (A–C: the fixed
+   * EDGE_IMESSAGE_TARGET). Defaults to process.env.EDGE_IMESSAGE_TARGET;
+   * unset → the recipient leg fails closed.
+   */
+  readonly verifiedOwnerRecipient?: string | null;
+}
+
+/**
+ * The ONE reply auto-approval rule (gateway §4 — no phase ever ships a
+ * weaker version): a kind=reply notification is approved at creation ONLY
+ * when every conjunction leg holds —
+ *
+ *   kind                    = reply
+ *   AND surface             = imessage
+ *   AND requestingPrincipal = a paired owner        (A–C: a user principal)
+ *   AND recipient           = that principal's verified transport identity
+ *   AND conversationPrincipal = requestingPrincipal
+ *   AND thirdPartyRecipient = false
+ *
+ * Any failing leg routes the notification to the normal approval queue.
+ * Phases A–C: the fixed EDGE_IMESSAGE_TARGET IS the owner's verified
+ * identity — payload.recipient must equal it when present, and the leg
+ * fails closed when no verified recipient is configured at all.
+ */
+export async function evaluateReplyApproval(
+  db: SqlExecutor,
+  notification: ReplyApprovalNotification,
+  opts: ReplyApprovalOptions = {},
+): Promise<ReplyApprovalDecision> {
+  const failedLegs: ReplyApprovalLeg[] = [];
+  if (notification.kind !== REPLY_NOTIFICATION_KIND) failedLegs.push("kind");
+  if (notification.surface !== "imessage") failedLegs.push("surface");
+
+  const requestingPrincipalId = notification.requestingPrincipalId ?? null;
+  if (requestingPrincipalId === null) {
+    failedLegs.push("requesting-principal");
+  } else {
+    // A–C: the paired owner IS a user principal (single-owner system;
+    // Phase B swaps this leg onto the pairing table's verified identities).
+    const principal = await db.query(
+      "SELECT type FROM principals WHERE id = $1::uuid",
+      [requestingPrincipalId],
+    );
+    const type = principal.rows[0]?.type;
+    if (type !== "user") failedLegs.push("requesting-principal");
+  }
+
+  const verifiedRecipient =
+    opts.verifiedOwnerRecipient !== undefined
+      ? opts.verifiedOwnerRecipient
+      : (process.env.EDGE_IMESSAGE_TARGET ?? null);
+  if (verifiedRecipient === null || verifiedRecipient === "") {
+    failedLegs.push("recipient"); // fail closed: no verified identity to check against
+  } else {
+    const recipient = notification.payload["recipient"];
+    // A–C fixed-target delivery: an absent recipient rides the target by
+    // construction; a present recipient must BE the verified identity.
+    if (recipient !== undefined && recipient !== null && recipient !== verifiedRecipient) {
+      failedLegs.push("recipient");
+    }
+  }
+
+  const conversationPrincipalId = notification.conversationPrincipalId ?? null;
+  if (
+    conversationPrincipalId === null ||
+    requestingPrincipalId === null ||
+    conversationPrincipalId !== requestingPrincipalId
+  ) {
+    failedLegs.push("conversation-principal");
+  }
+
+  if (notification.thirdPartyRecipient !== false) {
+    failedLegs.push("third-party-recipient"); // null (unknown) fails closed too
+  }
+
+  return { approved: failedLegs.length === 0, failedLegs };
 }
 
 /**
  * Creates one notification. Status comes from policy: kinds on the
  * auto-approve list land approved (approved_at stamped, approved_by null —
  * the approval is policy, not a principal); everything else lands pending
- * for user review.
+ * for user review. kind=reply NEVER consults the auto-approve list — its
+ * ONLY approval path is evaluateReplyApproval (the §4 conjunction); any
+ * failing leg lands pending like every other reviewed kind.
  */
 export async function createNotification(
   db: SqlExecutor,
@@ -175,7 +320,9 @@ export async function createNotification(
   opts: NotificationServiceOptions = {},
 ): Promise<NotificationRow> {
   if (!isNotificationKind(input.kind)) {
-    throw new NotificationInputError(`kind must be one of brief|escalation|custom|calendar-change`);
+    throw new NotificationInputError(
+      `kind must be one of brief|escalation|custom|calendar-change|reply`,
+    );
   }
   if (!isSourceType(input.sourceType)) {
     throw new NotificationInputError(`sourceType must be one of escalation|brief|run|calendar`);
@@ -195,9 +342,45 @@ export async function createNotification(
   if (input.sourceId !== undefined && input.sourceId !== null && !UUID_RE.test(input.sourceId)) {
     throw new NotificationInputError("sourceId must be a uuid or null");
   }
+  if (
+    input.surface !== undefined && input.surface !== null &&
+    (typeof input.surface !== "string" || input.surface.length === 0 || input.surface.length > 64)
+  ) {
+    throw new NotificationInputError("surface must be null or a string of 1..64 chars");
+  }
+  for (const field of ["requestingPrincipalId", "conversationPrincipalId"] as const) {
+    const value = input[field];
+    if (value !== undefined && value !== null && !UUID_RE.test(value)) {
+      throw new NotificationInputError(`${field} must be a uuid or null`);
+    }
+  }
+  if (
+    input.thirdPartyRecipient !== undefined && input.thirdPartyRecipient !== null &&
+    typeof input.thirdPartyRecipient !== "boolean"
+  ) {
+    throw new NotificationInputError("thirdPartyRecipient must be null or a boolean");
+  }
   const config = opts.config ?? DEFAULT_NOTIFICATIONS_CONFIG;
   const now = opts.now?.() ?? new Date();
-  const autoApproved = config.autoApproveKinds.includes(input.kind);
+  // Reply guard: the kind list is dead to replies — the conjunction is the
+  // single approval rule (gateway §4; autoApproveKinds never contains reply).
+  const replyDecision =
+    input.kind === REPLY_NOTIFICATION_KIND
+      ? await evaluateReplyApproval(
+          db,
+          {
+            kind: input.kind,
+            surface: input.surface ?? null,
+            requestingPrincipalId: input.requestingPrincipalId ?? null,
+            conversationPrincipalId: input.conversationPrincipalId ?? null,
+            thirdPartyRecipient: input.thirdPartyRecipient ?? null,
+            payload: input.payload,
+          },
+          { verifiedOwnerRecipient: opts.replyVerifiedRecipient },
+        )
+      : null;
+  const autoApproved =
+    replyDecision !== null ? replyDecision.approved : config.autoApproveKinds.includes(input.kind);
   const status: NotificationStatus = autoApproved ? "approved" : "pending";
   const expiresAtIso = (
     input.expiresAt ?? new Date(now.getTime() + config.defaultTtlMinutes * 60_000)
@@ -205,9 +388,11 @@ export async function createNotification(
 
   const inserted = await db.query(
     `INSERT INTO notifications (kind, title, payload, domain_id, status, source_type, source_id,
-                                created_by, approved_at, expires_at, created_at, updated_at)
+                                created_by, approved_at, expires_at, created_at, updated_at,
+                                surface, requesting_principal_id, conversation_principal_id,
+                                third_party_recipient)
      VALUES ($1, $2, $3::jsonb, $4::uuid, $5, $6, $7, $8::uuid, $9::timestamptz,
-             $10::timestamptz, $11::timestamptz, $11::timestamptz)
+             $10::timestamptz, $11::timestamptz, $11::timestamptz, $12, $13::uuid, $14::uuid, $15)
      RETURNING ${NOTIFICATION_COLUMNS}`,
     [
       input.kind,
@@ -221,6 +406,10 @@ export async function createNotification(
       autoApproved ? now.toISOString() : null,
       expiresAtIso,
       now.toISOString(),
+      input.surface ?? null,
+      input.requestingPrincipalId ?? null,
+      input.conversationPrincipalId ?? null,
+      input.thirdPartyRecipient ?? null,
     ],
   );
   const row = inserted.rows[0];
@@ -237,6 +426,9 @@ export async function createNotification(
       autoApproved,
       sourceType: notification.sourceType,
       sourceId: notification.sourceId,
+      ...(replyDecision !== null
+        ? { replyRule: replyDecision.approved, replyFailedLegs: replyDecision.failedLegs }
+        : {}),
     }),
   });
   return notification;

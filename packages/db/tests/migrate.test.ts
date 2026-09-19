@@ -20,7 +20,7 @@ const TABLES_001 = [
 const ALL_MIGRATIONS = [
   "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
   "004_commitments_domain", "005_commitments_temporal", "006_notifications",
-  "007_calendar", "008_feedback", "009_notification_calendar_change",
+  "007_calendar", "008_feedback", "009_notification_calendar_change", "010_imessage_sensor",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -126,6 +126,45 @@ describe("migration files (fs only)", () => {
     expect(feedback!.downSql).toMatch(/DROP TABLE IF EXISTS feedback\b/);
   });
 
+  it("010 creates the iMessage shadow-sensor tables per the binding sketch; down reverses in dep order", async () => {
+    const migrations = await listMigrations();
+    const imessage = migrations.find((m) => m.name === "010_imessage_sensor");
+    expect(imessage).toBeDefined();
+    // Binding sketch shape: three tables.
+    expect(imessage!.sql).toMatch(/CREATE TABLE imessage_transport_events\b/);
+    expect(imessage!.sql).toMatch(/CREATE TABLE sent_message_fingerprints\b/);
+    expect(imessage!.sql).toMatch(/CREATE TABLE imessage_sensor_state\b/);
+    // guid UNIQUE = the idempotency key; hash only for is_from_me rows.
+    expect(imessage!.sql).toMatch(/guid\s+text NOT NULL UNIQUE/);
+    expect(imessage!.sql).toMatch(/CHECK \(normalized_text_sha256 IS NULL OR is_from_me\)/);
+    // Privacy rule: no content column anywhere in the sensor tables.
+    expect(imessage!.sql).not.toMatch(/content\s+text/);
+    // Singleton pinned to true; health vocabulary constrained.
+    expect(imessage!.sql).toMatch(/singleton\s+boolean PRIMARY KEY DEFAULT true CHECK \(singleton\)/);
+    expect(imessage!.sql).toMatch(/health_process\s+text CHECK \(health_process IN \('healthy', 'degraded', 'failed'\)\)/);
+    // Reply rule: kind widens with 'reply' + the four nullable support columns.
+    expect(imessage!.sql).toMatch(
+      /CHECK \(kind IN \('brief', 'escalation', 'custom', 'calendar-change', 'reply'\)\)/,
+    );
+    for (const column of [
+      "surface", "requesting_principal_id", "conversation_principal_id", "third_party_recipient",
+    ]) {
+      expect(imessage!.sql).toMatch(new RegExp(`ADD COLUMN ${column}\\b`));
+    }
+    // Down: reverse dependency order + restore the 009 vocabulary.
+    const drops = [...imessage!.downSql.matchAll(/DROP TABLE IF EXISTS (\w+)/g)].map((m) => m[1]);
+    expect(drops).toEqual(["imessage_sensor_state", "imessage_transport_events", "sent_message_fingerprints"]);
+    for (const column of [
+      "third_party_recipient", "conversation_principal_id", "requesting_principal_id", "surface",
+    ]) {
+      expect(imessage!.downSql).toMatch(new RegExp(`DROP COLUMN IF EXISTS ${column}\\b`));
+    }
+    expect(imessage!.downSql).toMatch(/DELETE FROM notifications WHERE kind = 'reply'/);
+    expect(imessage!.downSql).toMatch(
+      /CHECK \(kind IN \('brief', 'escalation', 'custom', 'calendar-change'\)\)/,
+    );
+  });
+
   it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {
     const migrations = await listMigrations();
     const guard = migrations.find((m) => m.name === "002_action_transition_guard");
@@ -183,6 +222,9 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate up/down (integration)", () => {
     expect(afterUp.has("notifications")).toBe(true);
     expect(afterUp.has("calendar_events")).toBe(true);
     expect(afterUp.has("calendar_sync_state")).toBe(true);
+    expect(afterUp.has("imessage_transport_events")).toBe(true);
+    expect(afterUp.has("sent_message_fingerprints")).toBe(true);
+    expect(afterUp.has("imessage_sensor_state")).toBe(true);
 
     const records = await pool.query<{ name: string }>("SELECT name FROM schema_migrations");
     expect(records.rows.map((r) => r.name)).toEqual([...ALL_MIGRATIONS]);
@@ -191,7 +233,10 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate up/down (integration)", () => {
     expect(rolled).toEqual([...[...ALL_MIGRATIONS].reverse()]);
 
     const afterDown = await tableNames(pool);
-    for (const table of [...TABLES_001, "principals"]) {
+    for (const table of [
+      ...TABLES_001, "principals",
+      "imessage_transport_events", "sent_message_fingerprints", "imessage_sensor_state",
+    ]) {
       expect(afterDown.has(table)).toBe(false);
     }
     expect(afterDown.has("schema_migrations")).toBe(true);
