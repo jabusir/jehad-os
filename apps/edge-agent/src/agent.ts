@@ -12,7 +12,7 @@
 // is injected, so the loop tests are fully hermetic.
 
 import type { EdgeAgentConfig } from "./config.js";
-import { renderNotificationText, type DeliverableNotification } from "./render.js";
+import { renderNotificationText, renderedTextSha256, type DeliverableNotification } from "./render.js";
 
 export interface EdgeAgentCredentials {
   readonly bearer: string;
@@ -108,11 +108,22 @@ export async function runOnce(deps: AgentDeps, config: EdgeAgentConfig): Promise
     return { claimed: true, delivered: false };
   }
 
+  // Loop-defense fingerprint (Phase A): the delivered report carries the
+  // canonical sha256 of the EXACT text handed to the transport plus the
+  // recipient it was sent to; the API stores a sent_message_fingerprints
+  // row for sensor-side loop correlation (imessage-gateway.md §5.2).
   let delivered: Response;
   try {
     delivered = await deps.fetchFn(
       `${config.apiUrl}/harness/notifications/${notification.id}/delivered`,
-      { method: "POST", headers },
+      {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({
+          recipient: credentials.target,
+          rendered_text_sha256: renderedTextSha256(text),
+        }),
+      },
     );
   } catch (err) {
     log(

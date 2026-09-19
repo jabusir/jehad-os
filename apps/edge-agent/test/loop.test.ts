@@ -9,7 +9,9 @@ import { runOnce, type AgentDeps, type EdgeAgentCredentials } from "../src/agent
 import { loadConfig } from "../src/config.js";
 import {
   FALLBACK_TRUNCATION_LIMIT,
+  canonicalNormalize,
   renderNotificationText,
+  renderedTextSha256,
 } from "../src/render.js";
 
 const CONFIG = loadConfig(
@@ -169,6 +171,42 @@ describe("edge-agent loop (hermetic)", () => {
     expect(result).toEqual({ claimed: true, delivered: false });
     expect(h.sent).toHaveLength(1); // the send DID happen
   });
+
+  it("delivered report carries the loop-defense fingerprint: recipient + canonical sha256 of the EXACT sent text", async () => {
+    const h = makeHarness({ notification: NOTIFICATION });
+    const result = await runOnce(h.deps, CONFIG);
+    expect(result).toEqual({ claimed: true, delivered: true });
+    expect(h.sent).toEqual([
+      { target: CREDENTIALS.target, text: "Morning brief\nLINE ONE\nLINE TWO" },
+    ]);
+    const deliveredCall = h.calls[1]!;
+    expect(deliveredCall.init?.method).toBe("POST");
+    const headers = new Headers(deliveredCall.init?.headers);
+    expect(headers.get("authorization")).toBe(`Bearer ${CREDENTIALS.bearer}`);
+    expect(headers.get("x-capability-token")).toBe(CREDENTIALS.capabilityToken);
+    expect(headers.get("content-type")).toBe("application/json");
+    const body = JSON.parse(String(deliveredCall.init?.body)) as Record<string, string>;
+    expect(body.recipient).toBe(CREDENTIALS.target);
+    // Pinned vector of the binding hash spec (NFC + LF form of the sent text).
+    expect(body.rendered_text_sha256).toBe(
+      "ff4dae0659223bc0223b82d779ceb3494d4c43109e9b7ae7502757e3f2575fa0",
+    );
+    // And it is a hash OF what the transport received — exact text, post-truncation.
+    expect(body.rendered_text_sha256).toBe(renderedTextSha256(h.sent[0]!.text));
+  });
+
+  it("delivered report hashes the truncated text when truncation fires (the exact text sent)", async () => {
+    const long = {
+      ...NOTIFICATION,
+      payload: { content: "x".repeat(5000) },
+    };
+    const h = makeHarness({ notification: long });
+    const result = await runOnce(h.deps, CONFIG);
+    expect(result).toEqual({ claimed: true, delivered: true });
+    const body = JSON.parse(String(h.calls[1]!.init?.body)) as Record<string, string>;
+    expect(h.sent[0]!.text.length).toBe(FALLBACK_TRUNCATION_LIMIT);
+    expect(body.rendered_text_sha256).toBe(renderedTextSha256(h.sent[0]!.text));
+  });
 });
 
 describe("notification text rendering", () => {
@@ -230,5 +268,66 @@ describe("notification text rendering", () => {
       payload: { whatever: 1 },
     });
     expect(out).toBe(`T\n${JSON.stringify({ whatever: 1 })}`);
+  });
+
+  it("kind reply → title + payload.content (conversational body), same conventions as brief", () => {
+    expect(
+      renderNotificationText({
+        id: "r1",
+        kind: "reply",
+        title: "Reply",
+        payload: { content: "pong" },
+      }),
+    ).toBe("Reply\npong");
+    // Missing/empty content → title alone (the existing filter(Boolean) convention).
+    expect(
+      renderNotificationText({
+        id: "r2",
+        kind: "reply",
+        title: "Reply",
+        payload: {},
+      }),
+    ).toBe("Reply");
+    // Multi-line conversational content rides verbatim.
+    expect(
+      renderNotificationText({
+        id: "r3",
+        kind: "reply",
+        title: "Reply",
+        payload: { content: "line 1\nline 2" },
+      }),
+    ).toBe("Reply\nline 1\nline 2");
+  });
+
+  it("kind reply obeys the same ≤1500-char truncation as every branch", () => {
+    const out = renderNotificationText({
+      id: "r4",
+      kind: "reply",
+      title: "Reply",
+      payload: { content: "y".repeat(5000) },
+    });
+    expect(out.length).toBe(FALLBACK_TRUNCATION_LIMIT);
+    expect(out.endsWith("…[truncated]")).toBe(true);
+  });
+});
+
+describe("canonical normalization + rendered-text sha256 (binding hash spec)", () => {
+  it("canonicalNormalize: NFC composition + CR/CRLF → LF; NO trimming, NO punctuation rewrite", () => {
+    expect(canonicalNormalize("e\u0301")).toBe("é"); // composing form → NFC
+    expect(canonicalNormalize("a\r\nb\rc\nd")).toBe("a\nb\nc\nd");
+    expect(canonicalNormalize("  padded  ")).toBe("  padded  "); // whitespace untouched
+  });
+
+  it("renderedTextSha256: pinned vectors (sha256 hex of UTF-8 canonical form)", () => {
+    expect(renderedTextSha256("Morning brief\nLINE ONE\nLINE TWO")).toBe(
+      "ff4dae0659223bc0223b82d779ceb3494d4c43109e9b7ae7502757e3f2575fa0",
+    );
+    // CRLF + decomposed accent hash to the digest of the CANONICAL form.
+    expect(renderedTextSha256("Reply ack\r\nping\u0301 ok")).toBe(
+      "93178994dcb0afa251f939da8bbd8b5de763076e8af935a4c49b3bd06f4624dc",
+    );
+    expect(renderedTextSha256("Reply ack\npinǵ ok")).toBe(
+      "93178994dcb0afa251f939da8bbd8b5de763076e8af935a4c49b3bd06f4624dc",
+    );
   });
 });

@@ -104,11 +104,15 @@ Poll cadence: 60s (EDGE_POLL_SECONDS). One cycle:
 1. `POST /harness/notifications/claim` → `{ notification | null }`, FIFO,
    approved-only. A claim is a LEASE: deliver within the `expiresAt` window
    or the row expires and is never delivered.
-2. Render the text (brief → title+content, calendar-change → title,
-   escalation → title+consequence, everything ≤1500 chars) and send it via
-   the fixed osascript command.
+2. Render the text (brief → title+content, reply → title+content,
+   calendar-change → title, escalation → title+consequence, everything
+   ≤1500 chars) and send it via the fixed osascript command.
 3. On success: `POST /harness/notifications/:id/delivered` — the ONLY state
-   change the edge can cause, and only for its own claim.
+   change the edge can cause, and only for its own claim. The report body
+   carries the Phase A loop-defense fingerprint: `{ recipient,
+   rendered_text_sha256 }` — canonical sha256 (NFC + line-ending fold, no
+   trimming) of the EXACT rendered text sent; the API stores a
+   `sent_message_fingerprints` row for sensor-side loop correlation.
 4. On send FAILURE: log to stderr, do NOT mark delivered — the row expires
    via TTL. Jehad OS never records a false delivery.
 
