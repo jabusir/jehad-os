@@ -586,12 +586,62 @@ export async function claimNextApprovedNotification(
        LIMIT 1
        FOR UPDATE SKIP LOCKED
      )
-     RETURNING id, kind, title, payload, claimed_at, expires_at, recipient`,
+     RETURNING id, kind, title, payload, claimed_at, expires_at, recipient,
+               requesting_principal_id`,
     [now.toISOString(), input.claimedBy],
   );
   const row = claimed.rows[0];
   if (row === undefined) return null;
   const kind = String(row.kind) as NotificationKind;
+  if (
+    kind === REPLY_NOTIFICATION_KIND &&
+    typeof row.requesting_principal_id === "string" &&
+    (typeof row.recipient !== "string" || row.recipient.length === 0)
+  ) {
+    // A reply without a recipient should not exist (conjunction requires
+    // it) — if it does, quarantine it rather than deliver anywhere.
+    await db.query(
+      `UPDATE notifications SET status = 'pending', claimed_at = NULL, updated_at = $2::timestamptz WHERE id = $1::uuid`,
+      [String(row.id), now.toISOString()],
+    );
+    await recordAudit(db, {
+      actor: input.actor ?? `principal:${input.claimedBy}`,
+      action: "notification.reply_recipient_recheck_failed",
+      reversible: true,
+      grantId: input.grantId ?? null,
+      outputsRef: JSON.stringify({ notificationId: String(row.id), reason: "missing-recipient" }),
+    });
+    return null;
+  }
+  if (kind === REPLY_NOTIFICATION_KIND && typeof row.recipient === "string" && row.recipient.length > 0) {
+    // CLAIM-TIME recheck (adversary F1): the conjunction approved recipient
+    // at creation, but the row is mutable — re-derive the verified handles
+    // and refuse to honor a post-approval edit. Fail = requeue + audit,
+    // never deliver to a stale/foreign recipient.
+    const verified = await db.query(
+      `SELECT 1 FROM transport_identities
+        WHERE principal_id = $1::uuid AND transport = 'imessage' AND handle = $2`,
+      [String(row.requesting_principal_id), row.recipient],
+    );
+    if (verified.rows[0] === undefined) {
+      await db.query(
+        `UPDATE notifications SET status = 'pending', claimed_at = NULL, updated_at = $2::timestamptz WHERE id = $1::uuid`,
+        [String(row.id), now.toISOString()],
+      );
+      await recordAudit(db, {
+        actor: input.actor ?? `principal:${input.claimedBy}`,
+        action: "notification.reply_recipient_recheck_failed",
+        reversible: true,
+        grantId: input.grantId ?? null,
+        outputsRef: JSON.stringify({
+          notificationId: String(row.id),
+          reason: "recipient-not-verified",
+          recipient: row.recipient,
+        }),
+      });
+      return null;
+    }
+  }
   const notification: ClaimedNotification = {
     id: String(row.id),
     kind,

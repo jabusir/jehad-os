@@ -165,8 +165,9 @@ export async function createPairingSession(
 }
 
 /** The single newest unconsumed, unexpired session (any principal — the CLI
- *  runs one pairing at a time; newest wins if several somehow exist). */
-async function activeSession(
+ *  runs one pairing at a time). Used ONLY as the wrong-guess throttle
+ *  target; a correct hash always resolves its own session (below). */
+async function newestActiveSession(
   db: SqlExecutor,
   now: Date,
 ): Promise<{ id: string; codeHash: string; guessesUsed: number; maxTotalGuesses: number; lockouts: Record<string, number> } | null> {
@@ -178,17 +179,46 @@ async function activeSession(
       LIMIT 1`,
     [now.toISOString()],
   );
-  const row = result.rows[0];
-  if (row === undefined) return null;
+  return sessionFromRow(result.rows[0]);
+}
+
+/** Hash-first resolution: the sha256 of the 6-digit code identifies its own
+ *  session unambiguously — never "newest wins". Falls back to the newest
+ *  active session ONLY so wrong guesses throttle against something. */
+async function sessionForAttempt(
+  db: SqlExecutor,
+  now: Date,
+  attemptHash: string,
+): Promise<
+  | { matched: true; session: NonNullable<Awaited<ReturnType<typeof newestActiveSession>>> }
+  | { matched: false; session: Awaited<ReturnType<typeof newestActiveSession>> }
+> {
+  const byHash = await db.query(
+    `SELECT id::text AS id, code_hash, guesses_used, max_total_guesses, handle_lockouts
+       FROM imessage_pairing_sessions
+      WHERE consumed_at IS NULL AND expires_at > $1::timestamptz AND code_hash = $2
+      LIMIT 1`,
+    [now.toISOString(), attemptHash],
+  );
+  const matched = sessionFromRow(byHash.rows[0]);
+  if (matched !== null) return { matched: true, session: matched };
+  return { matched: false, session: await newestActiveSession(db, now) };
+}
+
+function sessionFromRow(
+  row: unknown,
+): { id: string; codeHash: string; guessesUsed: number; maxTotalGuesses: number; lockouts: Record<string, number> } | null {
+  if (row === undefined || row === null) return null;
+  const r = row as { id: unknown; code_hash: unknown; guesses_used: unknown; max_total_guesses: unknown; handle_lockouts: unknown };
   const lockouts =
-    row.handle_lockouts !== null && typeof row.handle_lockouts === "object"
-      ? (row.handle_lockouts as Record<string, number>)
+    r.handle_lockouts !== null && typeof r.handle_lockouts === "object"
+      ? (r.handle_lockouts as Record<string, number>)
       : {};
   return {
-    id: String(row.id),
-    codeHash: String(row.code_hash),
-    guessesUsed: Number(row.guesses_used),
-    maxTotalGuesses: Number(row.max_total_guesses),
+    id: String(r.id),
+    codeHash: String(r.code_hash),
+    guessesUsed: Number(r.guesses_used),
+    maxTotalGuesses: Number(r.max_total_guesses),
     lockouts,
   };
 }
@@ -225,7 +255,8 @@ export async function attemptPairingInTx(
       outputsRef: JSON.stringify({ handle, ...outputs }),
     });
 
-  const session = await activeSession(db, now);
+  const resolution = await sessionForAttempt(db, now, input.attemptHash);
+  const session = resolution.session;
   if (session === null) {
     await audit({ reason: "no-active-session" });
     return { paired: false, reason: "no-active-session", sessionId: null };
@@ -249,21 +280,28 @@ export async function attemptPairingInTx(
     return { paired: false, reason: "session-exhausted", sessionId: session.id };
   }
 
-  if (input.attemptHash !== session.codeHash) {
+  if (!resolution.matched) {
     // Two-layer throttle: bump BOTH the per-handle wrong count and the
-    // session-wide guess counter; no identity is written.
-    const lockouts = { ...session.lockouts, [handle]: wrongCount + 1 };
+    // session-wide guess counter — both ATOMICALLY in one statement, so
+    // concurrent wrong guesses cannot lose updates. No identity is written.
     await db.query(
       `UPDATE imessage_pairing_sessions
-          SET guesses_used = guesses_used + 1, handle_lockouts = $2::jsonb
+          SET guesses_used = guesses_used + 1,
+              handle_lockouts = jsonb_set(
+                COALESCE(handle_lockouts, '{}'::jsonb),
+                ARRAY[$2],
+                to_jsonb(COALESCE((handle_lockouts -> $2)::int, 0) + 1)
+              )
         WHERE id = $1::uuid`,
-      [session.id, JSON.stringify(lockouts)],
+      [session.id, handle],
     );
     await audit({ reason: "wrong-code", sessionId: session.id, wrongCount: wrongCount + 1 });
     return { paired: false, reason: "wrong-code", sessionId: session.id };
   }
 
-  // Exact match → consume (single use), write the identity, notify the owner.
+  // Exact match → consume (single use). The RETURNING makes the consume
+  // race-safe under READ COMMITTED: if a concurrent attempt won the row,
+  // this UPDATE matches zero rows and we LOSE — one code, one handle, ever.
   const principal = await db.query(
     "SELECT id::text AS id, name FROM principals WHERE id = (SELECT principal_id FROM imessage_pairing_sessions WHERE id = $1::uuid)",
     [session.id],
@@ -273,12 +311,17 @@ export async function attemptPairingInTx(
     throw new Error("attemptPairing: session principal vanished");
   }
   const principalId = String(principalRow.id);
-  await db.query(
+  const consumed = await db.query(
     `UPDATE imessage_pairing_sessions
         SET consumed_at = $2::timestamptz, consumed_handle = $3
-      WHERE id = $1::uuid AND consumed_at IS NULL`,
+      WHERE id = $1::uuid AND consumed_at IS NULL
+      RETURNING id`,
     [session.id, now.toISOString(), handle],
   );
+  if (consumed.rows[0] === undefined) {
+    await audit({ reason: "no-active-session", note: "consume-race-lost", sessionId: session.id });
+    return { paired: false, reason: "no-active-session", sessionId: session.id };
+  }
   await db.query(
     `INSERT INTO transport_identities (principal_id, transport, handle, verified_at, last_seen_at, paired_via_session)
      VALUES ($1::uuid, 'imessage', $2, $3::timestamptz, $3::timestamptz, $4::uuid)`,

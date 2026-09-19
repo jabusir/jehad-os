@@ -189,6 +189,9 @@ export async function handleInbound(
   }
 
   // 2. Budget (policy.yaml gateway.principals.<name>; absent → deny).
+  // Adversary F2: the check-then-dispatch pair is serialized per principal
+  // with a session advisory lock held across the whole turn, so concurrent
+  // inbound messages cannot collectively overshoot the caps.
   const policy = deps.principalPolicy?.(String(principalName)) ?? null;
   if (policy === null) {
     await audit(db, actor, "imessage.converse.denied", {
@@ -198,6 +201,48 @@ export async function handleInbound(
     });
     return { replied: false, reason: "principal-not-configured" };
   }
+  return withPerPrincipalTurnLock(db, input.principalId, () =>
+    converseTurn(deps, input, { handle, actor, principalName: String(principalName), policy, now }),
+  );
+}
+
+/** Serialize a principal's turns (budget check → model dispatch → reply)
+ *  under pg_advisory_lock keyed on the principal id. Pool-aware: prefers a
+ *  dedicated client; falls back to the executor itself. */
+async function withPerPrincipalTurnLock<T>(
+  db: ConversationDeps["db"],
+  principalId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const lockKey = `gateway:turn:${principalId}`;
+  const maybePool = db as unknown as {
+    connect?: () => Promise<{ query: ConversationDeps["db"]["query"] } & { release?: () => void }>;
+  };
+  if (typeof maybePool.connect === "function") {
+    const client = await maybePool.connect();
+    try {
+      await client.query("SELECT pg_advisory_lock(hashtext($1))", [lockKey]);
+      return await fn();
+    } finally {
+      await client.query("SELECT pg_advisory_unlock(hashtext($1))", [lockKey]).catch(() => {});
+      client.release?.();
+    }
+  }
+  await db.query("SELECT pg_advisory_lock(hashtext($1))", [lockKey]);
+  try {
+    return await fn();
+  } finally {
+    await db.query("SELECT pg_advisory_unlock(hashtext($1))", [lockKey]).catch(() => {});
+  }
+}
+
+async function converseTurn(
+  deps: ConversationDeps,
+  input: InboundConversationMessage,
+  ctx: { handle: string; actor: string; principalName: string; policy: { model: string; requestsPerHour: number; costPerDay: number }; now: Date },
+): Promise<ConverseOutcome> {
+  const db = deps.db;
+  const { handle, actor, policy, now, principalName } = ctx;
   const usage = await conversationUsage(db, input.principalId, { now: () => now });
   if (usage.requestsLastHour >= policy.requestsPerHour) {
     await audit(db, actor, "imessage.converse.denied", {
