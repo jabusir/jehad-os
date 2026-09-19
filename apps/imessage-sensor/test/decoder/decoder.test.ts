@@ -45,6 +45,9 @@ describe("fixture matrix (committed .bin + .json)", () => {
       "very-long",
       "empty",
       "rich-formatting",
+      "data-detector-phone",
+      "multi-run-formatting",
+      "nsmutable-single-run",
       "malformed-truncated",
       "malformed-corrupt-length",
       "unknown-archive-bplist",
@@ -134,6 +137,58 @@ describe("structural failures and edge cases", () => {
       0x86,
     ]);
     expect(decodeAttributedBody(blob)).toMatchObject({ ok: false, reason: "malformed" });
+  });
+
+  it("attribute dictionary without a preceding range pair is malformed", () => {
+    // string object, then a dict object group directly (no int pair before it)
+    const header = [
+      0x04, 0x0b, ...[..."streamtyped"].map((c) => c.charCodeAt(0)), 0x81, 0xe8, 0x03,
+    ];
+    const blob = Uint8Array.from([
+      ...header,
+      0x84, 0x01, 0x40, // strings[0] "@": root type
+      0x84, // root object start (obj#0)
+      0x84, 0x84, 0x12, ...[..."NSAttributedString"].map((c) => c.charCodeAt(0)), 0x00,
+      0x84, 0x84, 0x08, ...[..."NSObject"].map((c) => c.charCodeAt(0)), 0x00,
+      0x85, // end of class chain
+      0x92, // group 0 type: "@" (reference)
+      0x84, // string object start (obj#3)
+      0x84, 0x84, 0x08, ...[..."NSString"].map((c) => c.charCodeAt(0)), 0x01,
+      0x94, // superclass pointer to NSObject (obj#2)
+      0x84, 0x01, 0x2b, 0x05, ...[..."hello"].map((c) => c.charCodeAt(0)), // "+" + "hello"
+      0x86, // end string object
+      0x92, // group 1 type: "@" — dict object WITHOUT a range pair
+      0x84, // dictionary object start (obj#6)
+      0x84, 0x84, 0x0d, ...[..."NSDictionary"].map((c) => c.charCodeAt(0)), 0x00,
+      0x94, // superclass pointer to NSObject
+      0x84, 0x01, 0x69, 0x00, // "i" count = 0
+      0x86, // end dictionary object
+      0x86, // end root object
+    ]);
+    expect(decodeAttributedBody(blob)).toMatchObject({ ok: false, reason: "malformed" });
+  });
+
+  it("orphan range pairs (mid-sequence and trailing) decode with full text", () => {
+    const text = "call +15550001234 back";
+    const blob = encodeAttributedBody({
+      text,
+      runs: [
+        { attrs: [["__kIMMessagePartAttributeName", { kind: "number", value: 0 }]], rangeFirst: 1, rangeLength: 5 },
+        { attrs: null, rangeFirst: 1, rangeLength: 12 },
+        {
+          attrs: [["__kIMLinkAttributeName", { kind: "url", value: "tel:+15550001234" }]],
+          rangeFirst: 2,
+          rangeLength: 12,
+        },
+        { attrs: null, rangeFirst: 1, rangeLength: 5 },
+      ],
+    });
+    expect(decodeAttributedBody(blob)).toEqual({
+      ok: true,
+      text,
+      parts: 1,
+      hasAttachmentPlaceholder: false,
+    });
   });
 
   it("throws TypeError only for programming errors", () => {

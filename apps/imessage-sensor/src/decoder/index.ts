@@ -138,44 +138,47 @@ function interpret(stream: ParsedStream): DecodeResult {
   const text = stringObjectText(stream, stringGroup[0]!.idx);
   if (text === null) throw new StreamError("content string object has unexpected shape");
 
-  // Remaining groups: (range pair, attribute dictionary) per run.
+  // Remaining groups: a flat sequence of attribute runs. Each run is an int
+  // pair (range); a run carrying attributes follows with its dictionary
+  // object group. Real-world archives (data-detector/notification blobs)
+  // also emit runs whose dictionary is absent — an orphan int pair — both
+  // between and after attributed runs. The text always comes from the
+  // content string object above; an orphan run contributes no attributes.
   let maxPart: number | null = null;
-  const runCount = (groups.length - 1) / 2;
-  if (!Number.isInteger(runCount)) {
-    throw new StreamError(`attributed string has ${groups.length - 1} trailing groups`);
-  }
-  for (let r = 0; r < runCount; r++) {
-    const rangeGroup = groups[1 + 2 * r]!;
-    const dictGroup = groups[2 + 2 * r]!;
+  let i = 1;
+  for (let r = 0; i < groups.length; r++) {
+    const rangeGroup = groups[i]!;
     if (
       rangeGroup.length !== 2 ||
       !rangeGroup.every((v: Val) => v.t === "i" || v.t === "u")
     ) {
       throw new StreamError(`run ${r}: range group is not an int pair`);
     }
-    if (dictGroup.length !== 1 || dictGroup[0]!.t !== "obj") {
-      throw new StreamError(`run ${r}: expected attribute dictionary object`);
-    }
-    const entries = dictEntries(stream, dictGroup[0]!.idx);
-    if (entries === null) throw new StreamError(`run ${r}: attribute dictionary malformed`);
-    for (const { key, valueIdx } of entries) {
-      if (key === PART_ATTRIBUTE) {
-        const part = numberObjectValue(stream, valueIdx);
-        if (part === null || !Number.isSafeInteger(part) || part < 0) {
-          throw new StreamError(`run ${r}: ${PART_ATTRIBUTE} value is not a valid part index`);
+    i++;
+    const dictGroup = i < groups.length ? groups[i]! : undefined;
+    if (dictGroup !== undefined && dictGroup.length === 1 && dictGroup[0]!.t === "obj") {
+      const entries = dictEntries(stream, dictGroup[0]!.idx);
+      if (entries === null) throw new StreamError(`run ${r}: attribute dictionary malformed`);
+      i++;
+      for (const { key, valueIdx } of entries) {
+        if (key === PART_ATTRIBUTE) {
+          const part = numberObjectValue(stream, valueIdx);
+          if (part === null || !Number.isSafeInteger(part) || part < 0) {
+            throw new StreamError(`run ${r}: ${PART_ATTRIBUTE} value is not a valid part index`);
+          }
+          maxPart = maxPart === null ? part : Math.max(maxPart, part);
+        } else if (key === FILE_TRANSFER_ATTRIBUTE) {
+          if (stringObjectText(stream, valueIdx) === null) {
+            throw new StreamError(`run ${r}: ${FILE_TRANSFER_ATTRIBUTE} value is not a string`);
+          }
+        } else if (key === WRITING_DIRECTION_ATTRIBUTE) {
+          if (numberObjectValue(stream, valueIdx) === null) {
+            throw new StreamError(`run ${r}: ${WRITING_DIRECTION_ATTRIBUTE} value is not a number`);
+          }
         }
-        maxPart = maxPart === null ? part : Math.max(maxPart, part);
-      } else if (key === FILE_TRANSFER_ATTRIBUTE) {
-        if (stringObjectText(stream, valueIdx) === null) {
-          throw new StreamError(`run ${r}: ${FILE_TRANSFER_ATTRIBUTE} value is not a string`);
-        }
-      } else if (key === WRITING_DIRECTION_ATTRIBUTE) {
-        if (numberObjectValue(stream, valueIdx) === null) {
-          throw new StreamError(`run ${r}: ${WRITING_DIRECTION_ATTRIBUTE} value is not a number`);
-        }
+        // Other attributes (links, formatting, data-detectors, …) are carried
+        // along the archive but do not affect text extraction; tolerate them.
       }
-      // Other attributes (links, formatting, data-detectors, …) are carried
-      // along the archive but do not affect text extraction; tolerate them.
     }
   }
 

@@ -28,10 +28,20 @@ export type AttrValue =
   | { kind: "bytes"; hex: string };
 
 export interface RunSpec {
-  /** Attribute dictionary entries for the run. */
-  attrs: [string, AttrValue][];
+  /**
+   * Attribute dictionary entries for the run, or null for an orphan range
+   * pair with no dictionary (real-world data-detector/notification blobs
+   * emit dictionary-less runs mid- and end-of-sequence).
+   */
+  attrs: [string, AttrValue][] | null;
   /** Second int of the archived range pair (UTF-16 length of the run). */
   rangeLength: number;
+  /**
+   * First int of the archived range pair. Real blobs use opaque values
+   * (observed: 1,2,1 and 1,2,1,3 — neither a location nor a dict ordinal);
+   * defaults to a 1-based dictionary ordinal.
+   */
+  rangeFirst?: number;
 }
 
 export interface MessageSpec {
@@ -79,16 +89,20 @@ class Encoder {
     this.emitShared("@");
     this.emitStringObject(this.spec.text);
 
-    // Attribute runs: (int pair, dictionary object) each. The first int of
-    // the archived range pair is a 1-based dictionary ordinal (metadata the
-    // decoder does not depend on); the second is the UTF-16 run length.
+    // Attribute runs: (int pair, optional dictionary object) each — a run
+    // with `attrs: null` is an orphan pair with no dictionary. The first int
+    // of the archived range pair defaults to a 1-based dictionary ordinal
+    // (metadata the decoder does not depend on); the second is the UTF-16
+    // run length.
     let dictOrdinal = 0;
     for (const run of this.spec.runs ?? []) {
       this.emitShared("iI");
-      this.emitInt(++dictOrdinal);
+      this.emitInt(run.rangeFirst ?? ++dictOrdinal);
       this.emitInt(run.rangeLength);
-      this.emitShared("@"); // type slot for the attribute dictionary object
-      this.emitAttrDict(run.attrs);
+      if (run.attrs !== null) {
+        this.emitShared("@"); // type slot for the attribute dictionary object
+        this.emitAttrDict(run.attrs);
+      }
     }
 
     this.bytes.push(END); // end root object
