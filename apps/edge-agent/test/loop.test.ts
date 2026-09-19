@@ -344,7 +344,7 @@ describe("notification text rendering", () => {
     expect(out).toBe(`T\n${JSON.stringify({ whatever: 1 })}`);
   });
 
-  it("kind reply → title + payload.content (conversational body), same conventions as brief", () => {
+  it("kind reply → payload.content ONLY (chat surface: no title prefix)", () => {
     expect(
       renderNotificationText({
         id: "r1",
@@ -352,7 +352,7 @@ describe("notification text rendering", () => {
         title: "Reply",
         payload: { content: "pong" },
       }),
-    ).toBe("Reply\npong");
+    ).toBe("pong");
     // Missing/empty content → title alone (the existing filter(Boolean) convention).
     expect(
       renderNotificationText({
