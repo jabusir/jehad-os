@@ -3,6 +3,24 @@
 **Status:** accepted (owner verdict 2026-09-18 — A–C committed scope, D–H
 sequenced intent) · **Date:** 2026-09-18 · **ADR:** [ADR-0013]
 
+**Formal phase state (2026-09-19 — do not infer promotion from liveness):**
+
+```
+A  transport substrate → IN SOAK — NOT YET ACCEPTED
+B  pairing + loop      → EARLY DOGFOOD (constrained use, live)
+C  stateless LLM       → EARLY DOGFOOD (constrained use, live)
+```
+
+B/C liveness is controlled dogfooding by owner directive; **promotion of
+B/C remains gated on formal A acceptance** (48h lifecycle matrix,
+`infra/imessage/README.md` §9). An agent reading "C is live" must not
+infer the substrate finished qualification. Multi-principal onboarding
+(Yusra) runs under this same state — her traffic is B/C test traffic,
+not evidence of A acceptance. Watch item during her soak: cross-principal
+contamination (similar questions to both users; no stylistic/context/
+content leakage — structural isolation is verified; this checks the
+seams personas and threads will open later).
+
 ## 1. Objective and non-goals
 
 **Objective.** Turn iMessage into a general interaction surface for Jehad OS:

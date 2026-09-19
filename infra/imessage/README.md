@@ -254,3 +254,41 @@ resumes); display sleep; machine sleep/wake; network interruption; WAL
 activity; both owner handle forms (phone + Apple ID); schema-decoder
 validation; zero loop misclassifications. Watch `imessage_sensor_state`
 (five dims + cursor) — anomalies notify the owner over the E4 channel.
+
+Drill log (formal state: A IN SOAK · B/C EARLY DOGFOOD — plan header):
+
+- [x] sensor restart — 2026-09-19: cursor 216996 preserved, no
+      re-baseline, health all healthy.
+- [x] Messages.app restart — 2026-09-19: delivery through relaunched
+      app (row 216997, own-ok, fingerprint correlated).
+- [x] control-plane outage (inbound + outbound + recovery) —
+      2026-09-19: API stopped 35s; notification queued during outage
+      held and delivered on recovery; sensor healthy throughout; edge
+      KeepAlive-restarted on claim failure and recovered (note: edge
+      rides launchd KeepAlive, not in-process backoff — by design).
+- [x] repeated identical messages — 2026-09-19: two identical
+      deliveries → 2 fingerprint rows, same hash (67f87e840fed…), both
+      own-ok, zero loop misclassifications, zero false inbound.
+- [x] WAL activity during reads — continuously exercised (sensor reads
+      every 5s while Messages writes; rows 216996-216999 observed
+      post-write with no stale-read misses).
+- [x] decoder failure / malformed attributedBody — covered by the
+      committed fixture matrix + fuzz corpus (54 tests; skip-not-guess);
+      live malformed blobs would surface via decoder-health, none seen.
+- [x] chat.db schema drift — PRAGMA fingerprint checked every poll;
+      drift → loud failure (unit-tested); live re-validation happens
+      naturally on the next macOS point update.
+- [ ] host reboot — needs owner present (weekend drill).
+- [ ] display sleep + full sleep/wake — needs owner present (weekend
+      drill; check wake restores polling + caffeinate policy).
+- [ ] true network drop (link-level, not control-plane) — needs owner
+      (unplug/Wi-Fi off during an inbound and an outbound).
+- [ ] both owner handle forms (phone + Apple ID) — needs owner to text
+      the gateway from both representations.
+- [ ] ≥50 outbound delivery corpus — 6/50 by drills so far; briefs
+      + calendar-change traffic accumulate naturally.
+
+Cross-principal contamination watch (owner directive, ongoing): ask
+Yusra and Jehad similar questions; verify no stylistic/context/content
+leakage between principals — structural isolation is verified
+(adversary 12/12); this watches the seams personas/threads open later.
