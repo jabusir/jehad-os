@@ -290,6 +290,79 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage ingest routing (integration)", () 
     ).rejects.toMatchObject({ code: "IMESSAGE_INPUT_INVALID" });
   });
 
+  // ADVERSARIAL (pre-auth §5.1.1): unpaired sender with CONTENT while a
+  // pairing session is LIVE — the content is the actual 6-digit code as
+  // plaintext, the "attack" hoping text-shaped code input pairs like the
+  // hash probe would. Pairing is hash-equality ONLY: content is a privacy
+  // violation regardless of session state, and the session must survive
+  // unconsumed with its guess counters untouched.
+  it("adversarial: unpaired content = the live 6-digit code plaintext → discarded + audited; session NOT consumed", async () => {
+    const handle = "+15557770000";
+    const session = await createPairingSession(
+      db.pool,
+      { principalId: yusraId, purpose: "pair" },
+      { now: () => T0 },
+    );
+    const report = await ingest([
+      event({ transport_handle: handle, content: session.code, text_length: session.code.length }),
+    ]);
+    expect(report.accepted).toBe(1);
+    expect(inbound).toEqual([]);
+    const identity = await db.pool.query(
+      "SELECT count(*)::int AS n FROM transport_identities WHERE handle = $1",
+      [handle],
+    );
+    expect(Number(identity.rows[0].n)).toBe(0);
+    const violation = await db.pool.query(
+      `SELECT outputs_ref::jsonb AS o FROM audit_log
+        WHERE action = 'imessage.content_violation' AND outputs_ref::jsonb->>'handle' = $1`,
+      [handle],
+    );
+    expect(violation.rows[0].o).toMatchObject({ handle, textLength: session.code.length });
+    const surviving = await db.pool.query(
+      "SELECT consumed_at, guesses_used FROM imessage_pairing_sessions WHERE id = $1::uuid",
+      [session.sessionId],
+    );
+    expect(surviving.rows[0].consumed_at).toBeNull();
+    expect(Number(surviving.rows[0].guesses_used)).toBe(0);
+  });
+
+  // ADVERSARIAL (sensor-side normalization collision, server pin): the
+  // sensor's paired-handle cache lowercases non-email passthrough handles,
+  // so a paired canonical "AppleIDUser" collides with raw "appleiduser"
+  // sensor-side and content WOULD be forwarded from that handle. The
+  // server canonicalizes passthrough handles case-sensitively: the sender
+  // is unpaired here → discard + audit. Server pairing state is the only
+  // authority; sensor cache over-match can never become a false pair.
+  it("adversarial: case-colliding handle (AppleIDUser paired, appleiduser sends) → content violation, never routed", async () => {
+    const session = await db.pool.query(
+      `INSERT INTO imessage_pairing_sessions (principal_id, purpose, code_hash, expires_at)
+       VALUES ($1::uuid, 'pair', $2, now() + interval '5 minutes') RETURNING id`,
+      [yusraId, "e".repeat(64)],
+    );
+    await db.pool.query(
+      `INSERT INTO transport_identities (principal_id, transport, handle, verified_at, last_seen_at, paired_via_session)
+       VALUES ($1::uuid, 'imessage', 'AppleIDUser', $2::timestamptz, $2::timestamptz, $3::uuid)`,
+      [yusraId, T0.toISOString(), session.rows[0].id],
+    );
+    try {
+      const secret = "CASECOLLISION-content-must-discard";
+      const report = await ingest([
+        event({ transport_handle: "appleiduser", content: secret, text_length: secret.length }),
+      ], { onInbound: true });
+      expect(report.accepted).toBe(1);
+      expect(inbound).toEqual([]);
+      const violation = await db.pool.query(
+        `SELECT outputs_ref::jsonb AS o FROM audit_log
+          WHERE action = 'imessage.content_violation' AND outputs_ref::jsonb->>'handle' = 'appleiduser'`,
+      );
+      expect(violation.rows[0].o).toMatchObject({ handle: "appleiduser" });
+      expect(await scanAllColumnsFor(secret)).toEqual([]);
+    } finally {
+      await db.pool.query("DELETE FROM transport_identities WHERE handle = 'AppleIDUser'");
+    }
+  });
+
   it("conversation handler failure is audited and never fails the committed ingest", async () => {
     await issueConverseGrant(yusraId);
     const report = await ingestBatch(db.pool, [event({ content: "boom test" })], { rowid: 216997 }, {
