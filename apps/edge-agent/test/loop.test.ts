@@ -370,7 +370,7 @@ describe("notification text rendering", () => {
         title: "Reply",
         payload: { content: "line 1\nline 2" },
       }),
-    ).toBe("Reply\nline 1\nline 2");
+    ).toBe("line 1\nline 2");
   });
 
   it("kind reply obeys the same ≤1500-char truncation as every branch", () => {
