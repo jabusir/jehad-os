@@ -348,7 +348,7 @@ All quiet — nothing waiting on you.
     expect(renderMorningBriefText(MORNING_WITH_SCHEDULE)).toBe(`Morning brief — Thu, Sep 17
 
 Today
-- 9–10 AM Dentist (12 Creek Rd)
+- 6–7 AM Dentist (12 Creek Rd)
 - 10:30–11 AM (untitled)
 
 All quiet — nothing waiting on you.

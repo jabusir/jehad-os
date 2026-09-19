@@ -82,14 +82,16 @@ function renderUnlockBrief(data: MorningBriefData): string[] {
   ];
 }
 
-/** Calendar-native times, rendered as local HH:MM in the event's own tz. */
-function hhmm(iso: string, timeZone: string | null): string {
+/** Owner-local times (BRIEF_TIMEZONE) — the reader's wall clock wins over
+ *  the event creator's timezone (an interview created as "12 PM Eastern"
+ *  is 9 AM to the owner). */
+function hhmm(iso: string): string {
   const d = new Date(iso);
   if (!Number.isFinite(d.getTime())) return iso;
   const formatted = new Intl.DateTimeFormat("en-US", {
     hour: "numeric",
     minute: "2-digit",
-    timeZone: timeZone ?? undefined,
+    timeZone: BRIEF_TIMEZONE,
   }).format(d);
   return formatted.replace(":00 ", " "); // "9:00 AM" → "9 AM"
 }
@@ -100,15 +102,15 @@ function datedScheduleLine(item: TodayScheduleItem): string {
     weekday: "short",
     month: "short",
     day: "numeric",
-    timeZone: item.timezone ?? BRIEF_TIMEZONE,
+    timeZone: BRIEF_TIMEZONE,
   }).format(new Date(item.startTime));
   return `${datePart} · ${scheduleLine(item).slice(2)}`;
 }
 
 function scheduleLine(item: TodayScheduleItem): string {
   const title = item.summary.length > 0 ? item.summary : "(untitled)";
-  const startF = hhmm(item.startTime, item.timezone);
-  const endF = item.endTime === null ? null : hhmm(item.endTime, item.timezone);
+  const startF = hhmm(item.startTime);
+  const endF = item.endTime === null ? null : hhmm(item.endTime);
   // Compact range: "9–10 AM" instead of "9 AM–10 AM" (same meridiem).
   const when =
     endF === null
