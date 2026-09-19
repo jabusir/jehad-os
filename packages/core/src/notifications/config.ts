@@ -9,8 +9,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPolicyFile } from "../policy/ceiling.js";
 
-export const NOTIFICATION_KINDS = ["brief", "escalation", "custom", "calendar-change"] as const;
+export const NOTIFICATION_KINDS = [
+  "brief", "escalation", "custom", "calendar-change", "reply",
+] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
+
+/** Gateway §4: replies are approved by the conjunction rule, never a kind list. */
+export const REPLY_NOTIFICATION_KIND: NotificationKind = "reply";
 
 const KINDS = new Set<string>(NOTIFICATION_KINDS);
 
@@ -43,7 +48,11 @@ export function notificationsConfigFromPolicyV1(
   return {
     ...DEFAULT_NOTIFICATIONS_CONFIG,
     ...policy.notifications,
-    autoApproveKinds: policy.notifications.autoApproveKinds.filter(isNotificationKind),
+    // Guard (gateway §4, forbidden-everywhere rule): 'reply' is NEVER
+    // auto-approved via the kind list — drop it even if policy declares it.
+    autoApproveKinds: policy.notifications.autoApproveKinds
+      .filter(isNotificationKind)
+      .filter((kind) => kind !== REPLY_NOTIFICATION_KIND),
   };
 }
 

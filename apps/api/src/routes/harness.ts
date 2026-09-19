@@ -74,8 +74,9 @@ type PreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<unkn
  * middleware: for principal.type === "harness" every route here additionally
  * demands a verified capability token; users pass as owner; everyone else
  * 403s. Denials are audited inside the guard (harness.grant_denied).
+ * Shared by the iMessage sensor surface (harness-imessage.ts).
  */
-function requireHarnessGrant(
+export function requireHarnessGrant(
   db: PromotionDb,
   capabilities: readonly string[],
   resource: string,
