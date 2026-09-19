@@ -268,7 +268,10 @@ export function isMorningBriefMeaningful(data: MorningBriefData): boolean {
     data.stalled.length > 0 ||
     data.unlock !== null ||
     data.escalations.pending + data.escalations.batched > 0 ||
-    data.todaySchedule.length > 0
+    data.todaySchedule.length > 0 ||
+    // A quiet day still deserves a heads-up about what's coming (the
+    // "do I have anything tomorrow" answer, delivered before it's asked).
+    data.nextUpcoming !== null
   );
 }
 
