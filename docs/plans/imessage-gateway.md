@@ -35,23 +35,33 @@ surfaces (the thread model anticipates them; they are separate plans).
 
 ## 3. Trust model
 
-### 3.1 The ladder
+### 3.1 The ladder — route before interpret
 
 ```
 incoming iMessage
   → transport-untrusted
   → authenticate sender (paired transport identity, §5.1)
   → authorized Jehad message            [user intent]
-  → LLM interpretation                  [proposes capabilities]
-  → policy evaluation                   [Jehad OS decides]
+  → surface router
+       ├─ CONTROL mode
+       │    exact forms (approve 7K4, reject 7K4, useful 7K4)
+       │      → deterministic resolver — NO LLM anywhere in the path
+       │    natural language ("yeah 7K4 looks good")
+       │      → LLM interpretation → the SAME deterministic resolver
+       └─ CONVERSATION mode
+            → LLM interpretation → capability proposals
+  → policy evaluation                    [Jehad OS decides]
   → capability execution or denial
 ```
 
-Authenticated user intent is **intent, not executable instructions**. The LLM
-may interpret "what am I waiting on?" into a proposed
+Authenticated user intent is **intent, not executable instructions**. The
+LLM may interpret "what am I waiting on?" into a proposed
 `query_commitments(direction=waiting_on)`; policy — not the message text —
-decides whether it runs. This is the existing ActionIntent → policy →
-approval → ActionAttempt chain with iMessage as a new request surface.
+decides whether it runs. Terminology is precise here: read-only requests
+are **capability invocations**, not ActionIntents — `ActionIntent` is
+reserved for consequential/external actions (Phase H), where the existing
+ActionIntent → policy → approval → ActionAttempt chain applies unchanged
+with iMessage as a request surface.
 
 ### 3.2 Two injection doors
 
@@ -91,22 +101,25 @@ Messages chat.db (read-only sensor, ROWID cursor)
   → transport identity normalization (phone ↔ Apple ID)
   → principal authentication (paired identity, fail-closed on drift)
   → interaction event (audited)
-  → conversation router
-      ├─ conversation mode → LLM (stateless → bounded threads)
-      │    → capability proposals → policy → world model / workflows
-      └─ control mode → deterministic resolver
-           (principal + referenced object + allowed action = valid command)
+  → surface router
+      ├─ control: exact forms → deterministic resolver (no LLM);
+      │          natural language → LLM interpretation
+      │          → the same deterministic resolver
+      └─ conversation mode → LLM (stateless → bounded threads)
+           → capability proposals → policy → world model / workflows
   → notification queue → verified E4 send-only deliverer → iMessage
 ```
 
 Outbound is **only** the existing verified chain — no new egress *path*; the
-send-only deliverer remains the sole egress. Replies are notifications of a
-new auto-approved kind under `notifications.autoApproveKinds`, bounded to
-the edge's ≤1500-char render rule (`infra/edge/README.md` §4 — the gateway
-truncates with a continue-on-request cue). With only the owner paired
-(Phases A–C) the recipient is the existing fixed `EDGE_IMESSAGE_TARGET`, so
-the edge binary takes exactly two amendments: (1) the delivered-report
-carries the sha256 of the rendered text so §5.2 fingerprints match what
+send-only deliverer remains the sole egress. Replies are notifications of
+kind `reply`, **never entered into any bare kind allowlist** (not in
+`notifications.autoApproveKinds`); they are approved solely by the single
+conjunction rule below, bounded to the edge's ≤1500-char render rule
+(`infra/edge/README.md` §4 — the gateway truncates with a
+continue-on-request cue). With only the owner paired (Phases A–C) the
+recipient is the existing fixed `EDGE_IMESSAGE_TARGET`, so the edge binary
+takes exactly two amendments: (1) the delivered-report carries the sha256
+of the rendered text so §5.2 fingerprints match what
 was actually sent; (2) a render branch for the new `reply` kind
 (body = `payload.content`, still capped by the existing 1500-char
 truncation, which applies to every branch). Without (2), replies ride
@@ -123,27 +136,30 @@ accepts + stores the hash, and the Phase A fingerprint exit criterion
 (§7) exercises it end-to-end. Per-recipient addressing is deferred until
 a non-owner principal pairs (outside committed scope).
 
-**Reply auto-approval is a conjunction, never a kind.** The Phase A–C
-simplification (kind `reply` auto-approved, fixed `EDGE_IMESSAGE_TARGET`)
-is valid only because sender and recipient collapse to one known principal.
-The permanent policy — encoded from the start so multi-user expansion
-cannot inherit "all replies are safe" — is:
+**Reply auto-approval is exactly one rule, from day one — no temporary
+weaker version exists in any phase:**
 
 ```
-kind                    = reply
-AND surface             = imessage
-AND requesting_principal = a paired Jehad identity
-AND recipient           = that principal's verified transport identity
-AND the conversation    originated from that principal
-AND no third-party recipient
-→ auto approve
+autoApproveReply:
+  kind                    = reply
+  AND surface             = imessage
+  AND requestingPrincipal = a paired owner identity
+  AND recipient           = that principal's verified transport identity
+  AND conversationPrincipal = requestingPrincipal
+  AND thirdPartyRecipient = false
 ```
 
-Anything else routes to the normal approval queue.
+During A–C the fixed `EDGE_IMESSAGE_TARGET` *is* the owner's verified
+identity, so the same single rule evaluates true — one implementation,
+one rule, and multi-user expansion cannot inherit "all replies are safe"
+because there is no kind-level shortcut to inherit. Anything failing the
+conjunction routes to the normal approval queue.
 
 ### 4.1 Modes
 
-- **Conversation mode** — questions, research asks, capture. LLM path.
+- **Conversation mode** — the eventual path for questions, research, and
+  capture; available capabilities are **phase-gated** (capture itself lands
+  at Phase F — conversation mode in A–C is answer-only). LLM path.
 - **Control mode** — consequential verbs (`approve`, `reject`, `send`,
   `cancel`, verdict taps like `useful|noise|missed|incorrect`). Resolves
   deterministically against pending review items / ActionIntents. The LLM may
@@ -241,9 +257,10 @@ UNPAIRED MESSAGE
              → pair or drop
 ```
 
-**No LLM. No conversation router. No tools.** The only semantic
-interpretation any pre-auth message ever receives is: *does this exactly
-match an active pairing challenge?* Everything else dies.
+**No LLM. No conversation router. No tools. No general message parsing
+before authentication.** The only semantic interpretation any pre-auth
+message ever receives is: *does this exactly match an active pairing
+challenge?* Everything else dies.
 
 ### 5.2 Loop defense (two guards)
 
@@ -320,8 +337,8 @@ capability is an individual grant, revocable independently.
 
 | Phase | Adds | Trust machinery live | Exit criteria |
 |---|---|---|---|
-| **A — Observe** | read-only chat.db sensor, allowlist, audit log, `sent_message_fingerprints`, idempotent ingest (control plane dedupes on chat.db ROWID/GUID) | transport-untrusted only | **minimum 48h active soak + full lifecycle/event matrix** (not wall-clock): ≥50 outbound deliveries observed 100% correctly classified as loop-free — synthesized through the real approved→claim→render→send path — including repeated identical payloads; reboot; Messages.app restart; sensor restart; display sleep; machine sleep/wake; network interruption; WAL activity; owner represented via phone *and* Apple-ID handle; schema-decoder validation; zero loop misclassifications. Shadow observation continues ~7 days while B is prepared, but B is **enabled** only after A's matrix exits clean. Sensor read cadence ≤ 5s (Phase B latency math). Catalog of Messages weirdness (edits, tapbacks, dupes, null text, service rows) documented |
-| **A′ — Spike** (may run inside A) | FDA-under-launchd wrapper, sleep/caffeinate policy, chat.db access under **current macOS (Tahoe / macOS 26) behaviors** | — | chat.db opens under the *actual launchd identity* (FDA granted to the wrapper, not an interactive shell); **read strategy is `mode=ro` against the live DB first** — verify WAL + SHM files are visible/readable, prove fresh messages become visible on the read-only connection; `immutable=1` is an *experimental fallback only* (SQLite docs: it disables locking/change detection and can return incorrect results on a file that changes — a live chat.db changes, so it is never silently adopted and never accepts stale reads); if normal read-only access proves impossible, investigate a safe snapshot/copy strategy instead; text decoding handles `message.text` **and** `message.attributedBody` (Tahoe can leave `text` empty with content in `attributedBody` — filtering `text IS NOT NULL` silently misses messages), with the decoder tested as a parser (fixture matrix: ASCII, Unicode, emoji, RTL, multiline, URLs, very long, empty/null, rich formatting, malformed `attributedBody`, unknown archive encoding; failure = audit + metric + **skip** — correct text or no text, never partially reconstructed text toward an LLM); cursor survives sensor restart; database replacement/reset is detected; **schema or content-population drift fails loudly** (alert + owner notification), never reports "0 new messages" quietly; sensor survives reboot + display sleep; documented recovery runbook |
+| **A — Observe** | read-only **shadow** sensor: observe inbound/outbound transport behavior, classify `is_from_me`, audit transport metadata, `sent_message_fingerprints`, idempotent ingest (control plane dedupes on chat.db ROWID/GUID), typedstream decoder with fixture matrix (ASCII, Unicode, emoji, RTL, multiline, URLs, very long, empty/null, rich formatting, malformed `attributedBody`, unknown archive encoding; failure = audit + metric + **skip** — correct text or no text). **No authenticated inbound principal exists yet; nothing is forwarded anywhere** — the allowlist arrives with pairing in Phase B and is derived from paired identities, never configured | transport-untrusted only | **minimum 48h active soak + full lifecycle/event matrix** (not wall-clock): ≥50 outbound deliveries observed 100% correctly classified as loop-free — synthesized through the real approved→claim→render→send path — including repeated identical payloads; reboot; Messages.app restart; sensor restart; display sleep; machine sleep/wake; network interruption; WAL activity; owner represented via phone *and* Apple-ID handle (observed as transport handles only); schema-decoder validation; zero loop misclassifications. Shadow observation continues ~7 days while B is prepared, but B is **enabled** only after A's matrix exits clean. Sensor read cadence ≤ 5s (Phase B latency math). Catalog of Messages weirdness (edits, tapbacks, dupes, null text, service rows) documented |
+| **A′ — Spike** ✅ complete 2026-09-18 (`docs/spikes/a-prime-chatdb.md`) | FDA-under-launchd wrapper, sleep/caffeinate policy, chat.db access under current macOS (Tahoe) behaviors | — | Access strategy, in order: (1) `mode=ro` against the live chat.db — **validated by the spike**: WAL + SHM visible/readable, fresh messages appear on the read-only connection, no WAL mutation; (2) if a future macOS update blocks this, investigate a **safe snapshot/copy strategy**; (3) `immutable=1` may be experimentally evaluated but **MUST NOT become production strategy** unless freshness/correctness is rigorously established — it tells SQLite the file cannot change and disables change detection, fundamentally mismatched with a live chat.db (SQLite URI docs); stale reads are never silently accepted. Spike findings: FDA wrapper (`bin/sensor-node`, rpath-fixed + ad-hoc-signed node copy) reads under interactive **and** launchd identities; **79.5% of recent messages are `attributedBody`-only** (`text` null) — the decoder is load-bearing; blob is old-style `streamtyped` typedstream with plaintext embedded; `is_from_me` confirmed on own E4 deliveries; cursor base 216995. Cursor-restart / DB-reset detection / loud drift / reboot+sleep survival / recovery runbook remain Phase A build criteria |
 | **B — Canned loop** | full loop, no LLM: paired sender texts `ping`, gets deterministic ack | **pairing live**; fail-closed drift | owner paired; `ping`→ack p95 < 90s round-trip with sensor read cadence ≤ 5s (the ack waits on the deliverer's 60s claim poll — `EDGE_POLL_SECONDS` — whose p95 alone is 57s, plus sensor cadence and send/HTTP latency; a 60s bound fails a correct build ~7% of the time at 5s cadence, while 90s clears the stacked-cadence floor and still catches a wedged poll); unpaired sender gets nothing; adversarial pass #1 |
 | **C — Stateless chat** | LLM answers with current message + small system context only | principal×surface caps, spend/day | reliable question→answer over iMessage; budget breach test trips and notifies; adversarial pass #2 |
 | **D — Bounded threads** | `interaction_threads`, windowed history | working-memory-only policy | multi-turn conversations hold context; TTL/size bounds enforced; no history leakage across principals |
