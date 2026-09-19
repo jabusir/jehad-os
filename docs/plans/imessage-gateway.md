@@ -227,13 +227,46 @@ unrecognized handle is treated as unpaired (drop + audit + notify owner via
 the E4 channel). Allowlist entries are *proven by pairing*, never configured
 by hand.
 
+### 5.1.1 Pre-auth exception (the only one)
+
+Pairing has a chicken-and-egg shape — an unpaired sender must reach the
+system precisely once. The exception is explicit and narrow:
+
+```
+UNPAIRED MESSAGE
+  → active pairing session?
+       no  → drop + audit
+       yes → exact pairing-code parser ONLY
+             → rate/guess limits (§5.1)
+             → pair or drop
+```
+
+**No LLM. No conversation router. No tools.** The only semantic
+interpretation any pre-auth message ever receives is: *does this exactly
+match an active pairing challenge?* Everything else dies.
+
 ### 5.2 Loop defense (two guards)
 
 - Primary: `is_from_me` filter on the sensor.
-- Secondary: `sent_message_fingerprints` — the deliverer records
-  (recipient, content hash, delivery timestamp); the sensor correlates
-  observed chat.db rows against fingerprints. Built and validated in
-  Phase A, before any LLM exists (§7 exit criteria).
+- Secondary: **correlation tuple**, not a bare content hash — Tahoe's
+  `attributedBody` storage means what we hand to Messages and what Apple's
+  DB decodes back are not guaranteed byte-identical even when visually
+  identical. The deliverer records and the sensor correlates:
+
+  ```
+  is_from_me                        (PRIMARY)
+  recipient
+  delivery timestamp window
+  normalized rendered-text hash
+  Apple GUID (when present)
+  ROWID observation
+  ```
+
+  Normalization before hashing: Unicode normalization + line-ending
+  normalization only. No aggressive trimming/punctuation rewriting — that
+  trades false negatives for collisions. Built and validated in Phase A,
+  before any LLM exists (§7 exit criteria); the fingerprint stays
+  defense-in-depth, never the first guard.
 
 ### 5.3 Interaction threads (Phase D)
 
@@ -288,7 +321,7 @@ capability is an individual grant, revocable independently.
 | Phase | Adds | Trust machinery live | Exit criteria |
 |---|---|---|---|
 | **A — Observe** | read-only chat.db sensor, allowlist, audit log, `sent_message_fingerprints`, idempotent ingest (control plane dedupes on chat.db ROWID/GUID) | transport-untrusted only | **minimum 48h active soak + full lifecycle/event matrix** (not wall-clock): ≥50 outbound deliveries observed 100% correctly classified as loop-free — synthesized through the real approved→claim→render→send path — including repeated identical payloads; reboot; Messages.app restart; sensor restart; display sleep; machine sleep/wake; network interruption; WAL activity; owner represented via phone *and* Apple-ID handle; schema-decoder validation; zero loop misclassifications. Shadow observation continues ~7 days while B is prepared, but B is **enabled** only after A's matrix exits clean. Sensor read cadence ≤ 5s (Phase B latency math). Catalog of Messages weirdness (edits, tapbacks, dupes, null text, service rows) documented |
-| **A′ — Spike** (may run inside A) | FDA-under-launchd wrapper, sleep/caffeinate policy, chat.db access under **current macOS (Tahoe / macOS 26) behaviors** | — | chat.db opens under the *actual launchd identity* (FDA granted to the wrapper, not an interactive shell); read-only access works without WAL mutation (Tahoe reports WAL-lock denials — validate `immutable=1` read-only mode and its tradeoffs); text decoding handles `message.text` **and** `message.attributedBody` (Tahoe can leave `text` empty with content in `attributedBody` — filtering `text IS NOT NULL` silently misses messages); cursor survives sensor restart; database replacement/reset is detected; **schema or content-population drift fails loudly** (alert + owner notification), never reports "0 new messages" quietly; sensor survives reboot + display sleep; documented recovery runbook |
+| **A′ — Spike** (may run inside A) | FDA-under-launchd wrapper, sleep/caffeinate policy, chat.db access under **current macOS (Tahoe / macOS 26) behaviors** | — | chat.db opens under the *actual launchd identity* (FDA granted to the wrapper, not an interactive shell); **read strategy is `mode=ro` against the live DB first** — verify WAL + SHM files are visible/readable, prove fresh messages become visible on the read-only connection; `immutable=1` is an *experimental fallback only* (SQLite docs: it disables locking/change detection and can return incorrect results on a file that changes — a live chat.db changes, so it is never silently adopted and never accepts stale reads); if normal read-only access proves impossible, investigate a safe snapshot/copy strategy instead; text decoding handles `message.text` **and** `message.attributedBody` (Tahoe can leave `text` empty with content in `attributedBody` — filtering `text IS NOT NULL` silently misses messages), with the decoder tested as a parser (fixture matrix: ASCII, Unicode, emoji, RTL, multiline, URLs, very long, empty/null, rich formatting, malformed `attributedBody`, unknown archive encoding; failure = audit + metric + **skip** — correct text or no text, never partially reconstructed text toward an LLM); cursor survives sensor restart; database replacement/reset is detected; **schema or content-population drift fails loudly** (alert + owner notification), never reports "0 new messages" quietly; sensor survives reboot + display sleep; documented recovery runbook |
 | **B — Canned loop** | full loop, no LLM: paired sender texts `ping`, gets deterministic ack | **pairing live**; fail-closed drift | owner paired; `ping`→ack p95 < 90s round-trip with sensor read cadence ≤ 5s (the ack waits on the deliverer's 60s claim poll — `EDGE_POLL_SECONDS` — whose p95 alone is 57s, plus sensor cadence and send/HTTP latency; a 60s bound fails a correct build ~7% of the time at 5s cadence, while 90s clears the stacked-cadence floor and still catches a wedged poll); unpaired sender gets nothing; adversarial pass #1 |
 | **C — Stateless chat** | LLM answers with current message + small system context only | principal×surface caps, spend/day | reliable question→answer over iMessage; budget breach test trips and notifies; adversarial pass #2 |
 | **D — Bounded threads** | `interaction_threads`, windowed history | working-memory-only policy | multi-turn conversations hold context; TTL/size bounds enforced; no history leakage across principals |
@@ -333,14 +366,34 @@ each opening its own implementation plan when its predecessor soaks clean.
   (owner monitors Apple ID alerts). Paired identity is bound to verified
   transport handles; sensor cursor state is independently maintained and
   never contributes to identity.
+- **FDA is itself a capability** — the sensor process holds Full Disk
+  Access; compromising it exposes far more than Messages. Mitigation: the
+  sensor binary is built like a privileged daemon — tiny dependency
+  surface, no model SDK, no OpenRouter credentials, no shell capability,
+  no canonical-DB credentials, no send capability. It does exactly three
+  things: read the Messages DB, normalize, and speak authenticated HTTPS
+  to the Jehad OS ingest endpoint (whose principal holds only narrow
+  ingest permissions — §4.2). The macOS process is as boring as its
+  control-plane capability set.
 
 ## 9. Observability
 
 - Every inbound: audited with transport identity, resolution (dropped /
-  unpaired / conversation / control), and outcome.
+  unpaired / pairing-attempt / conversation / control), and outcome.
 - Every LLM call: existing `model_calls` audit + surface tag.
-- Sensor heartbeat metric (rows seen, cursor lag, fingerprint match rate) in
-  `josctl metrics`; anomalies notify the owner over E4.
+- **Health is five-dimensional, never one green bit**:
+
+  ```
+  process health    — sensor is running
+  database health   — chat.db readable; expected tables/columns exist
+  decoder health    — recent known messages decode correctly
+  cursor health     — cursor advances when the DB advances
+  shadow health     — known outbound deliveries observed + classified
+  ```
+
+  This distinguishes `process: healthy / decoder: FAILED` from the
+  dangerous "gateway healthy — 0 messages". Sensor heartbeat carries all
+  five in `josctl metrics`; anomalies notify the owner over E4.
 
 ## 10. Not-now list
 
