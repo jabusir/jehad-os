@@ -27,7 +27,7 @@ export const NOTIFICATION_STATUSES = [
 ] as const;
 export type NotificationStatus = (typeof NOTIFICATION_STATUSES)[number];
 
-export const NOTIFICATION_SOURCE_TYPES = ["escalation", "brief", "run"] as const;
+export const NOTIFICATION_SOURCE_TYPES = ["escalation", "brief", "run", "calendar"] as const;
 export type NotificationSourceType = (typeof NOTIFICATION_SOURCE_TYPES)[number];
 
 export interface NotificationRow {
@@ -175,10 +175,10 @@ export async function createNotification(
   opts: NotificationServiceOptions = {},
 ): Promise<NotificationRow> {
   if (!isNotificationKind(input.kind)) {
-    throw new NotificationInputError(`kind must be one of brief|escalation|custom`);
+    throw new NotificationInputError(`kind must be one of brief|escalation|custom|calendar-change`);
   }
   if (!isSourceType(input.sourceType)) {
-    throw new NotificationInputError(`sourceType must be one of escalation|brief|run`);
+    throw new NotificationInputError(`sourceType must be one of escalation|brief|run|calendar`);
   }
   if (typeof input.title !== "string" || input.title.trim().length === 0 || input.title.length > 280) {
     throw new NotificationInputError("title must be a non-empty string of at most 280 chars");
@@ -351,6 +351,8 @@ export interface ClaimInput {
   readonly actor?: string;
   /** Capability-grant id that authorized the claim (audit traceability). */
   readonly grantId?: string | null;
+  /** Which capability authorized the claim (E4-S alias audit; optional). */
+  readonly grantCapability?: string | null;
   readonly now?: () => Date;
 }
 
@@ -398,7 +400,11 @@ export async function claimNextApprovedNotification(
     action: "notification.claimed",
     reversible: true,
     grantId: input.grantId ?? null,
-    outputsRef: JSON.stringify({ notificationId: notification.id, claimedBy: input.claimedBy }),
+    outputsRef: JSON.stringify({
+      notificationId: notification.id,
+      claimedBy: input.claimedBy,
+      grantCapability: input.grantCapability ?? null,
+    }),
   });
   return notification;
 }
@@ -409,6 +415,8 @@ export interface MarkDeliveredInput {
   readonly actor?: string;
   /** Capability-grant id that authorized the delivery (audit traceability). */
   readonly grantId?: string | null;
+  /** Which capability authorized the delivery (E4-S alias audit; optional). */
+  readonly grantCapability?: string | null;
   readonly now?: () => Date;
 }
 
@@ -467,7 +475,11 @@ export async function markDelivered(
     action: "notification.delivered",
     reversible: false,
     grantId: input.grantId ?? null,
-    outputsRef: JSON.stringify({ notificationId, deliveredBy: input.deliveredBy }),
+    outputsRef: JSON.stringify({
+      notificationId,
+      deliveredBy: input.deliveredBy,
+      grantCapability: input.grantCapability ?? null,
+    }),
   });
   return notification;
 }
@@ -658,5 +670,64 @@ export async function enqueueEscalationNotification(
       createdBy: input.createdBy,
     },
     { config, actor: "internal:escalations", now: resolveNow(input.now) },
+  );
+}
+
+export interface CalendarChangeNotificationInput {
+  /** Pre-composed by the calendar sync lane, e.g. `Standup: moved to 2026-09-18 09:00 UTC`. */
+  readonly title: string;
+  /** The disruptive change itself (what the edge delivers verbatim). */
+  readonly change: {
+    readonly changeClass: "start_end_changed" | "cancelled";
+    readonly summary: string;
+    readonly start: string | null;
+    readonly end: string | null;
+    readonly previousStart: string | null;
+    readonly previousEnd: string | null;
+  };
+  /** Provenance: which sensor observation produced this notification. */
+  readonly provenance: {
+    readonly eventId: string;
+    readonly googleEventId: string;
+    readonly calendarId: string;
+  };
+  readonly domainKey?: string;
+  readonly config?: NotificationsConfig;
+  readonly now?: Date | (() => Date);
+}
+
+/**
+ * Producer hook for the calendar lane (E4-S): persists a kind=calendar-change
+ * notification for a DISRUPTIVE near-term change. The 48h filter lives in
+ * the caller (calendar sync) — this hook records, never decides. The kind is
+ * on the policy auto-approve list; that auto-approve plus the 48h filter IS
+ * the noise gate (created/updated changes ride the morning brief instead).
+ */
+export async function enqueueCalendarChangeNotification(
+  db: SqlExecutor,
+  input: CalendarChangeNotificationInput,
+): Promise<NotificationRow> {
+  const domainKey = input.domainKey ?? "personal";
+  const domain = await db.query("SELECT id FROM domains WHERE key = $1", [domainKey]);
+  const domainId = domain.rows[0]?.id;
+  if (domainId === undefined) {
+    throw new NotificationInputError(`domain "${domainKey}" is not seeded`);
+  }
+  const createdBy = await resolveServicePrincipal(db, "service/calendar-sync");
+  return createNotification(
+    db,
+    {
+      kind: "calendar-change",
+      title: input.title,
+      payload: {
+        change: { ...input.change },
+        provenance: { ...input.provenance, source: "calendar-sync" },
+      },
+      domainId: String(domainId),
+      sourceType: "calendar",
+      sourceId: input.provenance.eventId,
+      createdBy,
+    },
+    { config: input.config, actor: "service:calendar-sync", now: resolveNow(input.now) },
   );
 }

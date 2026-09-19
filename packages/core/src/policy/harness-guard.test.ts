@@ -18,8 +18,12 @@ import {
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
+/** The claim/delivered seam requirement AFTER the E4-S capability alias. */
 const REQUIRED = {
-  capability: HARNESS_CAPABILITIES.deliverNotifications,
+  capabilities: [
+    HARNESS_CAPABILITIES.deliverNotifications,
+    HARNESS_CAPABILITIES.sendChannelImessage,
+  ],
   resource: "notifications",
 };
 
@@ -80,7 +84,7 @@ describe.skipIf(!TEST_DATABASE_URL)("harness grant guard (integration)", () => {
     return issueGrant(db.pool, {
       principalId: harnessId,
       runId,
-      capability: REQUIRED.capability,
+      capability: HARNESS_CAPABILITIES.deliverNotifications,
       resource: REQUIRED.resource,
       domainId,
       ttlMs: 60 * 60_000,
@@ -101,15 +105,54 @@ describe.skipIf(!TEST_DATABASE_URL)("harness grant guard (integration)", () => {
     return rows.rows.map((row) => String(row.reason));
   }
 
+  async function lastDenialOutputs(): Promise<Record<string, unknown>> {
+    const rows = await db.pool.query(
+      "SELECT outputs_ref::jsonb AS outputs FROM audit_log WHERE action = 'harness.grant_denied' ORDER BY created_at DESC LIMIT 1",
+    );
+    return rows.rows[0].outputs as Record<string, unknown>;
+  }
+
   it("harness + valid scoped token → allowed with the grant id", async () => {
     const { grant, token } = await issue();
     const decision = await check({ principalId: harnessId, principalType: "harness", capabilityToken: token });
-    expect(decision).toEqual({ allowed: true, grantId: grant.id, bypass: "grant" });
+    expect(decision).toEqual({
+      allowed: true,
+      grantId: grant.id,
+      bypass: "grant",
+      capability: HARNESS_CAPABILITIES.deliverNotifications,
+    });
+  });
+
+  it("E4-S alias: a send_channel:imessage grant passes the claim/delivered seam and records WHICH capability matched", async () => {
+    const { grant, token } = await issue({ capability: HARNESS_CAPABILITIES.sendChannelImessage });
+    const decision = await check({ principalId: harnessId, principalType: "harness", capabilityToken: token });
+    expect(decision).toEqual({
+      allowed: true,
+      grantId: grant.id,
+      bypass: "grant",
+      capability: HARNESS_CAPABILITIES.sendChannelImessage,
+    });
+  });
+
+  it("E4-S alias: a capability outside the accepted list still denies (wrong_capability) + audits the list", async () => {
+    const outsider = await issue({
+      capability: HARNESS_CAPABILITIES.stateSummary,
+      resource: "state-summary",
+    });
+    expect(
+      await denialReason(
+        await check({ principalId: harnessId, principalType: "harness", capabilityToken: outsider.token }),
+      ),
+    ).toBe("wrong_capability");
+    const outputs = await lastDenialOutputs();
+    expect(outputs["capabilities"]).toEqual([...REQUIRED.capabilities]);
+    expect(outputs["reason"]).toBe("wrong_capability");
+    expect(await guardDenials()).toContain("wrong_capability");
   });
 
   it("user principal bypasses the grant layer (owner)", async () => {
     const decision = await check({ principalId: userId, principalType: "user" });
-    expect(decision).toEqual({ allowed: true, grantId: null, bypass: "owner" });
+    expect(decision).toEqual({ allowed: true, grantId: null, bypass: "owner", capability: null });
   });
 
   it("service principals are denied everywhere + audited", async () => {

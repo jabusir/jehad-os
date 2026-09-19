@@ -373,7 +373,10 @@ describe.skipIf(!TEST_DATABASE_URL)("notification service (integration)", () => 
     // The repo-root policy.yaml is the artifact under test for defaults.
     const { loadNotificationsConfig } = await import("./config.js");
     const config = await loadNotificationsConfig();
-    expect(config).toEqual(DEFAULT_NOTIFICATIONS_CONFIG);
-    expect(config.autoApproveKinds).toEqual(["brief"]);
+    expect(config).toEqual({
+      ...DEFAULT_NOTIFICATIONS_CONFIG,
+      autoApproveKinds: ["brief", "calendar-change"], // E4-S: calendar-change joins the auto-approve list
+    });
+    expect(config.escalationMinUrgency).toBe("high"); // escalations keep the >= high threshold
   });
 });

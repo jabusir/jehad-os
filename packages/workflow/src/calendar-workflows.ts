@@ -34,7 +34,9 @@ async function syncWithPool(): Promise<CalendarSyncResult> {
       return { skipped: "no-token" };
     }
     const source = createGoogleCalendarSource({ tokenProvider: async () => token, calendarId });
-    const report = await syncCalendar(pool, source);
+    // E4-S: the scheduled sensor enqueues calendar-change notifications for
+    // disruptive near-term changes (48h filter + policy auto-approve gate).
+    const report = await syncCalendar(pool, source, { notify: true });
     return { changes: report.changes.length, fullResync: report.fullResync };
   } finally {
     await pool.end();

@@ -199,6 +199,7 @@ describe.skipIf(!TEST_DATABASE_URL)("backup → restore (integration)", () => {
       "006_notifications",
       "007_calendar",
       "008_feedback",
+      "009_notification_calendar_change",
     ]);
   });
 });

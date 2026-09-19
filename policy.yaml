@@ -17,15 +17,23 @@ autonomy_ceiling:
 #   autoApproveKinds      — notification kinds that skip the user review queue
 #                           and land status=approved at creation (briefs are
 #                           self-authored structured output, not external
-#                           actions). Everything else — escalation, custom —
-#                           lands pending until POST /notifications/:id/approve.
+#                           actions; calendar-change rows are pre-gated by the
+#                           producer's 48h disruptive-change filter — ONLY
+#                           start_end_changed/cancelled whose (new or previous)
+#                           start falls within the NEXT 48h enqueue at all.
+#                           That filter IS the noise gate: created/updated
+#                           changes ride the morning brief instead. Everything
+#                           else — escalation, custom — lands pending until
+#                           POST /notifications/:id/approve.
 #   escalationMinUrgency  — an escalation raise enqueues a delivery
 #                           notification only at/above this urgency
 #                           (low < medium < high < critical < blocker).
+#                           Escalations stay at >= high: they interrupt a
+#                           human and must never fire below it.
 #   defaultTtlMinutes     — delivery window stamped on new notifications as
 #                           expires_at; past it a row is expired and can never
 #                           be claimed or delivered.
 notifications:
-  autoApproveKinds: ["brief"]
+  autoApproveKinds: ["brief", "calendar-change"]
   escalationMinUrgency: high
   defaultTtlMinutes: 240
