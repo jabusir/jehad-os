@@ -76,9 +76,16 @@ describe("notifications policy section (policy.yaml)", () => {
     const { loadNotificationsConfig } = await import("./config.js");
     const config = await loadNotificationsConfig();
     expect(config).toEqual({
-      autoApproveKinds: ["brief"],
+      autoApproveKinds: ["brief", "calendar-change"],
       escalationMinUrgency: "high",
       defaultTtlMinutes: 240,
     });
+  });
+
+  it("calendar-change is a known kind; auto-approve survives the vocabulary drop-filter", () => {
+    const config = notificationsConfigFromPolicyV1(
+      parsePolicyV1(`${BASE}notifications:\n  autoApproveKinds: ["brief", "calendar-change"]\n`),
+    );
+    expect(config.autoApproveKinds).toEqual(["brief", "calendar-change"]);
   });
 });

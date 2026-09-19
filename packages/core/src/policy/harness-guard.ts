@@ -22,8 +22,15 @@ export const HARNESS_GRANT_DOMAIN_KEY = "personal";
 export const HARNESS_CAPABILITIES = {
   /** GET /harness/state-summary — the counts-only projection. */
   stateSummary: "read:state-summary",
-  /** POST /harness/notifications/claim | /:id/delivered. */
+  /** POST /harness/notifications/claim | /:id/delivered (generic delivery grant). */
   deliverNotifications: "deliver:notifications",
+  /**
+   * E4-S alias for the claim/delivered seam: a send-only iMessage edge whose
+   * grant says exactly what it may do (`send_channel:imessage`) — never a
+   * generic delivery capability. The claim/delivered routes accept EITHER
+   * capability; every other seam accepts exactly one.
+   */
+  sendChannelImessage: "send_channel:imessage",
 } as const;
 
 export interface HarnessPrincipalContext {
@@ -37,12 +44,23 @@ export interface HarnessPrincipalContext {
 }
 
 export interface HarnessGrantRequirement {
-  readonly capability: string;
+  /**
+   * Capabilities accepted at this seam (exact grant matches only). Routes
+   * with a capability ALIAS (claim/delivered: deliver:notifications OR
+   * send_channel:imessage) list both; the presented token must match one.
+   */
+  readonly capabilities: readonly string[];
   readonly resource: string;
 }
 
 export type HarnessGuardDecision =
-  | { allowed: true; grantId: string | null; bypass: "owner" | "grant" }
+  | {
+      allowed: true;
+      grantId: string | null;
+      bypass: "owner" | "grant";
+      /** The matched capability (grant bypass) or null (owner bypass). */
+      readonly capability: string | null;
+    }
   | {
       allowed: false;
       status: 403;
@@ -64,7 +82,7 @@ async function auditDenial(
     reversible: true,
     outputsRef: JSON.stringify({
       reason: code,
-      capability: requirement.capability,
+      capabilities: requirement.capabilities,
       resource: requirement.resource,
       principalType: context.principalType ?? null,
     }),
@@ -76,6 +94,13 @@ async function auditDenial(
  * writes an audit row (owner's checklist: "every 403 audited too"). Grant
  * verification is server-side against capability_grants — a forged, reused,
  * wrong-scope, expired, or revoked token denies with its reason.
+ *
+ * Capability aliases: a seam listing several capabilities accepts a token
+ * matching ANY of them. Only wrong_capability is capability-dependent, so
+ * the scan tries each listed capability and stops at the first denial that
+ * is NOT wrong_capability (malformed/unknown/expired/revoked/… reasons are
+ * identical for every candidate). The allowed decision records WHICH
+ * capability matched; the denial audit records the accepted list.
  */
 export async function checkHarnessGrant(
   db: SqlExecutor,
@@ -88,7 +113,7 @@ export async function checkHarnessGrant(
   }
   // The owner bypasses the grant layer — every surface is theirs already.
   if (context.principalType === "user") {
-    return { allowed: true, grantId: null, bypass: "owner" };
+    return { allowed: true, grantId: null, bypass: "owner", capability: null };
   }
   if (typeof context.capabilityToken !== "string" || context.capabilityToken.length === 0) {
     await auditDenial(db, context, requirement, "missing_capability_token");
@@ -109,16 +134,26 @@ export async function checkHarnessGrant(
     return { allowed: false, status: 403, code: "domain_unavailable" };
   }
 
-  const decision = await verifyGrant(db, context.capabilityToken, {
-    principalId: context.principalId,
-    capability: requirement.capability,
-    resource: requirement.resource,
-    domainId: String(domainId),
-    now: context.now,
-  });
-  if (!decision.allowed) {
-    await auditDenial(db, context, requirement, decision.reason);
-    return { allowed: false, status: 403, code: decision.reason };
+  let reason: GrantDenialReason = "wrong_capability";
+  for (const capability of requirement.capabilities) {
+    const decision = await verifyGrant(db, context.capabilityToken, {
+      principalId: context.principalId,
+      capability,
+      resource: requirement.resource,
+      domainId: String(domainId),
+      now: context.now,
+    });
+    if (decision.allowed) {
+      return {
+        allowed: true,
+        grantId: decision.grant.id,
+        bypass: "grant",
+        capability: decision.grant.capability,
+      };
+    }
+    reason = decision.reason;
+    if (decision.reason !== "wrong_capability") break;
   }
-  return { allowed: true, grantId: decision.grant.id, bypass: "grant" };
+  await auditDenial(db, context, requirement, reason);
+  return { allowed: false, status: 403, code: reason };
 }
