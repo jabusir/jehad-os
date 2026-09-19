@@ -1,0 +1,6 @@
+{
+  "ok": true,
+  "text": "line one\nline two\n\nline three\ttabbed",
+  "parts": 1,
+  "hasAttachmentPlaceholder": false
+}
