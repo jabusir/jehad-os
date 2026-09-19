@@ -65,8 +65,13 @@ export function renderNotificationText(notification: DeliverableNotification): s
   let text: string;
   switch (notification.kind) {
     case "brief":
-    case "reply":
       text = [notification.title, asString(notification.payload["content"])].filter(Boolean).join("\n");
+      break;
+    case "reply":
+      // Conversational: content ONLY — a "Reply" title prefix is noise on a
+      // chat surface (owner feedback 2026-09-19). Title stays on the row for
+      // audit; it is never rendered.
+      text = asString(notification.payload["content"]) ?? notification.title;
       break;
     case "calendar-change":
       text = notification.title;

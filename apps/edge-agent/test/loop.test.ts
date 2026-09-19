@@ -227,10 +227,10 @@ describe("edge-agent loop (hermetic)", () => {
     const h = makeHarness({ notification: REPLY_NOTIFICATION });
     const result = await runOnce(h.deps, CONFIG);
     expect(result).toEqual({ claimed: true, delivered: true });
-    expect(h.sent).toEqual([{ target: "+15550002222", text: "Reply\npong" }]);
+    expect(h.sent).toEqual([{ target: "+15550002222", text: "pong" }]);
     const body = JSON.parse(String(h.calls[1]!.init?.body)) as Record<string, string>;
     expect(body.recipient).toBe("+15550002222"); // actual target used
-    expect(body.rendered_text_sha256).toBe(renderedTextSha256("Reply\npong"));
+    expect(body.rendered_text_sha256).toBe(renderedTextSha256("pong"));
   });
 
   it("kind≠reply IGNORES a server-sent recipient (defense in depth) — default target used", async () => {
@@ -263,7 +263,7 @@ describe("edge-agent loop (hermetic)", () => {
     const h = makeHarness({ notification: legacy });
     const result = await runOnce(h.deps, CONFIG);
     expect(result).toEqual({ claimed: true, delivered: true });
-    expect(h.sent).toEqual([{ target: CREDENTIALS.target, text: "Reply\npong" }]);
+    expect(h.sent).toEqual([{ target: CREDENTIALS.target, text: "pong" }]);
   });
 
   it("resolveDeliveryTarget validates BOTH branches with the same email/E.164 validators", () => {
