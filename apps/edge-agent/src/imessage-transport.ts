@@ -38,15 +38,17 @@ export function isValidImessageTarget(target: string): boolean {
 
 /**
  * AppleScript string escaping: backslash first, then double quote; newline
- * (LF/CRLF/CR) becomes `\" & linefeed & \"` — a concatenation that keeps the
- * whole invocation on the fixed single-statement template while preserving
- * line breaks in the delivered message.
+ * (LF/CRLF/CR) becomes `" & linefeed & "` — note UNescaped quotes: they
+ * close the AppleScript string, concatenate the `linefeed` constant, and
+ * reopen it. (Escaped `\"` here would embed literal quote characters inside
+ * the string and ship `" & linefeed & "` as message text — bug found by the
+ * A′ spike, 2026-09-18.)
  */
 export function escapeAppleScriptString(value: string): string {
   return value
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')
-    .replace(/\r\n|\r|\n/g, '\\" & linefeed & \\"');
+    .replace(/\r\n|\r|\n/g, '" & linefeed & "');
 }
 
 /** The one and only AppleScript this app can ever run. */

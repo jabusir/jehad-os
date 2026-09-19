@@ -242,7 +242,12 @@ describe("envOrKeychainTokenProvider", () => {
     const prev = process.env.GCALENDAR_ACCESS_TOKEN;
     delete process.env.GCALENDAR_ACCESS_TOKEN;
     try {
-      await expect(envOrKeychainTokenProvider()).rejects.toThrow(/jehad-gcalendar/);
+      // Hermetic: probe a service name that cannot exist on a dev host, so
+      // the test cannot leak depending on whether the operator has already
+      // bootstrapped the real `jehad-gcalendar` item.
+      await expect(envOrKeychainTokenProvider("jehad-gcalendar-test-absent")).rejects.toThrow(
+        /jehad-gcalendar-test-absent/,
+      );
     } finally {
       if (prev !== undefined) process.env.GCALENDAR_ACCESS_TOKEN = prev;
     }

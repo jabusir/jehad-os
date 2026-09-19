@@ -93,15 +93,15 @@ describe("escaping vectors (payloads are inert TEXT)", () => {
 
   it("quotes and backslashes are AppleScript-escaped exactly", () => {
     expect(escapeAppleScriptString('say "hi" \\ done')).toBe('say \\"hi\\" \\\\ done');
-    expect(escapeAppleScriptString("a\nb")).toBe('a\\" & linefeed & \\"b');
-    expect(escapeAppleScriptString("a\r\nb")).toBe('a\\" & linefeed & \\"b');
+    expect(escapeAppleScriptString("a\nb")).toBe('a" & linefeed & "b');
+    expect(escapeAppleScriptString("a\r\nb")).toBe('a" & linefeed & "b');
     expect(escapeAppleScriptString("no specials")).toBe("no specials");
   });
 
   it("round-trip: buildSendCommand embeds the escaped text verbatim", () => {
     const command = buildSendCommand(VALID_PHONE, 'x" y\\ z\nw');
     expect(command).toBe(
-      'tell application "Messages" to send "x\\" y\\\\ z\\" & linefeed & \\"w" to buddy "+15551234567"',
+      'tell application "Messages" to send "x\\" y\\\\ z" & linefeed & "w" to buddy "+15551234567"',
     );
   });
 });

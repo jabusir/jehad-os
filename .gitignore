@@ -27,3 +27,4 @@ wt/
 evals/.last-hermetic.json
 evals/.last-live.json
 evals/.eval-report-*.md
+bin/

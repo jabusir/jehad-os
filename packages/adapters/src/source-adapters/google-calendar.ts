@@ -143,14 +143,16 @@ export function createGoogleCalendarSource(opts: {
  * else the `jehad-gcalendar` Keychain item via `security find-generic-password`.
  * The token itself never enters the event log or the database.
  */
-export async function envOrKeychainTokenProvider(): Promise<string> {
+export async function envOrKeychainTokenProvider(
+  keychainService = "jehad-gcalendar",
+): Promise<string> {
   const envToken = process.env.GCALENDAR_ACCESS_TOKEN;
   if (typeof envToken === "string" && envToken.trim().length > 0) return envToken.trim();
   try {
     const { stdout } = await execFileAsync("security", [
       "find-generic-password",
       "-s",
-      "jehad-gcalendar",
+      keychainService,
       "-w",
     ]);
     const token = stdout.trim();
@@ -159,7 +161,7 @@ export async function envOrKeychainTokenProvider(): Promise<string> {
   } catch {
     throw new Error(
       "google-calendar: no access token — set GCALENDAR_ACCESS_TOKEN or create the " +
-        "Keychain item `jehad-gcalendar` (infra/calendar/README.md)",
+        `Keychain item \`${keychainService}\` (infra/calendar/README.md)`,
     );
   }
 }
