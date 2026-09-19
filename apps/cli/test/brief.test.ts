@@ -164,7 +164,7 @@ describe.skipIf(!TEST_DATABASE_URL)("runBriefCommand (integration)", () => {
     expect(code).toBe(0);
     expect(errOut.text()).toBe("");
     const text = out.text();
-    expect(text).toContain("MORNING BRIEF — ");
+    expect(text).toContain("Morning brief — ");
     expect(text).toContain("OVERDUE Pay October rent");
     // CLI persist path: exactly one brief artifact so far.
     const { Pool } = await import("pg");

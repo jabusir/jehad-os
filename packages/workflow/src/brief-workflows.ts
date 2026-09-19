@@ -17,22 +17,30 @@
  */
 
 import { Pool } from "pg";
-import { renderEveningClose, renderMorningBrief, type BriefOutcome } from "@jehad/core";
+import { BRIEF_TIMEZONE, renderEveningClose, renderMorningBrief, type BriefOutcome } from "@jehad/core";
 import { defineScheduledWorkflow, type ScheduledWorkflowDefinition } from "./definition.js";
 
-export const MORNING_BRIEF_UTC_HOUR = 7;
-export const EVENING_CLOSE_UTC_HOUR = 21;
+
+
 
 export interface ScheduledRenderResult {
-  /** True when the firing happened outside its UTC window (no-op, no step). */
+  /** True when the firing happened outside its local-hour window (no-op, no step). */
   readonly skippedWindow?: boolean;
   /** The render outcome when the window was active. */
   readonly outcome?: BriefOutcome;
 }
 
-/** Pure UTC-hour window check (exported for deterministic tests). */
-export function isUtcHour(date: Date, hour: number): boolean {
-  return date.getUTCHours() === hour;
+/** Pure local-hour window check in the owner's timezone (DST-safe via
+ *  Intl — no UTC-offset math). Exported for deterministic tests. */
+export const BRIEF_LOCAL_TZ = BRIEF_TIMEZONE; // America/Los_Angeles (core: briefs/timezone)
+export const MORNING_BRIEF_LOCAL_HOUR = 6; // 6 AM PT
+export const EVENING_CLOSE_LOCAL_HOUR = 21; // 9 PM PT
+
+export function isLocalHour(date: Date, hour: number, timeZone = BRIEF_LOCAL_TZ): boolean {
+  const localHour = Number(
+    new Intl.DateTimeFormat("en-US", { hour: "numeric", hour12: false, timeZone }).format(date),
+  );
+  return localHour === hour;
 }
 
 async function renderWithPool(
@@ -52,7 +60,7 @@ export const morningBriefWorkflow = defineScheduledWorkflow({
   name: "brief-morning",
   cron: "0 * * * *",
   fn: async (ctx): Promise<ScheduledRenderResult> => {
-    if (!isUtcHour(new Date(), MORNING_BRIEF_UTC_HOUR)) return { skippedWindow: true };
+    if (!isLocalHour(new Date(), MORNING_BRIEF_LOCAL_HOUR)) return { skippedWindow: true };
     const outcome = await ctx.step.run("render-morning-brief", () =>
       renderWithPool((db) => renderMorningBrief(db, { notify: true })),
     );
@@ -62,9 +70,9 @@ export const morningBriefWorkflow = defineScheduledWorkflow({
 
 export const eveningCloseWorkflow = defineScheduledWorkflow({
   name: "brief-evening",
-  cron: "0 21 * * *",
+  cron: "0 * * * *",
   fn: async (ctx): Promise<ScheduledRenderResult> => {
-    if (!isUtcHour(new Date(), EVENING_CLOSE_UTC_HOUR)) return { skippedWindow: true };
+    if (!isLocalHour(new Date(), EVENING_CLOSE_LOCAL_HOUR)) return { skippedWindow: true };
     const outcome = await ctx.step.run("render-evening-close", () =>
       renderWithPool((db) => renderEveningClose(db, { notify: true })),
     );

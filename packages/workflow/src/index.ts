@@ -30,10 +30,11 @@ export {
 
 export {
   briefWorkflows,
-  EVENING_CLOSE_UTC_HOUR,
+  BRIEF_LOCAL_TZ,
+  EVENING_CLOSE_LOCAL_HOUR,
   eveningCloseWorkflow,
-  isUtcHour,
-  MORNING_BRIEF_UTC_HOUR,
+  isLocalHour,
+  MORNING_BRIEF_LOCAL_HOUR,
   morningBriefWorkflow,
   type ScheduledRenderResult,
 } from "./brief-workflows.js";

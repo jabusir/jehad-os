@@ -184,6 +184,14 @@ const MORNING_FULL: MorningBriefData = {
     ],
   },
   todaySchedule: [],
+  nextUpcoming: {
+    googleEventId: "evt-next",
+    summary: "Video Interview with Taekus",
+    startTime: "2026-09-28T20:30:00.000Z",
+    endTime: "2026-09-28T21:15:00.000Z",
+    timezone: "America/Los_Angeles",
+    location: "Google Meet",
+  },
 };
 
 const MORNING_EMPTY: MorningBriefData = {
@@ -195,6 +203,7 @@ const MORNING_EMPTY: MorningBriefData = {
   unlock: null,
   escalations: { pending: 0, batched: 0, byReason: [] },
   todaySchedule: [],
+  nextUpcoming: null,
 };
 
 const MORNING_WITH_SCHEDULE: MorningBriefData = {
@@ -217,6 +226,7 @@ const MORNING_WITH_SCHEDULE: MorningBriefData = {
       location: null,
     },
   ],
+  nextUpcoming: null,
 };
 
 const EVENING_FULL: EveningCloseData = {
@@ -283,33 +293,32 @@ const EVENING_EMPTY: EveningCloseData = {
 
 describe("renderMorningBriefText (golden)", () => {
   it("renders the full §31 morning shape exactly", () => {
-    expect(renderMorningBriefText(MORNING_FULL)).toBe(`MORNING BRIEF — 2026-09-17 (personal)
-delta since 2026-09-16T20:00:00.000Z
+    expect(renderMorningBriefText(MORNING_FULL)).toBe(`Morning brief — Thu, Sep 17
 
-WHILE YOU WERE AWAY
-- events: 2
+Today
+- nothing scheduled
+- next up: 1:30\u20132:15 PM Video Interview with Taekus (Google Meet)
+
+Overnight
+- 2 events:
   - capture.recorded ×2
-- commitments changed: 1
+- 1 commitment captured:
   - Pay October rent (i_owe, open)
-- decisions changed: 1
+- 1 decision:
   - Choose the migration approach → Strangler fig
-- relationships changed: 1
-  - commitment blocked_by decision ×1
+- 1 relationship update
 
-TODAY'S SCHEDULE
-- nothing on the calendar
-
-WAITING ON YOU
+Waiting on you
 - OVERDUE Pay October rent — due 2026-09-16T12:00:00.000Z (i_owe Landlord)
 - DUE SOON Submit quarter-end paperwork — due 2026-09-19T12:00:00.000Z (i_owe Bank)
 - 3 more open commitments without near due dates
 
-BLOCKED OR SILENTLY STALLED
+Blocked or stalled
 - Task B: draft schema — blocked by decision "Choose the migration approach"
 - Cycle side X — blocked by commitment "Cycle side Y" (dependency cycle)
 - Stale unblocked commitment (8 days silent) — stalled 8.0d (threshold 7d)
 
-TODAY'S HIGHEST-LEVERAGE UNLOCK
+Best unlock today
 - Choose the migration approach (chosen: Strangler fig)
   unblocks 5 downstream items (3 direct)
   - Task B: draft schema
@@ -318,112 +327,67 @@ TODAY'S HIGHEST-LEVERAGE UNLOCK
   - Task T2 (depth 2 under A)
   - Task T3 (depth 3 under A)
 
-OPEN ESCALATIONS
+Escalations
 - 3 open (pending 2, batched 1)
 - ambiguous_requirements ×1
 - approval_required ×2
 `);
   });
 
-  it("renders explicit empty placeholders in an empty world", () => {
-    expect(renderMorningBriefText(MORNING_EMPTY)).toBe(`MORNING BRIEF — 2026-09-17 (personal)
-delta since 2026-09-16T20:00:00.000Z
+  it("renders a short quiet brief in an empty world", () => {
+    expect(renderMorningBriefText(MORNING_EMPTY)).toBe(`Morning brief — Thu, Sep 17
 
-WHILE YOU WERE AWAY
-- no changes in window
+Today
+- nothing scheduled
 
-TODAY'S SCHEDULE
-- nothing on the calendar
-
-WAITING ON YOU
-- nothing overdue or due soon
-
-BLOCKED OR SILENTLY STALLED
-- nothing blocked or stalled
-
-TODAY'S HIGHEST-LEVERAGE UNLOCK
-- no blocked downstream work to unlock
-
-OPEN ESCALATIONS
-- none open
+All quiet — nothing waiting on you.
 `);
   });
 
   it("renders today's schedule section from the calendar projection (E3)", () => {
-    expect(renderMorningBriefText(MORNING_WITH_SCHEDULE)).toBe(`MORNING BRIEF — 2026-09-17 (personal)
-delta since 2026-09-16T20:00:00.000Z
+    expect(renderMorningBriefText(MORNING_WITH_SCHEDULE)).toBe(`Morning brief — Thu, Sep 17
 
-WHILE YOU WERE AWAY
-- no changes in window
+Today
+- 9–10 AM Dentist (12 Creek Rd)
+- 10:30–11 AM (untitled)
 
-TODAY'S SCHEDULE
-- Dentist — 2026-09-17T13:00:00.000Z → 2026-09-17T14:00:00.000Z (12 Creek Rd)
-- (untitled) — 2026-09-17T17:30:00.000Z → 2026-09-17T18:00:00.000Z
-
-WAITING ON YOU
-- nothing overdue or due soon
-
-BLOCKED OR SILENTLY STALLED
-- nothing blocked or stalled
-
-TODAY'S HIGHEST-LEVERAGE UNLOCK
-- no blocked downstream work to unlock
-
-OPEN ESCALATIONS
-- none open
+All quiet — nothing waiting on you.
 `);
   });
 });
 
 describe("renderEveningCloseText (golden)", () => {
   it("renders the full §31 TODAY shape exactly", () => {
-    expect(renderEveningCloseText(EVENING_FULL)).toBe(`EVENING CLOSE — 2026-09-17 (personal)
-delta since 2026-09-16T20:00:00.000Z
+    expect(renderEveningCloseText(EVENING_FULL)).toBe(`Evening close — Thu, Sep 17
 
-TODAY
-
-Decisions made: 1
+Decisions made
 - Choose the migration approach → Strangler fig
 
-New commitments: 2
+New commitments
 - Pay October rent (i_owe)
 - Book squash court (i_owe)
 
-Completed: 1
+Completed
 - Pay internet bill
 
 Still waiting: 2
 - OVERDUE Acme owes Jehad the signed SOW — due 2026-09-15T12:00:00.000Z (owes_me Acme Corp)
 - Vendor owes the audit report — due 2026-09-27T12:00:00.000Z (owes_me Vendor Ltd)
 
-New risks / blocked: 2
+New risks / blocked
 - NEW Task B: draft schema — blocked by decision "Choose the migration approach"
 - Stale unblocked commitment (8 days silent) — stalled 8.0d (threshold 7d)
 
-Tomorrow's highest-leverage unlock:
-Choose the migration approach (unblocks 5 downstream items)
+Tomorrow's best unlock
+- Choose the migration approach (unblocks 5 downstream items)
 `);
   });
 
-  it("renders zero counts and 'none' unlock when the day was empty", () => {
-    expect(renderEveningCloseText(EVENING_EMPTY)).toBe(`EVENING CLOSE — 2026-09-17 (personal)
-delta since 2026-09-16T20:00:00.000Z
-
-TODAY
-
-Decisions made: 0
-
-New commitments: 0
-
-Completed: 0
+  it("renders a short close when the day was empty but something waits", () => {
+    expect(renderEveningCloseText(EVENING_EMPTY)).toBe(`Evening close — Thu, Sep 17
 
 Still waiting: 1
 - Vendor owes the audit report — due 2026-09-27T12:00:00.000Z (owes_me Vendor Ltd)
-
-New risks / blocked: 0
-
-Tomorrow's highest-leverage unlock:
-none
 `);
   });
 });

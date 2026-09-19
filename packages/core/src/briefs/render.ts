@@ -5,6 +5,7 @@
 
 import type { CommitmentListItem, WaitsOnMeItem } from "../queries/waiting.js";
 import type { BlockedItem, StalledItem } from "../queries/blocked.js";
+import { BRIEF_TIMEZONE } from "./timezone.js";
 import type { TodayScheduleItem } from "../calendar/projection.js";
 import type { EveningCloseData, MorningBriefData } from "./data.js";
 
@@ -13,7 +14,12 @@ function blank(): string {
 }
 
 function dayStamp(iso: string): string {
-  return iso.slice(0, 10);
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone: BRIEF_TIMEZONE,
+  }).format(new Date(iso));
 }
 
 function waitLine(
@@ -38,9 +44,9 @@ function stalledLine(item: StalledItem): string {
 function renderWaitingOnYou(data: MorningBriefData): string[] {
   const w = data.waitingOnYou;
   if (w.overdue.length === 0 && w.dueSoon.length === 0 && w.otherOpenCount === 0) {
-    return ["WAITING ON YOU", "- nothing overdue or due soon"];
+    return []; // suppression rule
   }
-  const lines = ["WAITING ON YOU"];
+  const lines = ["Waiting on you"];
   for (const item of w.overdue) lines.push(waitLine(item, "OVERDUE"));
   for (const item of w.dueSoon) lines.push(waitLine(item, "DUE SOON"));
   if (w.otherOpenCount > 0) {
@@ -55,9 +61,9 @@ function renderBlockedStalled(
   newEdgeIds: ReadonlySet<string>,
 ): string[] {
   if (blocked.length === 0 && stalled.length === 0) {
-    return ["BLOCKED OR SILENTLY STALLED", "- nothing blocked or stalled"];
+    return []; // suppression rule: nothing to say says nothing
   }
-  const lines = ["BLOCKED OR SILENTLY STALLED"];
+  const lines = ["Blocked or stalled"];
   for (const item of blocked) lines.push(blockedLine(item, newEdgeIds.has(item.edgeId)));
   for (const item of stalled) lines.push(stalledLine(item));
   return lines;
@@ -65,42 +71,92 @@ function renderBlockedStalled(
 
 function renderUnlockBrief(data: MorningBriefData): string[] {
   if (data.unlock === null) {
-    return ["TODAY'S HIGHEST-LEVERAGE UNLOCK", "- no blocked downstream work to unlock"];
+    return []; // suppression rule
   }
   const u = data.unlock;
   return [
-    "TODAY'S HIGHEST-LEVERAGE UNLOCK",
+    "Best unlock today",
     `- ${u.question} (chosen: ${u.chosen})`,
     `  unblocks ${u.transitiveDownstreamCount} downstream items (${u.directDownstreamCount} direct)`,
     ...u.topBlockedItems.map((item) => `  - ${item.label}`),
   ];
 }
 
+/** Calendar-native times, rendered as local HH:MM in the event's own tz. */
+function hhmm(iso: string, timeZone: string | null): string {
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return iso;
+  const formatted = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: timeZone ?? undefined,
+  }).format(d);
+  return formatted.replace(":00 ", " "); // "9:00 AM" → "9 AM"
+}
+
 function scheduleLine(item: TodayScheduleItem): string {
   const title = item.summary.length > 0 ? item.summary : "(untitled)";
-  const endPart = item.endTime === null ? "" : ` → ${item.endTime}`;
+  const startF = hhmm(item.startTime, item.timezone);
+  const endF = item.endTime === null ? null : hhmm(item.endTime, item.timezone);
+  // Compact range: "9–10 AM" instead of "9 AM–10 AM" (same meridiem).
+  const when =
+    endF === null
+      ? startF
+      : endF.endsWith(startF.slice(-3))
+        ? `${startF.slice(0, -3)}–${endF}`
+        : `${startF}–${endF}`;
   const locationPart = item.location === null ? "" : ` (${item.location})`;
-  return `- ${title} — ${item.startTime}${endPart}${locationPart}`;
+  return `- ${when} ${title}${locationPart}`;
 }
 
 /** E3: today's calendar from the projection — deterministic, calendar-native times. */
-function renderTodaySchedule(schedule: readonly TodayScheduleItem[]): string[] {
-  if (schedule.length === 0) return ["TODAY'S SCHEDULE", "- nothing on the calendar"];
-  return ["TODAY'S SCHEDULE", ...schedule.map(scheduleLine)];
+function renderTodaySchedule(
+  schedule: readonly TodayScheduleItem[],
+  nextUpcoming: TodayScheduleItem | null,
+): string[] {
+  if (schedule.length > 0) return ["Today", ...schedule.map(scheduleLine)];
+  if (nextUpcoming !== null) {
+    return ["Today", "- nothing scheduled", `- next up: ${scheduleLine(nextUpcoming).slice(2)}`];
+  }
+  return ["Today", "- nothing scheduled"];
 }
 
 function renderEscalations(data: MorningBriefData): string[] {
   const e = data.escalations;
   const open = e.pending + e.batched;
-  if (open === 0) return ["OPEN ESCALATIONS", "- none open"];
+  if (open === 0) return [];
   return [
-    "OPEN ESCALATIONS",
+    "Escalations",
     `- ${open} open (pending ${e.pending}, batched ${e.batched})`,
     ...e.byReason.map((r) => `- ${r.reason} ×${r.count}`),
   ];
 }
 
-/** §31 "while you were away" morning shape — delta first, then attention state. */
+/** Bulk import collapse: a single change kind with a large count is a
+ *  backfill, not a human-readable delta (e.g. initial calendar sync). */
+const BULK_CHANGE_THRESHOLD = 20;
+
+function friendlyEventGroups(
+  groups: ReadonlyArray<{ type: string; count: number }>,
+): string[] {
+  const lines: string[] = [];
+  for (const g of groups) {
+    if (g.count >= BULK_CHANGE_THRESHOLD) {
+      const label = g.type.replace(/^calendar\.event\./, "").replace(/\./g, " ");
+      lines.push(`- calendar sync: ${g.count} events ${label} (bulk import)`);
+    }
+  }
+  const normal = groups.filter((g) => g.count < BULK_CHANGE_THRESHOLD);
+  if (normal.length > 0) {
+    lines.push(`- ${normal.reduce((n, g) => n + g.count, 0)} events:`);
+    for (const g of normal.slice(0, 3)) lines.push(`  - ${g.type} ×${g.count}`);
+    if (normal.length > 3) lines.push(`  - …and ${normal.length - 3} more kinds`);
+  }
+  return lines;
+}
+
+/** §31 "while you were away" morning shape — delta first, then attention state.
+ *  Suppression rule (plan M6B): a section with nothing to say says nothing. */
 export function renderMorningBriefText(data: MorningBriefData): string {
   const changed = data.changed;
   const deltaEmpty =
@@ -109,56 +165,49 @@ export function renderMorningBriefText(data: MorningBriefData): string {
     changed.decisions.length === 0 &&
     changed.relationships.length === 0;
 
-  const whileAway: string[] = ["WHILE YOU WERE AWAY"];
-  if (deltaEmpty) {
-    whileAway.push("- no changes in window");
-  } else {
-    if (changed.eventGroups.length > 0) {
-      whileAway.push(`- events: ${changed.eventGroups.reduce((n, g) => n + g.count, 0)}`);
-      for (const group of changed.eventGroups) {
-        whileAway.push(`  - ${group.type} ×${group.count}`);
-      }
-    }
+  const whileAway: string[] = [];
+  if (!deltaEmpty) {
+    whileAway.push(...friendlyEventGroups(changed.eventGroups));
     if (changed.commitments.length > 0) {
-      whileAway.push(`- commitments changed: ${changed.commitments.length}`);
-      for (const c of changed.commitments) {
+      whileAway.push(`- ${changed.commitments.length} commitment${changed.commitments.length === 1 ? "" : "s"} captured:`);
+      for (const c of changed.commitments.slice(0, 5)) {
         whileAway.push(`  - ${c.description} (${c.direction}, ${c.status})`);
+      }
+      if (changed.commitments.length > 5) {
+        whileAway.push(`  - …and ${changed.commitments.length - 5} more`);
       }
     }
     if (changed.decisions.length > 0) {
-      whileAway.push(`- decisions changed: ${changed.decisions.length}`);
-      for (const d of changed.decisions) {
+      whileAway.push(`- ${changed.decisions.length} decision${changed.decisions.length === 1 ? "" : "s"}:`);
+      for (const d of changed.decisions.slice(0, 5)) {
         whileAway.push(`  - ${d.question} → ${d.chosen}`);
       }
     }
     if (changed.relationships.length > 0) {
-      const byShape = new Map<string, number>();
-      for (const r of changed.relationships) {
-        const shape = `${r.fromType} ${r.relation} ${r.toType}`;
-        byShape.set(shape, (byShape.get(shape) ?? 0) + 1);
-      }
-      whileAway.push(`- relationships changed: ${changed.relationships.length}`);
-      for (const [shape, count] of [...byShape.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
-        whileAway.push(`  - ${shape} ×${count}`);
-      }
+      whileAway.push(`- ${changed.relationships.length} relationship update${changed.relationships.length === 1 ? "" : "s"}`);
     }
   }
 
+  const waiting = renderWaitingOnYou(data);
+  const blocked = renderBlockedStalled(data.blocked, data.stalled, new Set<string>());
+  const unlock = renderUnlockBrief(data);
+  const escalations = renderEscalations(data);
+
+  const sections: string[][] = [
+    renderTodaySchedule(data.todaySchedule, data.nextUpcoming),
+    whileAway.length > 0 ? ["Overnight", ...whileAway] : [],
+    waiting,
+    blocked,
+    unlock,
+    escalations,
+  ].filter((section) => section.length > 0);
+
+  const quiet = sections.length === 1 && whileAway.length === 0;
   const lines: string[] = [
-    `MORNING BRIEF — ${dayStamp(data.now)} (${data.domainId})`,
-    `delta since ${data.since}`,
+    `Morning brief — ${dayStamp(data.now)}`,
     blank(),
-    ...whileAway,
-    blank(),
-    ...renderTodaySchedule(data.todaySchedule),
-    blank(),
-    ...renderWaitingOnYou(data),
-    blank(),
-    ...renderBlockedStalled(data.blocked, data.stalled, new Set<string>()),
-    blank(),
-    ...renderUnlockBrief(data),
-    blank(),
-    ...renderEscalations(data),
+    ...sections.flatMap((section) => [...section, blank()]).slice(0, -1),
+    ...(quiet ? [blank(), "All quiet — nothing waiting on you."] : []),
   ];
   return lines.map((line) => line.trimEnd()).join("\n") + "\n";
 }
@@ -169,33 +218,45 @@ export function renderEveningCloseText(data: EveningCloseData): string {
   const overdueWaiting = data.stillWaiting.filter((c) => c.overdue);
   const calmWaiting = data.stillWaiting.filter((c) => !c.overdue);
 
+  // Suppression rule (plan M6B): a section with nothing to say says nothing.
+  const sections: string[][] = [
+    data.decisionsMade.length > 0
+      ? ["Decisions made", ...data.decisionsMade.map((d) => `- ${d.question} → ${d.chosen}`)]
+      : [],
+    data.newCommitments.length > 0
+      ? ["New commitments", ...data.newCommitments.map((c) => `- ${c.description} (${c.direction})`)]
+      : [],
+    data.completed.length > 0
+      ? ["Completed", ...data.completed.map((c) => `- ${c.description}`)]
+      : [],
+    data.stillWaiting.length > 0
+      ? [
+          `Still waiting: ${data.stillWaiting.length}`,
+          ...overdueWaiting.map((c) => waitLine(c, "OVERDUE")),
+          ...calmWaiting.map((c) => waitLine(c, null)),
+        ]
+      : [],
+    data.blocked.length + data.stalled.length > 0
+      ? [
+          "New risks / blocked",
+          ...data.blocked.map((b) => blockedLine(b, newEdges.has(b.edgeId))),
+          ...data.stalled.map((s) => stalledLine(s)),
+        ]
+      : [],
+    data.unlock !== null
+      ? [
+          "Tomorrow's best unlock",
+          `- ${data.unlock.question} (unblocks ${data.unlock.transitiveDownstreamCount} downstream items)`,
+        ]
+      : [],
+  ].filter((section) => section.length > 0);
+
+  const quiet = sections.length === 0;
   const lines: string[] = [
-    `EVENING CLOSE — ${dayStamp(data.now)} (${data.domainId})`,
-    `delta since ${data.since}`,
+    `Evening close — ${dayStamp(data.now)}`,
     blank(),
-    "TODAY",
-    blank(),
-    `Decisions made: ${data.decisionsMade.length}`,
-    ...data.decisionsMade.map((d) => `- ${d.question} → ${d.chosen}`),
-    blank(),
-    `New commitments: ${data.newCommitments.length}`,
-    ...data.newCommitments.map((c) => `- ${c.description} (${c.direction})`),
-    blank(),
-    `Completed: ${data.completed.length}`,
-    ...data.completed.map((c) => `- ${c.description}`),
-    blank(),
-    `Still waiting: ${data.stillWaiting.length}`,
-    ...overdueWaiting.map((c) => waitLine(c, "OVERDUE")),
-    ...calmWaiting.map((c) => waitLine(c, null)),
-    blank(),
-    `New risks / blocked: ${data.blocked.length + data.stalled.length}`,
-    ...data.blocked.map((b) => blockedLine(b, newEdges.has(b.edgeId))),
-    ...data.stalled.map((s) => stalledLine(s)),
-    blank(),
-    "Tomorrow's highest-leverage unlock:",
-    data.unlock === null
-      ? "none"
-      : `${data.unlock.question} (unblocks ${data.unlock.transitiveDownstreamCount} downstream items)`,
+    ...(quiet ? ["Quiet day — nothing carried, nothing waiting."] : []),
+    ...sections.flatMap((section) => [...section, blank()]).slice(0, -1),
   ];
   return lines.map((line) => line.trimEnd()).join("\n") + "\n";
 }

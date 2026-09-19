@@ -11,6 +11,7 @@
 // summary) and are pure so tests can pin them.
 
 import type { QueryExecutor } from "../queries/executor.js";
+import { BRIEF_TIMEZONE } from "./timezone.js";
 import { parseDateInput } from "../queries/executor.js";
 import type { CommitmentListItem, WaitsOnMeItem } from "../queries/waiting.js";
 import { whatAmIWaitingFor, whatWaitsOnMe } from "../queries/waiting.js";
@@ -24,7 +25,12 @@ import type { BlockedItem, StalledItem } from "../queries/blocked.js";
 import { whatIsBlocked } from "../queries/blocked.js";
 import type { LeverageDecision } from "../queries/leverage.js";
 import { highestLeverageDecision } from "../queries/leverage.js";
-import { getTodaySchedule, type TodayScheduleItem } from "../calendar/projection.js";
+import {
+  getNextUpcomingEvent,
+  getTodaySchedule,
+  localDayBounds,
+  type TodayScheduleItem,
+} from "../calendar/projection.js";
 
 /** Briefs are a personal-operations surface (plan §13); artifacts land here. */
 export const BRIEF_DOMAIN_KEY = "personal";
@@ -71,6 +77,8 @@ export interface MorningBriefData {
   readonly escalations: EscalationBatchSummary;
   /** E3: today's calendar events from the calendar_events projection (calendar-native times). */
   readonly todaySchedule: readonly TodayScheduleItem[];
+  /** Next event after today (quiet-day fallback — "next up: …"). */
+  readonly nextUpcoming: TodayScheduleItem | null;
 }
 
 export interface EveningCloseData {
@@ -145,13 +153,15 @@ export async function collectMorningBriefData(
   const { now, since } = resolveWindow(opts);
   const nowFn = (): Date => now;
 
-  const [changed, waitsOnMe, blockedResult, ranked, escalations, todaySchedule] = await Promise.all([
+  const [changed, waitsOnMe, blockedResult, ranked, escalations, todaySchedule, nextUpcoming] = await Promise.all([
     whatChanged(db, { since, domainId: BRIEF_DOMAIN_KEY }),
     whatWaitsOnMe(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
     whatIsBlocked(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
     highestLeverageDecision(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
     escalationSummary(db, BRIEF_DOMAIN_KEY),
-    getTodaySchedule(db, { now }),
+    getTodaySchedule(db, { now, timeZone: BRIEF_TIMEZONE }),
+    (async () =>
+      (await getNextUpcomingEvent(db, { dayEnd: localDayBounds(now, BRIEF_TIMEZONE).dayEnd })))(),
   ]);
 
   const overdue = waitsOnMe.filter((c) => c.overdue);
@@ -173,6 +183,7 @@ export async function collectMorningBriefData(
     unlock: pickUnlock(ranked),
     escalations,
     todaySchedule,
+    nextUpcoming,
   };
 }
 

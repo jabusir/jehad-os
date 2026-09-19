@@ -9,10 +9,11 @@ import { createWorkflowWorkerServer } from "./index.js";
 import { assertWorkflowToken } from "./names.js";
 import {
   briefWorkflows,
-  EVENING_CLOSE_UTC_HOUR,
+  BRIEF_LOCAL_TZ,
+  EVENING_CLOSE_LOCAL_HOUR,
   eveningCloseWorkflow,
-  isUtcHour,
-  MORNING_BRIEF_UTC_HOUR,
+  isLocalHour,
+  MORNING_BRIEF_LOCAL_HOUR,
   morningBriefWorkflow,
 } from "./brief-workflows.js";
 
@@ -42,11 +43,12 @@ describe("brief workflow registration (smoke)", () => {
     expect(briefWorkflows).toContain(eveningCloseWorkflow);
   });
 
-  it("pins the names, crons, and UTC windows", () => {
+  it("pins the names, crons, and local-hour windows", () => {
     expect(morningBriefWorkflow).toMatchObject({ name: "brief-morning", cron: "0 * * * *" });
-    expect(eveningCloseWorkflow).toMatchObject({ name: "brief-evening", cron: "0 21 * * *" });
-    expect(MORNING_BRIEF_UTC_HOUR).toBe(7);
-    expect(EVENING_CLOSE_UTC_HOUR).toBe(21);
+    expect(eveningCloseWorkflow).toMatchObject({ name: "brief-evening", cron: "0 * * * *" });
+    expect(MORNING_BRIEF_LOCAL_HOUR).toBe(6); // 6 AM PT
+    expect(EVENING_CLOSE_LOCAL_HOUR).toBe(21); // 9 PM PT
+    expect(BRIEF_LOCAL_TZ).toBe("America/Los_Angeles");
   });
 
   it("serves through the worker server (compiles to executor functions)", () => {
@@ -55,19 +57,23 @@ describe("brief workflow registration (smoke)", () => {
     server.close();
   });
 
-  it("isUtcHour matches only its UTC hour", () => {
-    expect(isUtcHour(new Date("2026-09-17T07:00:00.000Z"), 7)).toBe(true);
-    expect(isUtcHour(new Date("2026-09-17T07:59:59.999Z"), 7)).toBe(true);
-    expect(isUtcHour(new Date("2026-09-17T08:00:00.000Z"), 7)).toBe(false);
-    // 07:00 in a non-UTC offset is NOT the 07:00 UTC window.
-    expect(isUtcHour(new Date("2026-09-17T07:00:00+02:00"), 7)).toBe(false);
-    expect(isUtcHour(new Date("2026-09-17T21:00:00.000Z"), 21)).toBe(true);
+  it("isLocalHour matches only its PT hour (DST-safe)", () => {
+    // PDT (UTC-7): 6 AM PT === 13:00 UTC
+    expect(isLocalHour(new Date("2026-09-17T13:00:00.000Z"), 6)).toBe(true);
+    expect(isLocalHour(new Date("2026-09-17T13:59:59.999Z"), 6)).toBe(true);
+    expect(isLocalHour(new Date("2026-09-17T14:00:00.000Z"), 6)).toBe(false);
+    expect(isLocalHour(new Date("2026-09-17T13:00:00.000Z"), 7)).toBe(false);
+    // PST (UTC-8): 6 AM PT === 14:00 UTC in January
+    expect(isLocalHour(new Date("2027-01-15T14:00:00.000Z"), 6)).toBe(true);
+    expect(isLocalHour(new Date("2027-01-15T14:00:00.000Z"), 7)).toBe(false);
+    // 9 PM PT === 04:00 UTC next day (PDT)
+    expect(isLocalHour(new Date("2026-09-17T04:00:00.000Z"), 21)).toBe(true);
   });
 
-  it("workflow body no-ops outside its UTC window (no step, no DB)", async () => {
+  it("workflow body no-ops outside its local-hour window (no step, no DB)", async () => {
     vi.useFakeTimers();
     try {
-      vi.setSystemTime(new Date("2026-09-17T08:30:00.000Z")); // outside both windows
+      vi.setSystemTime(new Date("2026-09-17T08:30:00.000Z")); // 1:30 AM PT — outside both windows
       const mustNotRun = async (): Promise<never> => {
         throw new Error("step must not run outside the window");
       };
@@ -83,7 +89,7 @@ describe("brief workflow registration (smoke)", () => {
   it("workflow body runs its render step inside the window", async () => {
     vi.useFakeTimers();
     try {
-      vi.setSystemTime(new Date("2026-09-17T07:00:00.000Z"));
+      vi.setSystemTime(new Date("2026-09-17T13:00:00.000Z")); // 6 AM PDT
       const sentinel = { suppressed: false } as const;
       const ran: string[] = [];
       const result = await morningBriefWorkflow.fn(
@@ -95,7 +101,7 @@ describe("brief workflow registration (smoke)", () => {
       expect(ran).toEqual(["render-morning-brief"]);
       expect(result).toEqual({ outcome: sentinel });
 
-      vi.setSystemTime(new Date("2026-09-17T21:00:00.000Z"));
+      vi.setSystemTime(new Date("2026-09-17T04:00:00.000Z")); // 9 PM PDT (prev local day)
       const closeResult = await eveningCloseWorkflow.fn(
         fakeContext(async (id) => {
           ran.push(id);

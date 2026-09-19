@@ -198,8 +198,10 @@ describe.skipIf(!TEST_DATABASE_URL)("briefs (integration)", () => {
     const outcome = await renderMorningBrief(db.pool, { now });
     expect(outcome.suppressed).toBe(false);
     const content = outcome.content!;
-    expect(content).toContain("TODAY'S SCHEDULE");
-    expect(content).toContain("- Calendar sync review — 2026-09-17T15:00:00.000Z → 2026-09-17T16:00:00.000Z");
+    expect(content).toContain("Today");
+    expect(content).toContain("Calendar sync review");
+    // Tomorrow's event is neither a schedule line nor a next-up hint when
+    // today already has events (next-up is the quiet-day fallback only).
     expect(content).not.toContain("Tomorrow thing");
     expect(content).not.toContain("Cancelled today");
   });
@@ -218,7 +220,7 @@ describe.skipIf(!TEST_DATABASE_URL)("briefs (integration)", () => {
     expect(outcome.kind).toBe("close");
     const content = outcome.content!;
     // Today's decision + new commitment + completed appear.
-    expect(content).toContain("Decisions made: 1");
+    expect(content).toContain("Decisions made");
     expect(content).toContain("- Pick the briefing channel → stdout");
     expect(content).toContain("New commitments: 1");
     expect(content).toContain("- Book squash court (i_owe)");

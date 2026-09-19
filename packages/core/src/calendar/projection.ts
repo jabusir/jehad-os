@@ -211,14 +211,77 @@ export function todayScheduleBounds(now: Date): { dayStart: Date; dayEnd: Date }
 }
 
 /**
+ * LOCAL day bounds [dayStart, dayEnd) of `now` in the given IANA timezone
+ * (DST-safe). The morning brief's "today" is the owner's today, not UTC's.
+ */
+export function localDayBounds(now: Date, timeZone: string): { dayStart: Date; dayEnd: Date } {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? "01";
+  // Wall-clock midnight of the local day, expressed as if it were UTC.
+  const wallMidnightUtc = Date.UTC(Number(get("year")), Number(get("month")) - 1, Number(get("day")), 0, 0, 0);
+  const offsetMinutesAt = (instant: number): number => {
+    const name =
+      new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "longOffset" })
+        .formatToParts(new Date(instant))
+        .find((p) => p.type === "timeZoneName")?.value ?? "GMT+00:00";
+    const m = /GMT([+-])(\d{2}):(\d{2})/.exec(name);
+    if (m === null) return 0;
+    const sign = m[1] === "-" ? -1 : 1;
+    return sign * (Number(m[2]) * 60 + Number(m[3]));
+  };
+  // Fixed point: utc = wall - offset(utc). Two passes converge for any
+  // real timezone (offsets are within ±14h; DST boundaries included).
+  let utc = wallMidnightUtc;
+  for (let i = 0; i < 4; i++) {
+    const next = wallMidnightUtc - offsetMinutesAt(utc) * 60_000;
+    if (next === utc) break;
+    utc = next;
+  }
+  return { dayStart: new Date(utc), dayEnd: new Date(utc + 24 * 60 * 60 * 1000) };
+}
+
+/** The next upcoming event strictly after the local day (for quiet days). */
+export async function getNextUpcomingEvent(
+  db: QueryExecutor,
+  opts: { readonly dayEnd: Date },
+): Promise<TodayScheduleItem | null> {
+  const result = await db.query(
+    `SELECT google_event_id, summary, start_time, end_time, timezone, location
+       FROM calendar_events
+      WHERE status <> 'cancelled'
+        AND start_time > $1::timestamptz
+      ORDER BY start_time ASC, google_event_id ASC
+      LIMIT 1`,
+    [opts.dayEnd.toISOString()],
+  );
+  const row = result.rows[0];
+  if (row === undefined) return null;
+  return {
+    googleEventId: String(row.google_event_id),
+    summary: typeof row.summary === "string" ? row.summary : "",
+    startTime: isoOrNull(row.start_time) ?? "",
+    endTime: isoOrNull(row.end_time),
+    timezone: row.timezone === null || row.timezone === undefined ? null : String(row.timezone),
+    location: row.location === null || row.location === undefined ? null : String(row.location),
+  };
+}
+
+/**
  * Today's non-cancelled calendar events for the morning brief, ordered by
  * start. Calendar-native times straight from the projection (trusted tier).
  */
 export async function getTodaySchedule(
   db: QueryExecutor,
-  opts: { readonly now: Date },
+  opts: { readonly now: Date; readonly timeZone?: string },
 ): Promise<TodayScheduleItem[]> {
-  const { dayStart, dayEnd } = todayScheduleBounds(opts.now);
+  const { dayStart, dayEnd } = opts.timeZone
+    ? localDayBounds(opts.now, opts.timeZone)
+    : todayScheduleBounds(opts.now);
   const result = await db.query(TODAY_SCHEDULE_SQL, [dayStart.toISOString(), dayEnd.toISOString()]);
   return result.rows.map((row) => ({
     googleEventId: String(row.google_event_id),
