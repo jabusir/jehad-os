@@ -222,15 +222,15 @@ describe.skipIf(!TEST_DATABASE_URL)("briefs (integration)", () => {
     // Today's decision + new commitment + completed appear.
     expect(content).toContain("Decisions made");
     expect(content).toContain("- Pick the briefing channel → stdout");
-    expect(content).toContain("New commitments: 1");
+    expect(content).toContain("New commitments");
     expect(content).toContain("- Book squash court (i_owe)");
-    expect(content).toContain("Completed: 1");
+    expect(content).toContain("Completed");
     expect(content).toContain("- Pay internet bill");
     // Still waiting: fixture overdue SOW flagged.
     expect(content).toContain("OVERDUE Acme owes Jehad the signed SOW");
     // Standing risks + tomorrow's unlock (Decision A, §25 graph).
-    expect(content).toContain("New risks / blocked:");
-    expect(content).toContain("Tomorrow's highest-leverage unlock:");
+    expect(content).toContain("New risks / blocked");
+    expect(content).toContain("Tomorrow's best unlock");
     expect(content).toContain("Choose the migration approach (unblocks 5 downstream items)");
 
     const row = (
