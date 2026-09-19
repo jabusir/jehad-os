@@ -108,6 +108,7 @@ describe.skipIf(!TEST_DATABASE_URL)("002 action_attempts outcome guard (integrat
 
     const rolled = await migrateDown(db.pool, { to: "001_schema_core" });
     expect(rolled).toEqual([
+      "011_imessage_pairing",
       "010_imessage_sensor",
       "009_notification_calendar_change",
       "008_feedback",

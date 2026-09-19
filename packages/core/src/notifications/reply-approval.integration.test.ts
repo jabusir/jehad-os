@@ -1,10 +1,13 @@
 // Reply conjunction rule tests (gateway §4 — the ONE reply auto-approval
-// rule, day one). Needs PostgreSQL 16 for the owner-principal lookup and
+// rule). Needs PostgreSQL 16 for the transport-identity lookups and
 // createNotification wiring; skipped unless TEST_DATABASE_URL is set.
+// Multi-principal Lane P: the conjunction's identity legs ride PAIRED
+// transport identities (fixtures pair the owner + a second principal up
+// front) — EDGE_IMESSAGE_TARGET and the type='user' shortcut are gone.
 // Covers: every conjunction leg failing routes to the approval queue, all
-// legs passing approves at creation, the autoApproveKinds-never-contains-
-// reply guard (config projection + createNotification ignoring the list),
-// and the audit trail of the rule decision.
+// legs passing approves at creation, the recipient fallback leg
+// (payload.recipient), the env-target-never-consulted pin, the
+// autoApproveKinds-never-contains-reply guard, and the audit trail.
 
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -19,13 +22,13 @@ import {
   createNotification,
   evaluateReplyApproval,
   type CreateNotificationInput,
-  type NotificationServiceOptions,
 } from "./service.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
 const T0 = new Date("2026-09-18T12:00:00.000Z");
-const OWNER_TARGET = "+15550001111"; // A–C: the fixed EDGE_IMESSAGE_TARGET
+const OWNER_HANDLE = "+15550001111"; // paired in setup (transport identity)
+const YUSRA_HANDLE = "+15550002222"; // second principal, also paired
 
 /** A config that ILLEGALLY lists reply — the service must ignore it for replies. */
 const REPLY_LISTED_CONFIG: NotificationsConfig = {
@@ -33,25 +36,51 @@ const REPLY_LISTED_CONFIG: NotificationsConfig = {
   autoApproveKinds: ["brief", "reply"],
 };
 
-describe.skipIf(!TEST_DATABASE_URL)("reply conjunction rule (integration)", () => {
+describe.skipIf(!TEST_DATABASE_URL)("reply conjunction rule (integration, paired identities)", () => {
   let db: IsolatedDb;
-  let userPrincipalId: string; // owner (paired-owner stand-in for A–C)
-  let harnessPrincipalId: string;
+  let ownerPrincipalId: string; // paired owner (Jehad fixtures)
+  let yusraPrincipalId: string; // paired second principal
+  let harnessPrincipalId: string; // never paired — identity leg must fail
 
   beforeAll(async () => {
     db = await createIsolatedTestDb(TEST_DATABASE_URL!, "igbreply");
     await migrateUp(db.pool);
     await seedDomains(db.pool);
-    const user = await db.pool.query(
+    const owner = await db.pool.query(
       "INSERT INTO principals (type, name) VALUES ('user', $1) RETURNING id",
       [`owner-${randomUUID().slice(0, 8)}`],
     );
-    userPrincipalId = String(user.rows[0].id);
+    ownerPrincipalId = String(owner.rows[0].id);
+    const yusra = await db.pool.query(
+      "INSERT INTO principals (type, name) VALUES ('user', $1) RETURNING id",
+      [`yusra-${randomUUID().slice(0, 8)}`],
+    );
+    yusraPrincipalId = String(yusra.rows[0].id);
     const harness = await db.pool.query(
       "INSERT INTO principals (type, name) VALUES ('harness', $1) RETURNING id",
       [`openclaw-${randomUUID().slice(0, 8)}`],
     );
     harnessPrincipalId = String(harness.rows[0].id);
+    // Pair the fixtures: transport_identities rows via seeded sessions (the
+    // single legal pairing path is attemptPairing; direct seeding is the
+    // test's stand-in for the same end state).
+    await db.pool.query(
+      `INSERT INTO imessage_pairing_sessions (principal_id, purpose, code_hash, expires_at)
+       VALUES ($1::uuid, 'pair', $2, now() + interval '5 minutes'),
+              ($3::uuid, 'pair', $2, now() + interval '5 minutes')`,
+      [ownerPrincipalId, `a`.repeat(64), yusraPrincipalId],
+    );
+    const sessions = await db.pool.query(
+      "SELECT id, principal_id FROM imessage_pairing_sessions",
+    );
+    for (const row of sessions.rows) {
+      const handle = String(row.principal_id) === ownerPrincipalId ? OWNER_HANDLE : YUSRA_HANDLE;
+      await db.pool.query(
+        `INSERT INTO transport_identities (principal_id, transport, handle, verified_at, last_seen_at, paired_via_session)
+         VALUES ($1::uuid, 'imessage', $2, $3::timestamptz, $3::timestamptz, $4::uuid)`,
+        [row.principal_id, handle, T0.toISOString(), row.id],
+      );
+    }
   });
 
   afterAll(async () => {
@@ -68,47 +97,37 @@ describe.skipIf(!TEST_DATABASE_URL)("reply conjunction rule (integration)", () =
     return {
       kind: "reply",
       title: "Re: ping",
-      payload: { content: "pong", recipient: OWNER_TARGET },
+      payload: { content: "pong", recipient: OWNER_HANDLE },
+      recipient: OWNER_HANDLE,
       sourceType: "run",
       sourceId: randomUUID(),
       createdBy: harnessPrincipalId,
       surface: "imessage",
-      requestingPrincipalId: userPrincipalId,
-      conversationPrincipalId: userPrincipalId,
+      requestingPrincipalId: ownerPrincipalId,
+      conversationPrincipalId: ownerPrincipalId,
       thirdPartyRecipient: false,
       ...overrides,
     };
   }
 
-  async function createReply(
-    overrides: Partial<CreateNotificationInput> = {},
-    opts: Partial<NotificationServiceOptions> = {},
-  ) {
+  async function createReply(overrides: Partial<CreateNotificationInput> = {}) {
     return createNotification(db.pool, replyInput(overrides), {
       config: DEFAULT_NOTIFICATIONS_CONFIG,
       now: () => T0,
-      replyVerifiedRecipient: OWNER_TARGET,
-      ...opts,
     });
   }
 
   /** The decision over exactly the stored row (post-create). */
-  function decisionFor(
-    notification: Awaited<ReturnType<typeof createReply>>,
-    verifiedOwnerRecipient: string | null = OWNER_TARGET,
-  ) {
-    return evaluateReplyApproval(
-      db.pool,
-      {
-        kind: notification.kind,
-        surface: notification.surface,
-        requestingPrincipalId: notification.requestingPrincipalId,
-        conversationPrincipalId: notification.conversationPrincipalId,
-        thirdPartyRecipient: notification.thirdPartyRecipient,
-        payload: notification.payload,
-      },
-      { verifiedOwnerRecipient },
-    );
+  function decisionFor(notification: Awaited<ReturnType<typeof createReply>>) {
+    return evaluateReplyApproval(db.pool, {
+      kind: notification.kind,
+      surface: notification.surface,
+      requestingPrincipalId: notification.requestingPrincipalId,
+      conversationPrincipalId: notification.conversationPrincipalId,
+      thirdPartyRecipient: notification.thirdPartyRecipient,
+      recipient: notification.recipient,
+      payload: notification.payload,
+    });
   }
 
   it("all legs pass → approved at creation (approved_by stays null: policy, not a principal)", async () => {
@@ -117,9 +136,53 @@ describe.skipIf(!TEST_DATABASE_URL)("reply conjunction rule (integration)", () =
     expect(reply.approvedAt).toBe(T0.toISOString());
     expect(reply.approvedBy).toBeNull();
     expect(reply.surface).toBe("imessage");
-    expect(reply.requestingPrincipalId).toBe(userPrincipalId);
-    expect(reply.conversationPrincipalId).toBe(userPrincipalId);
+    expect(reply.requestingPrincipalId).toBe(ownerPrincipalId);
+    expect(reply.conversationPrincipalId).toBe(ownerPrincipalId);
     expect(reply.thirdPartyRecipient).toBe(false);
+    expect(reply.recipient).toBe(OWNER_HANDLE);
+  });
+
+  it("second paired principal: recipient ∈ HER verified handles approves too (multi-principal)", async () => {
+    const reply = await createReply({
+      requestingPrincipalId: yusraPrincipalId,
+      conversationPrincipalId: yusraPrincipalId,
+      recipient: YUSRA_HANDLE,
+      payload: { content: "pong", recipient: YUSRA_HANDLE },
+    });
+    expect(reply.status).toBe("approved");
+  });
+
+  it("cross-principal recipient (yusra's handle on the owner's reply) → queue", async () => {
+    const reply = await createReply({
+      recipient: YUSRA_HANDLE,
+      payload: { content: "pong", recipient: YUSRA_HANDLE },
+    });
+    expect(reply.status).toBe("pending");
+    expect((await decisionFor(reply)).failedLegs).toEqual(["recipient"]);
+  });
+
+  it("recipient fallback leg: row column absent, payload.recipient = the paired handle → approves", async () => {
+    const reply = await createReply({ recipient: null });
+    expect(reply.status).toBe("approved");
+    expect((await decisionFor(reply)).approved).toBe(true);
+  });
+
+  it("EDGE_IMESSAGE_TARGET is NEVER consulted: a conflicting env value changes nothing", async () => {
+    const previous = process.env.EDGE_IMESSAGE_TARGET;
+    process.env.EDGE_IMESSAGE_TARGET = "+15559990000"; // not any fixture's handle
+    try {
+      const approved = await createReply();
+      expect(approved.status).toBe("approved"); // paired handle, not the env
+      const mismatched = await createReply({
+        recipient: "+15559990000",
+        payload: { content: "pong", recipient: "+15559990000" },
+      });
+      expect(mismatched.status).toBe("pending"); // env value is NOT verified
+      expect((await decisionFor(mismatched)).failedLegs).toEqual(["recipient"]);
+    } finally {
+      if (previous === undefined) delete process.env.EDGE_IMESSAGE_TARGET;
+      else process.env.EDGE_IMESSAGE_TARGET = previous;
+    }
   });
 
   it("leg: surface ≠ imessage → queue", async () => {
@@ -132,37 +195,45 @@ describe.skipIf(!TEST_DATABASE_URL)("reply conjunction rule (integration)", () =
     });
   });
 
-  it("leg: requesting principal missing → queue (conversation leg fails with it)", async () => {
+  it("leg: requesting principal missing → queue (recipient + conversation legs fail with it)", async () => {
     const reply = await createReply({ requestingPrincipalId: null });
     expect(reply.status).toBe("pending");
     expect((await decisionFor(reply)).failedLegs).toEqual([
       "requesting-principal",
+      "recipient", // no principal → no verified handles → recipient fails closed
       "conversation-principal", // conversation ≠ a null requester by definition
     ]);
   });
 
-  it("leg: requesting principal not the owner (harness) → queue", async () => {
-    const reply = await createReply({ requestingPrincipalId: harnessPrincipalId });
+  it("leg: requesting principal with NO verified identity (harness) → queue", async () => {
+    const reply = await createReply({
+      requestingPrincipalId: harnessPrincipalId,
+      conversationPrincipalId: harnessPrincipalId,
+      recipient: OWNER_HANDLE,
+    });
     expect(reply.status).toBe("pending");
     const legs = (await decisionFor(reply)).failedLegs;
-    expect(legs).toContain("requesting-principal");
-    expect(legs).toContain("conversation-principal"); // harness ≠ the user conversation principal
+    expect(legs).toContain("requesting-principal"); // no transport identity
+    expect(legs).toContain("recipient"); // OWNER_HANDLE is not the harness's
   });
 
-  it("leg: recipient ≠ the verified transport identity → queue", async () => {
-    const reply = await createReply({ payload: { content: "pong", recipient: "+15559998888" } });
+  it("leg: recipient ≠ any verified transport identity → queue", async () => {
+    const reply = await createReply({
+      recipient: "+15559998888",
+      payload: { content: "pong", recipient: "+15559998888" },
+    });
     expect(reply.status).toBe("pending");
     expect((await decisionFor(reply)).failedLegs).toEqual(["recipient"]);
   });
 
-  it("leg: no verified recipient configured → queue (fail closed)", async () => {
-    const reply = await createReply({}, { replyVerifiedRecipient: null });
+  it("leg: recipient absent everywhere → queue (fail closed)", async () => {
+    const reply = await createReply({ recipient: null, payload: { content: "pong" } });
     expect(reply.status).toBe("pending");
-    expect((await decisionFor(reply, null)).failedLegs).toEqual(["recipient"]);
+    expect((await decisionFor(reply)).failedLegs).toEqual(["recipient"]);
   });
 
   it("leg: conversation principal ≠ requesting principal → queue", async () => {
-    const reply = await createReply({ conversationPrincipalId: harnessPrincipalId });
+    const reply = await createReply({ conversationPrincipalId: yusraPrincipalId });
     expect(reply.status).toBe("pending");
     expect((await decisionFor(reply)).failedLegs).toEqual(["conversation-principal"]);
   });
@@ -182,6 +253,20 @@ describe.skipIf(!TEST_DATABASE_URL)("reply conjunction rule (integration)", () =
     expect((await decisionFor(unknown)).failedLegs).toEqual(["third-party-recipient"]);
   });
 
+  it("recipient on a non-reply kind is an input error (claim wire never carries one)", async () => {
+    await expect(
+      createNotification(db.pool, {
+        kind: "brief",
+        title: "Morning brief",
+        payload: { content: "..." },
+        recipient: OWNER_HANDLE,
+        sourceType: "brief",
+        sourceId: randomUUID(),
+        createdBy: ownerPrincipalId,
+      }, { config: DEFAULT_NOTIFICATIONS_CONFIG, now: () => T0 }),
+    ).rejects.toMatchObject({ code: "NOTIFICATION_INPUT_INVALID" });
+  });
+
   it("non-reply kinds never trip the reply rule; brief still auto-approves from the list", async () => {
     const brief = await createNotification(db.pool, {
       kind: "brief",
@@ -189,7 +274,7 @@ describe.skipIf(!TEST_DATABASE_URL)("reply conjunction rule (integration)", () =
       payload: { content: "..." },
       sourceType: "brief",
       sourceId: randomUUID(),
-      createdBy: userPrincipalId,
+      createdBy: ownerPrincipalId,
     }, { config: DEFAULT_NOTIFICATIONS_CONFIG, now: () => T0 });
     expect(brief.status).toBe("approved");
     const escalation = await createNotification(db.pool, {
@@ -198,17 +283,20 @@ describe.skipIf(!TEST_DATABASE_URL)("reply conjunction rule (integration)", () =
       payload: { text: "..." },
       sourceType: "escalation",
       sourceId: randomUUID(),
-      createdBy: userPrincipalId,
+      createdBy: ownerPrincipalId,
     }, { config: DEFAULT_NOTIFICATIONS_CONFIG, now: () => T0 });
     expect(escalation.status).toBe("pending");
   });
 
   it("GUARD: a config that lists reply in autoApproveKinds still cannot kind-approve replies", async () => {
     // Conjunction failing (surface wrong) + reply in the kind list → queue.
-    const pending = await createReply({ surface: "cli" }, { config: REPLY_LISTED_CONFIG });
+    const pending = await createReply({ surface: "cli" });
     expect(pending.status).toBe("pending");
     // Conjunction passing approves — via the RULE, not the list.
-    const approved = await createReply({}, { config: REPLY_LISTED_CONFIG });
+    const approved = await createNotification(db.pool, replyInput(), {
+      config: REPLY_LISTED_CONFIG,
+      now: () => T0,
+    });
     expect(approved.status).toBe("approved");
   });
 

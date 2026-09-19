@@ -31,6 +31,8 @@ export interface PolicyV1 {
   autonomy_ceiling: Readonly<Record<ActionType, AutonomyLevel>>;
   /** E4 notification delivery policy; absent → code defaults apply. */
   notifications?: NotificationsPolicyV1;
+  /** iMessage gateway principal budgets (multi-principal Lane P); absent → deny. */
+  gateway?: GatewayPolicyV1;
 }
 
 /**
@@ -45,6 +47,50 @@ export interface NotificationsPolicyV1 {
   escalationMinUrgency: "low" | "medium" | "high" | "critical" | "blocker";
   /** Delivery window (minutes) stamped on new notifications as expires_at. */
   defaultTtlMinutes: number;
+}
+
+/**
+ * The `gateway:` section (iMessage multi-principal onboarding, Lane P):
+ * per-principal conversational budgets keyed by principal NAME. Absent
+ * principal → the conversation handler denies (fail closed) — the section
+ * existing but naming no principal is exactly "no converse budget".
+ */
+export interface GatewayPolicyV1 {
+  readonly principals: Readonly<Record<string, GatewayPrincipalPolicy>>;
+}
+
+export interface GatewayPrincipalPolicy {
+  /** OpenRouter model id (must be egress-allowlisted for personal/normal). */
+  readonly model: string;
+  /** Max conversation model_calls per rolling hour (principal × surface). */
+  readonly requestsPerHour: number;
+  /** Max conversation model spend per UTC day, USD (principal × surface). */
+  readonly costPerDay: number;
+}
+
+/**
+ * Strict flow-mapping parse for one gateway principal entry — exactly
+ * `{ model: <id>, requests_per_hour: <int>, cost_per_day: <number> }` in
+ * that key order (the contracts' fixed shape). Anything else throws.
+ */
+export function parseGatewayPrincipalEntry(
+  name: string,
+  value: string,
+): GatewayPrincipalPolicy {
+  const match = value.match(
+    /^\{\s*model:\s*([A-Za-z0-9._/-]+),\s*requests_per_hour:\s*(\d+),\s*cost_per_day:\s*(\d+(?:\.\d+)?)\s*\}$/,
+  );
+  if (match === null) {
+    throw new Error(
+      `policy: gateway.principals.${name} must be "{ model: <id>, requests_per_hour: <int>, cost_per_day: <number> }" (got '${value}')`,
+    );
+  }
+  const requestsPerHour = Number(match[2]);
+  const costPerDay = Number(match[3]);
+  if (requestsPerHour <= 0 || costPerDay <= 0) {
+    throw new Error(`policy: gateway.principals.${name} caps must be positive`);
+  }
+  return { model: match[1]!, requestsPerHour, costPerDay };
 }
 
 const URGENCY_VALUES = ["low", "medium", "high", "critical", "blocker"] as const;
@@ -144,10 +190,13 @@ function stripComment(line: string): string {
 export function parsePolicyV1(text: string): PolicyV1 {
   const ceiling: Partial<Record<ActionType, AutonomyLevel>> = {};
   let version: number | undefined;
-  let section: "autonomy_ceiling" | "notifications" | null = null;
+  let section: "autonomy_ceiling" | "notifications" | "gateway" | null = null;
   let sawCeiling = false;
   let sawNotifications = false;
+  let sawGateway = false;
+  let inGatewayPrincipals = false;
   const notificationEntries: Array<{ key: string; value: string }> = [];
+  const gatewayPrincipals: Record<string, GatewayPrincipalPolicy> = {};
 
   for (const rawLine of text.split("\n")) {
     const line = stripComment(rawLine);
@@ -160,6 +209,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
 
     if (!indented) {
       section = null;
+      inGatewayPrincipals = false;
       if (key === "version") {
         if (version !== undefined) throw new Error("policy: duplicate version key");
         if (value !== "1") throw new Error(`policy: unsupported version ${String(value)}`);
@@ -174,6 +224,11 @@ export function parsePolicyV1(text: string): PolicyV1 {
         if (sawNotifications) throw new Error("policy: duplicate notifications key");
         sawNotifications = true;
         section = "notifications";
+      } else if (key === "gateway") {
+        if (value !== "") throw new Error("policy: gateway must be a mapping");
+        if (sawGateway) throw new Error("policy: duplicate gateway key");
+        sawGateway = true;
+        section = "gateway";
       } else {
         throw new Error(`policy: unknown top-level key '${key}'`);
       }
@@ -186,6 +241,22 @@ export function parsePolicyV1(text: string): PolicyV1 {
     if (section === "notifications") {
       notificationEntries.push({ key, value });
       continue;
+    }
+    if (section === "gateway") {
+      if (inGatewayPrincipals) {
+        if (key === "principals") throw new Error("policy: duplicate gateway.principals key");
+        if (gatewayPrincipals[key] !== undefined) {
+          throw new Error(`policy: duplicate gateway principal '${key}'`);
+        }
+        gatewayPrincipals[key] = parseGatewayPrincipalEntry(key, value);
+        continue;
+      }
+      if (key === "principals") {
+        if (value !== "") throw new Error("policy: gateway.principals must be a mapping");
+        inGatewayPrincipals = true;
+        continue;
+      }
+      throw new Error(`policy: unknown gateway key '${key}'`);
     }
     if (!isActionType(key)) throw new Error(`policy: unknown action type '${key}'`);
     if (ceiling[key] !== undefined) throw new Error(`policy: duplicate action type '${key}'`);
@@ -205,6 +276,9 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const policy: PolicyV1 = { version: 1, autonomy_ceiling: ceiling as Record<ActionType, AutonomyLevel> };
   if (notificationEntries.length > 0) {
     policy.notifications = parseNotificationsSection(notificationEntries);
+  }
+  if (sawGateway) {
+    policy.gateway = { principals: gatewayPrincipals };
   }
   return policy;
 }

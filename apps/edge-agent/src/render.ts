@@ -21,6 +21,14 @@ export interface DeliverableNotification {
   readonly kind: string;
   readonly title: string;
   readonly payload: Record<string, unknown>;
+  /**
+   * Delivery target, present ONLY on approved kind=reply rows (server
+   * enforced) — the reply recipient's verified transport identity. Any
+   * other kind never carries one, and this agent ignores it if one does
+   * (defense in depth): kind≠reply always delivers to the configured
+   * default target.
+   */
+  readonly recipient?: string;
 }
 
 export function truncateForImessage(text: string): string {
