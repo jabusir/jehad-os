@@ -88,6 +88,9 @@ export function createGoogleCalendarSource(opts: {
   readonly tokenProvider: () => Promise<string> | string;
   readonly calendarId: string;
   readonly fetchImpl?: FetchLike;
+  /** Full-sync window bounds (default: past 60d → future 180d). */
+  readonly fullSyncWindowStart?: () => Date;
+  readonly fullSyncWindowEnd?: () => Date;
 }): GoogleCalendarSource {
   const doFetch = opts.fetchImpl ?? (globalThis.fetch as FetchLike);
   if (typeof opts.calendarId !== "string" || opts.calendarId.trim().length === 0) {
@@ -100,7 +103,22 @@ export function createGoogleCalendarSource(opts: {
 
     async listEvents({ syncToken, pageToken }: { syncToken?: string; pageToken?: string }) {
       const params = new URLSearchParams({ showDeleted: "true" });
-      if (syncToken !== undefined) params.set("syncToken", syncToken);
+      if (syncToken !== undefined) {
+        params.set("syncToken", syncToken);
+      } else {
+        // FULL SYNC: expand recurring series inside a bounded window.
+        // Without singleEvents=true, Google returns series MASTERS dated at
+        // their first occurrence (often years in the past) — a recurring
+        // "work" block would never appear as an upcoming event.
+        params.set("singleEvents", "true");
+        params.set("orderBy", "startTime");
+        const windowStart =
+          opts.fullSyncWindowStart?.() ?? new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
+        const windowEnd =
+          opts.fullSyncWindowEnd?.() ?? new Date(Date.now() + 180 * 24 * 60 * 60 * 1000);
+        params.set("timeMin", windowStart.toISOString());
+        params.set("timeMax", windowEnd.toISOString());
+      }
       if (pageToken !== undefined) params.set("pageToken", pageToken);
       const token = await opts.tokenProvider();
       if (typeof token !== "string" || token.trim().length === 0) {
@@ -122,12 +140,21 @@ export function createGoogleCalendarSource(opts: {
       };
       const items = Array.isArray(body.items) ? body.items : [];
       const events: GoogleCalendarEvent[] = [];
+      let sawRecurringMaster = false;
       for (const item of items) {
         if (typeof item !== "object" || item === null) continue;
-        const candidate = item as Partial<GoogleCalendarEvent>;
+        const candidate = item as Partial<GoogleCalendarEvent> & { recurrence?: unknown };
         if (typeof candidate.id !== "string" || candidate.id.length === 0) continue;
+        if (syncToken !== undefined && Array.isArray(candidate.recurrence) && candidate.recurrence.length > 0) {
+          // A series MASTER changed. syncToken listings cannot expand
+          // recurrence, so the projection would only see the master's
+          // first-occurrence date. Drop to a full windowed resync.
+          sawRecurringMaster = true;
+          continue;
+        }
         events.push(candidate as GoogleCalendarEvent);
       }
+      if (sawRecurringMaster) throw new GoogleSyncTokenExpiredError("google-calendar: recurring master changed; windowed full resync required");
       return {
         events,
         nextPageToken: typeof body.nextPageToken === "string" ? body.nextPageToken : null,

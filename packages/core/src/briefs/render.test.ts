@@ -297,7 +297,7 @@ describe("renderMorningBriefText (golden)", () => {
 
 Today
 - nothing scheduled
-- next up: 1:30\u20132:15 PM Video Interview with Taekus (Google Meet)
+- next up: Mon, Sep 28 \u00b7 1:30\u20132:15 PM Video Interview with Taekus (Google Meet)
 
 Overnight
 - 2 events:

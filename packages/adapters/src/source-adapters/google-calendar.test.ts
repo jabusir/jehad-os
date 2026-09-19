@@ -105,7 +105,7 @@ describe("createGoogleCalendarSource", () => {
         nextSyncToken: "sync-token-1",
       }),
     );
-    const source = createGoogleCalendarSource({ tokenProvider: token, calendarId: "primary", fetchImpl: fetch });
+const source = createGoogleCalendarSource({ tokenProvider: token, calendarId: "primary", fetchImpl: fetch, fullSyncWindowStart: () => new Date("2026-01-01T00:00:00.000Z"), fullSyncWindowEnd: () => new Date("2026-12-31T00:00:00.000Z") });
     const result = await source.listEvents({});
 
     expect(result.events.map((e) => e.id)).toEqual(["evt-dentist-001", "evt-standup-002", "evt-offsite-003"]);
@@ -113,7 +113,12 @@ describe("createGoogleCalendarSource", () => {
     expect(result.nextSyncToken).toBe("sync-token-1");
     expect(calls).toHaveLength(1);
     expect(calls[0]!.method).toBe("GET");
-    expect(calls[0]!.url).toBe(`${BASE}?showDeleted=true`);
+    const fullUrl = new URL(calls[0]!.url);
+    expect(fullUrl.pathname).toBe("/calendar/v3/calendars/primary/events");
+    expect(fullUrl.searchParams.get("showDeleted")).toBe("true");
+    expect(fullUrl.searchParams.get("singleEvents")).toBe("true");
+    expect(fullUrl.searchParams.get("timeMin")).toBe("2026-01-01T00:00:00.000Z");
+    expect(fullUrl.searchParams.get("timeMax")).toBe("2026-12-31T00:00:00.000Z");
     expect(calls[0]!.authorization).toBe("Bearer ya29.test-token");
   });
 
@@ -124,7 +129,7 @@ describe("createGoogleCalendarSource", () => {
       }
       return jsonResponse(200, { items: [EVT_DENTIST, EVT_STANDUP], nextPageToken: "page-2" });
     });
-    const source = createGoogleCalendarSource({ tokenProvider: token, calendarId: "primary", fetchImpl: fetch });
+const source = createGoogleCalendarSource({ tokenProvider: token, calendarId: "primary", fetchImpl: fetch, fullSyncWindowStart: () => new Date("2026-01-01T00:00:00.000Z"), fullSyncWindowEnd: () => new Date("2026-12-31T00:00:00.000Z") });
 
     const first = await source.listEvents({});
     expect(first.nextPageToken).toBe("page-2");
@@ -134,7 +139,9 @@ describe("createGoogleCalendarSource", () => {
     expect(second.events.map((e) => e.id)).toEqual(["evt-offsite-003"]);
     expect(second.nextPageToken).toBeNull();
     expect(second.nextSyncToken).toBe("sync-token-2");
-    expect(calls[1]!.url).toBe(`${BASE}?showDeleted=true&pageToken=page-2`);
+    const pageUrl = new URL(calls[1]!.url);
+    expect(pageUrl.searchParams.get("pageToken")).toBe("page-2");
+    expect(pageUrl.searchParams.get("singleEvents")).toBe("true");
   });
 
   it("incremental sync: sends the stored syncToken, gets changed/cancelled items only", async () => {

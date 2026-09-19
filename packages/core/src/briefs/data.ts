@@ -146,6 +146,31 @@ function pickUnlock(ranked: readonly LeverageDecision[]): LeverageDecision | nul
   return ranked.find((d) => d.transitiveDownstreamCount > 0) ?? null;
 }
 
+/**
+ * Calendar changes are brief-worthy only for FUTURE events: the initial
+ * backfill (hundreds of historical instances) and past-event churn are
+ * noise. Filter keeps only changes whose event starts at/after `now`.
+ */
+function filterCalendarDeltaToFuture<T extends { type: string; count: number; events: readonly { payload: Readonly<Record<string, unknown>> }[] }>(
+  groups: readonly T[],
+  now: Date,
+): T[] {
+  const out: T[] = [];
+  for (const g of groups) {
+    if (!g.type.startsWith("calendar.event.")) {
+      out.push(g);
+      continue;
+    }
+    const futureEvents = g.events.filter((e) => {
+      const start = typeof e.payload["start"] === "string" ? e.payload["start"] : null;
+      if (start === null) return false; // cancelled/unknown-start: drop from delta
+      return Date.parse(start) >= now.getTime();
+    });
+    if (futureEvents.length > 0) out.push({ ...g, events: futureEvents, count: futureEvents.length } as T);
+  }
+  return out;
+}
+
 export async function collectMorningBriefData(
   db: QueryExecutor,
   opts: BriefOptions = {},
@@ -166,13 +191,17 @@ export async function collectMorningBriefData(
 
   const overdue = waitsOnMe.filter((c) => c.overdue);
   const dueSoon = waitsOnMe.filter((c) => !c.overdue && c.dueSoon);
+  const futureChanged: WhatChangedResult = {
+    ...changed,
+    eventGroups: filterCalendarDeltaToFuture(changed.eventGroups, now),
+  };
 
   return {
     kind: "brief",
     domainId: BRIEF_DOMAIN_KEY,
     now: now.toISOString(),
     since: since.toISOString(),
-    changed,
+    changed: futureChanged,
     waitingOnYou: {
       overdue,
       dueSoon,

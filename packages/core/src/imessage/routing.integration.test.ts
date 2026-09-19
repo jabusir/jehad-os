@@ -18,7 +18,8 @@ import { ingestBatch, type ImessageTransportEventInput } from "./service.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
-const T0 = new Date("2026-09-19T12:00:00.000Z");
+// Wall-relative (fixed dates detonate when real time passes them).
+const T0 = new Date();
 const YUSRA_HANDLE = "+15550002222";
 
 describe.skipIf(!TEST_DATABASE_URL)("imessage ingest routing (integration)", () => {

@@ -14,7 +14,7 @@
 
 import { Pool } from "pg";
 import { syncCalendar } from "@jehad/core";
-import { createGoogleCalendarSource } from "@jehad/adapters";
+import { createGoogleCalendarSource, envOrKeychainTokenProvider } from "@jehad/adapters";
 import { defineScheduledWorkflow, type ScheduledWorkflowDefinition } from "./definition.js";
 
 export interface CalendarSyncResult {

@@ -94,6 +94,17 @@ function hhmm(iso: string, timeZone: string | null): string {
   return formatted.replace(":00 ", " "); // "9:00 AM" → "9 AM"
 }
 
+/** Next-up is by definition a future day — always carry its date. */
+function datedScheduleLine(item: TodayScheduleItem): string {
+  const datePart = new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone: item.timezone ?? BRIEF_TIMEZONE,
+  }).format(new Date(item.startTime));
+  return `${datePart} · ${scheduleLine(item).slice(2)}`;
+}
+
 function scheduleLine(item: TodayScheduleItem): string {
   const title = item.summary.length > 0 ? item.summary : "(untitled)";
   const startF = hhmm(item.startTime, item.timezone);
@@ -116,7 +127,7 @@ function renderTodaySchedule(
 ): string[] {
   if (schedule.length > 0) return ["Today", ...schedule.map(scheduleLine)];
   if (nextUpcoming !== null) {
-    return ["Today", "- nothing scheduled", `- next up: ${scheduleLine(nextUpcoming).slice(2)}`];
+    return ["Today", "- nothing scheduled", `- next up: ${datedScheduleLine(nextUpcoming)}`];
   }
   return ["Today", "- nothing scheduled"];
 }
@@ -143,7 +154,7 @@ function friendlyEventGroups(
   for (const g of groups) {
     if (g.count >= BULK_CHANGE_THRESHOLD) {
       const label = g.type.replace(/^calendar\.event\./, "").replace(/\./g, " ");
-      lines.push(`- calendar sync: ${g.count} events ${label} (bulk import)`);
+      lines.push(`- calendar sync: ${g.count} upcoming events ${label} (bulk import)`);
     }
   }
   const normal = groups.filter((g) => g.count < BULK_CHANGE_THRESHOLD);
