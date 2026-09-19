@@ -28,7 +28,8 @@ import {
 
 export const FEEDBACK_USAGE =
   `usage: josctl feedback <itemType>/<itemId> <${FEEDBACK_VERDICTS.join("|")}> [--note "..."]\n` +
-  `       josctl feedback --recent   (last 20 verdicts)\n` +
+  `       josctl feedback --recent       (last 20 verdicts)\n` +
+  `       josctl feedback --candidates   (latest tappable events + notifications)\n` +
   `itemType: ${FEEDBACK_ITEM_TYPES.join("|")}\n`;
 
 export interface FeedbackRecordArgs {
@@ -43,12 +44,17 @@ export interface FeedbackRecentArgs {
   readonly recent: true;
 }
 
-export type FeedbackArgs = FeedbackRecordArgs | FeedbackRecentArgs;
+export interface FeedbackCandidatesArgs {
+  readonly candidates: true;
+}
+
+export type FeedbackArgs = FeedbackRecordArgs | FeedbackRecentArgs | FeedbackCandidatesArgs;
 
 export function parseFeedbackArgs(argv: readonly string[]): FeedbackArgs | null {
   const [command, ...rest] = argv.slice(2);
   if (command !== "feedback") return null;
   if (rest.length === 1 && rest[0] === "--recent") return { recent: true };
+  if (rest.length === 1 && rest[0] === "--candidates") return { candidates: true };
 
   const [target, verdict, flag, note] = rest;
   if (target === undefined || verdict === undefined) return null;
@@ -106,6 +112,9 @@ export async function runFeedbackCommand(
       }
       return 0;
     }
+    if (parsed.candidates) {
+      return renderCandidates(db, out);
+    }
     const { feedback, deduped } = await recordFeedback(
       db,
       { itemType: parsed.itemType, itemId: parsed.itemId, verdict: parsed.verdict, note: parsed.note ?? null },
@@ -136,4 +145,40 @@ export async function runFeedbackCommand(
 function renderFeedbackLine(row: FeedbackRow): string {
   const note = row.note === null ? "" : `  # ${row.note}`;
   return `${row.createdAt}  ${row.itemType}/${row.itemId}  ${row.verdict}${note}`;
+}
+
+interface CandidateDb {
+  query(text: string, values?: readonly unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+}
+
+/** Latest tappable items: recent events + notifications, tap-ready lines. */
+async function renderCandidates(db: CandidateDb, out: Writable): Promise<number> {
+  const events = await db.query(
+    `SELECT id, type, recorded_at,
+            COALESCE(payload->>'summary', payload->>'text', payload->>'changeClass', '') AS label
+     FROM events
+     WHERE type LIKE 'calendar.event.%' OR type IN ('memory.proposed','escalation.raised')
+     ORDER BY recorded_at DESC LIMIT 12`,
+  );
+  const notifications = await db.query(
+    `SELECT id, kind, title, status, created_at FROM notifications
+     WHERE status IN ('pending','approved','delivered')
+     ORDER BY created_at DESC LIMIT 8`,
+  );
+  if (events.rows.length === 0 && notifications.rows.length === 0) {
+    out.write("nothing tappable yet (no calendar/signal events, no notifications)\n");
+    return 0;
+  }
+  out.write("tappable items (josctl feedback <type>/<id> <useful|noise|missed|incorrect|interruptive>):\n\n");
+  for (const row of events.rows) {
+    const id = String(row.id);
+    const label = String(row.label ?? "").slice(0, 48);
+    out.write(`  event/${id}  ${String(row.type).padEnd(24)} ${label}\n`);
+  }
+  for (const row of notifications.rows) {
+    const id = String(row.id);
+    const title = String(row.title ?? "").slice(0, 48);
+    out.write(`  notification/${id}  [${String(row.kind)}/${String(row.status)}] ${title}\n`);
+  }
+  return 0;
 }
