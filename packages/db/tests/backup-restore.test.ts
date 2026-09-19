@@ -200,6 +200,7 @@ describe.skipIf(!TEST_DATABASE_URL)("backup → restore (integration)", () => {
       "007_calendar",
       "008_feedback",
       "009_notification_calendar_change",
+      "010_imessage_sensor",
     ]);
   });
 });
