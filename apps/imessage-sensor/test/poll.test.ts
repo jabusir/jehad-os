@@ -1,12 +1,15 @@
 // poll.ts tests — classification, canonical hash (pinned vectors, the
 // SAME contract as apps/edge-agent/test/loop.test.ts), drift counters,
-// privacy (content never on the wire).
+// privacy (content never on the wire), and the multi-principal
+// paired-handle rule (content only for paired handles; pairing hash
+// otherwise; own rows unchanged).
 
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { openChatDb } from "../src/db.js";
+import { PairedHandleCache } from "../src/paired.js";
 import { canonicalNormalize, canonicalTextSha256, classifyRow, pollOnce } from "../src/poll.js";
 import type { ChatMessageRow } from "../src/db.js";
 import { bodyFor, createFixtureChatDb, fixtureDir, malformedBody } from "./fixture-db.js";
@@ -209,6 +212,129 @@ describe("pollOnce", () => {
       expect(poll.ownDecodeFailure).toBe(true);
       expect(poll.events[0]!.normalized_text_sha256).toBe(canonicalTextSha256("own good"));
       expect(poll.events[1]!.normalized_text_sha256).toBeUndefined();
+    } finally {
+      chat.close();
+    }
+  });
+});
+
+describe("multi-principal classification (paired handles)", () => {
+  const observedAt = "2026-09-18T12:00:00.000Z";
+
+  function cacheWith(...canonicalHandles: string[]): PairedHandleCache {
+    const cache = new PairedHandleCache();
+    cache.refresh(canonicalHandles);
+    return cache;
+  }
+
+  it("paired handle + text column → content IS forwarded, no pairing hash, no loop hash", () => {
+    const result = classifyRow(
+      row({ rowid: 1, isFromMe: false, text: "PAIRED-SECRET" }),
+      observedAt,
+      cacheWith("+15550000001"),
+    );
+    expect(result.event.content).toBe("PAIRED-SECRET");
+    expect(result.event.pairing_attempt_hash).toBeUndefined();
+    expect(result.event.normalized_text_sha256).toBeUndefined();
+    expect(result.event.text_length).toBe(13);
+    expect(result.event.decoded_status).toBe("ok");
+  });
+
+  it("paired handle + attributedBody-only → content is the DECODED text", () => {
+    const result = classifyRow(
+      row({ rowid: 2, isFromMe: false, text: null, attributedBody: bodyFor("PAIRED-DECODED\r\nBODY") }),
+      observedAt,
+      cacheWith("+15550000001"),
+    );
+    expect(result.event.content).toBe("PAIRED-DECODED\r\nBODY");
+    expect(result.event.pairing_attempt_hash).toBeUndefined();
+  });
+
+  it("unpaired handle → pairing_attempt_hash of the SAME canonical normalize, NEVER content", () => {
+    const result = classifyRow(
+      row({ rowid: 3, isFromMe: false, text: "UNPAIRED\r\nSECRET" }),
+      observedAt,
+      cacheWith("+19999999999"),
+    );
+    expect(result.event.pairing_attempt_hash).toBe(canonicalTextSha256("UNPAIRED\r\nSECRET"));
+    expect(result.event.content).toBeUndefined();
+    expect(result.event.normalized_text_sha256).toBeUndefined();
+  });
+
+  it("empty cache (fail closed) → every non-own content row is hash-only", () => {
+    const result = classifyRow(
+      row({ rowid: 4, isFromMe: false, text: "NO-CONFIG-SECRET" }),
+      observedAt,
+      cacheWith(),
+    );
+    expect(result.event.pairing_attempt_hash).toBe(canonicalTextSha256("NO-CONFIG-SECRET"));
+    expect(result.event.content).toBeUndefined();
+  });
+
+  it("paired decode-failure row → NO content field, decoded_status records the failure", () => {
+    const result = classifyRow(
+      row({ rowid: 5, isFromMe: false, text: null, attributedBody: malformedBody() }),
+      observedAt,
+      cacheWith("+15550000001"),
+    );
+    expect(result.event.decoded_status).toBe("skipped-malformed");
+    expect(result.event.content).toBeUndefined();
+    expect(result.event.pairing_attempt_hash).toBeUndefined();
+    expect(result.event.text_length).toBeNull();
+    expect(result.decodeFailed).toBe(true);
+  });
+
+  it("own rows unchanged: loop hash ONLY — never content, never a pairing hash (even when the handle is paired)", () => {
+    const result = classifyRow(
+      row({ rowid: 6, isFromMe: true, text: "OWN-ROW-CONTENT" }),
+      observedAt,
+      cacheWith("+15550000001"), // own row's handle would match if content-rule applied
+    );
+    expect(result.event.normalized_text_sha256).toBe(canonicalTextSha256("OWN-ROW-CONTENT"));
+    expect(result.event.content).toBeUndefined();
+    expect(result.event.pairing_attempt_hash).toBeUndefined();
+    expect(result.event.decoded_status).toBe("own-ok");
+  });
+
+  it("no lookup passed (legacy call) → fail closed: hash-only for non-own rows", () => {
+    const result = classifyRow(row({ rowid: 7, isFromMe: false, text: "LEGACY-CALL" }), observedAt);
+    expect(result.event.pairing_attempt_hash).toBe(canonicalTextSha256("LEGACY-CALL"));
+    expect(result.event.content).toBeUndefined();
+  });
+
+  it("handle comparison canonicalizes case/format on BOTH sides (one shared normalizer)", () => {
+    const cache = cacheWith("+15550000001", "yusra@icloud.com");
+    // chat.db formatting variants of the same canonical handles → paired.
+    expect(classifyRow(row({ rowid: 8, text: "A", handleId: "+1 (555) 000-0001" }), observedAt, cache).event.content).toBe("A");
+    expect(classifyRow(row({ rowid: 9, text: "B", handleId: "15550000001" }), observedAt, cache).event.content).toBe("B");
+    expect(classifyRow(row({ rowid: 10, text: "C", handleId: "  Yusra@ICLOUD.com " }), observedAt, cache).event.content).toBe("C");
+    // Different handle, or unmatched local 10-digit form → hash-only.
+    expect(classifyRow(row({ rowid: 11, text: "D", handleId: "+15550000002" }), observedAt, cache).event.pairing_attempt_hash).toBeDefined();
+    expect(classifyRow(row({ rowid: 12, text: "E", handleId: "5550000001" }), observedAt, cache).event.pairing_attempt_hash).toBeDefined();
+    // Null handle (transport_handle "unknown") → never paired.
+    expect(classifyRow(row({ rowid: 13, text: "F", handleId: null }), observedAt, cache).event.pairing_attempt_hash).toBeDefined();
+  });
+
+  it("pollOnce threads the paired lookup through batch classification", () => {
+    const path = createFixtureChatDb(join(fixtureDir(root, "mp"), "chat.db"), {
+      handles: [
+        { rowid: 1, id: "+15550000001" },
+        { rowid: 2, id: "+15550000002" },
+      ],
+      messages: [
+        { rowid: 1, guid: "m1", isFromMe: 0, text: "PAIRED-BATCH", handleRowid: 1 },
+        { rowid: 2, guid: "m2", isFromMe: 0, text: "UNPAIRED-BATCH", handleRowid: 2 },
+        { rowid: 3, guid: "m3", isFromMe: 1, text: "own batch", handleRowid: 1 },
+      ],
+    });
+    const chat = openChatDb(path);
+    try {
+      const poll = pollOnce(chat, 0, 100, () => new Date(0), cacheWith("+15550000001"));
+      expect(poll.events[0]).toMatchObject({ guid: "m1", content: "PAIRED-BATCH" });
+      expect(poll.events[1]).toMatchObject({ guid: "m2", pairing_attempt_hash: canonicalTextSha256("UNPAIRED-BATCH") });
+      expect(poll.events[1]!.content).toBeUndefined();
+      expect(poll.events[2]!.normalized_text_sha256).toBe(canonicalTextSha256("own batch"));
+      expect(poll.events[2]!.content).toBeUndefined();
     } finally {
       chat.close();
     }

@@ -8,10 +8,18 @@ hash, and speak authenticated HTTP to the Jehad OS ingest surface
 
 - **Never writes the Messages DB** (URI `mode=ro` + `readOnly: true`; both
   independently refuse writes).
-- **Privacy rule (shadow phase)**: third-party message CONTENT never
-  leaves the process — the wire batch carries metadata, lengths, hashes
-  and decoder status only; the canonical text hash is computed ONLY for
-  `is_from_me` rows (§5.2 loop correlation).
+- **Content-forwarding rule (multi-principal privacy invariant)**: message
+  content leaves the process ONLY on non-own rows whose handle is a PAIRED
+  principal (the paired-handle list the server returns with every
+  heartbeat response — §1). Every other non-own row carries
+  `pairing_attempt_hash` (sha256 of the canonical text form) instead;
+  own (`is_from_me`) rows stay metadata + loop-hash only. The ingest
+  service enforces the same rule server-side (stray content → discard +
+  audit violation).
+- **Fail closed**: a missing, malformed, or absent paired-handle config
+  (including the pre-multi-principal server's 204-without-body) empties
+  the cache — NO content is forwarded, every non-own row degrades to its
+  pairing hash. The server stays authoritative either way.
 - **Own principal** (`imessage-sensor`), own narrow capability
   (`imessage:ingest`) — never `imessage-local`'s `send_channel:imessage`.
 - No model SDK, no OpenRouter credentials, no shell capability, no
@@ -38,6 +46,45 @@ health_shadow     own (is_from_me) deliveries observed + classified (hash comput
 
 Heartbeats (`POST /harness/imessage/health`) fire every ~30s and
 IMMEDIATELY on any dim transition. Details ride the audit trail only.
+
+### Heartbeat response = sensor config (paired handles)
+
+The heartbeat RESPONSE now carries the sensor's config
+(docs/plans/ig-multiprincipal-contracts.md, "Heartbeat response carries
+sensor config"):
+
+```
+{ "paired_handles": ["+15550000001", "yusra@icloud.com"] }   // canonical, all principals
+```
+
+The sensor caches this list (refreshed on EVERY heartbeat — ~30s staleness
+by design; plus one fetch at startup before the first cycle classifies
+rows) and applies it when classifying new rows:
+
+| row | wire extras |
+| --- | --- |
+| own (`is_from_me`) | `normalized_text_sha256` only — never content (unchanged) |
+| non-own, handle ∈ paired_handles, decodable | `content` (text column, or decoded attributedBody) |
+| non-own, handle ∉ paired_handles, decodable | `pairing_attempt_hash` = sha256(canonicalNormalize(content)) — never `content` |
+| non-own, decode failure | neither — `decoded_status` records it (`skipped-malformed`/`skipped-unknown`) |
+
+Handle comparison canonicalizes BOTH sides with one shared normalizer
+(`apps/imessage-sensor/src/paired.ts`): emails trim + lowercase; phones
+strip all non-digits → `+` + digits. It collapses FORMATTING ONLY — no
+country-code padding (a bare 10-digit local form never matches `+1…`)
+and no handle ever becomes paired without the server saying so.
+
+**Fail-closed behaviors** (all → empty cache → NO content forwarded,
+every non-own row hash-only; each logs once, not per heartbeat):
+
+- 204-without-body (old server): backward compatible, content stays off.
+- 200 with a malformed body (bad shape / non-string entries).
+- Health POST itself fails (network/5xx): cache is emptied until the
+  next successful heartbeat re-primes it.
+
+The sensor never learns pairing codes or session state; the server
+enforces the rule regardless (`content` on a row whose handle is not
+paired → DISCARD + audit violation).
 
 ## 2. bin/sensor-node — the FDA-holding node (prerequisite)
 

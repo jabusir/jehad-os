@@ -3,7 +3,8 @@
 // (packages/core/src/imessage/service.ts), at-least-once + backoff, auth
 // failure survival, LOUD DB-reset detection + operator acknowledgement,
 // decoder-drift loud stop + recovery, heartbeat cadence, the privacy rule,
-// and cursor persistence across restarts.
+// cursor persistence across restarts, and the multi-principal
+// paired-handle config (heartbeat response → content vs pairing hash).
 
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,6 +23,7 @@ import {
   type SensorRuntimeState,
 } from "../src/agent.js";
 import { loadConfig, type SensorConfig } from "../src/config.js";
+import { canonicalTextSha256 } from "../src/poll.js";
 import {
   bodyFor,
   createFixtureChatDb,
@@ -323,10 +325,16 @@ describe("wire contract (matches packages/core imessage service types)", () => {
       "transport_handle",
     ];
     for (const event of body.batch) {
-      // The own row carries EXACTLY one extra key: the canonical hash.
-      const expectedKeys = event["is_from_me"]
-        ? [...baseKeys, "normalized_text_sha256"]
-        : baseKeys;
+      // Own row: EXACTLY one extra key (the loop hash). Non-own row with
+      // content but no paired handle (empty cache — 204 health): exactly
+      // one extra key (the pairing hash). Non-own row with NO decodable
+      // content: base keys only.
+      const expectedKeys =
+        event["is_from_me"] === true
+          ? [...baseKeys, "normalized_text_sha256"]
+          : event["decoded_status"] === "ok"
+            ? [...baseKeys, "pairing_attempt_hash"]
+            : baseKeys;
       expect(Object.keys(event).sort()).toEqual(expectedKeys.sort());
       expect(typeof event["guid"]).toBe("string");
       expect(Number.isSafeInteger(event["rowid"])).toBe(true);
@@ -342,7 +350,15 @@ describe("wire contract (matches packages/core imessage service types)", () => {
     expect(own["normalized_text_sha256"]).toBe(PINNED_MORNING);
     expect(Object.keys(body.batch[0]!).includes("normalized_text_sha256")).toBe(false);
     expect(body.batch[0]!["decoded_status"]).toBe("ok");
+    // The unpaired third-party row carries its pairing hash — the SAME
+    // canonical normalize+sha256 as the loop hash — and NEVER content.
+    expect(body.batch[0]!["pairing_attempt_hash"]).toBe(
+      canonicalTextSha256("SECRET-THIRD-PARTY-CONTENT"),
+    );
+    expect(Object.keys(body.batch[0]!).includes("content")).toBe(false);
+    // The malformed row has no decodable content → no hash of any kind.
     expect(body.batch[2]!["decoded_status"]).toBe("skipped-malformed");
+    expect(Object.keys(body.batch[2]!).includes("pairing_attempt_hash")).toBe(false);
     // Cursor rides the same body.
     expect(body.cursor["rowid"]).toBe(13);
     expect(String(body.cursor["db_generation"]).length).toBeGreaterThan(0);
@@ -669,5 +685,251 @@ describe("heartbeat + failure health", () => {
     expect(healthCalls(h.calls)).toEqual([]);
     expect(readFileSync(statePath, "utf8")).toBe("{not json");
     expect(h.logs.join("\n")).toContain("STATE FILE ERROR");
+  });
+});
+
+describe("multi-principal: paired-handle config via heartbeat response", () => {
+  const pairedBody = (handles: readonly string[]) =>
+    new Response(JSON.stringify({ paired_handles: handles }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+  it("startup fetch primes the cache: paired handle → content, unpaired → pairing hash, NEVER content", async () => {
+    const dir = fixtureDir(root, "mp-wire");
+    const dbPath = createFixtureChatDb(join(dir, "chat.db"), {
+      handles: [
+        { rowid: 1, id: "+15550000001" },
+        { rowid: 2, id: "+15550000002" },
+      ],
+      messages: [
+        { rowid: 11, guid: "p11", isFromMe: 0, text: "PAIRED-PLAIN-TEXT", handleRowid: 1 },
+        {
+          rowid: 12,
+          guid: "p12",
+          isFromMe: 0,
+          text: null,
+          attributedBody: "PAIRED-DECODED-BODY",
+          handleRowid: 1,
+        },
+        { rowid: 13, guid: "p13", isFromMe: 0, text: "UNPAIRED-TEXT", handleRowid: 2 },
+        {
+          rowid: 14,
+          guid: "p14",
+          isFromMe: 1,
+          text: "own row to a paired handle",
+          handleRowid: 1,
+        },
+      ],
+    });
+    const statePath = join(dir, "state.json");
+    seedState(statePath, 10);
+    const h = makeHarness({
+      dbPath,
+      statePath,
+      once: true,
+      health: () => pairedBody(["+15550000001"]),
+    });
+    await runSensorLoop(h.deps, h.config, () => false, h.clock.sleep, h.clock.now);
+
+    const batch = (ingestCalls(h.calls)[0]!.body as { batch: Record<string, unknown>[] }).batch;
+    // Paired text row: content (the text column).
+    expect(batch[0]).toMatchObject({ guid: "p11", content: "PAIRED-PLAIN-TEXT" });
+    expect(batch[0]!["pairing_attempt_hash"]).toBeUndefined();
+    // Paired attributedBody-only row: content = the DECODED text.
+    expect(batch[1]).toMatchObject({ guid: "p12", content: "PAIRED-DECODED-BODY" });
+    expect(batch[1]!["pairing_attempt_hash"]).toBeUndefined();
+    // Unpaired row: the pairing hash of the SAME canonical normalize, no content.
+    expect(batch[2]).toMatchObject({
+      guid: "p13",
+      pairing_attempt_hash: canonicalTextSha256("UNPAIRED-TEXT"),
+    });
+    expect(batch[2]!["content"]).toBeUndefined();
+    // Own row: UNCHANGED — loop hash only, never content (even though its
+    // handle is paired).
+    expect(batch[3]).toMatchObject({
+      guid: "p14",
+      normalized_text_sha256: canonicalTextSha256("own row to a paired handle"),
+    });
+    expect(batch[3]!["content"]).toBeUndefined();
+    expect(batch[3]!["pairing_attempt_hash"]).toBeUndefined();
+  });
+
+  it("paired decode-failure row → no content field, decoded_status records the failure", async () => {
+    const dir = fixtureDir(root, "mp-decodefail");
+    const dbPath = createFixtureChatDb(join(dir, "chat.db"), {
+      handles: [{ rowid: 1, id: "+15550000001" }],
+      messages: [
+        { rowid: 11, guid: "d11", isFromMe: 0, text: null, attributedBody: malformedBody(), handleRowid: 1 },
+      ],
+    });
+    const statePath = join(dir, "state.json");
+    seedState(statePath, 10);
+    const h = makeHarness({
+      dbPath,
+      statePath,
+      once: true,
+      health: () => pairedBody(["+15550000001"]),
+    });
+    await runSensorLoop(h.deps, h.config, () => false, h.clock.sleep, h.clock.now);
+    const event = (ingestCalls(h.calls)[0]!.body as { batch: Record<string, unknown>[] }).batch[0]!;
+    expect(event["decoded_status"]).toBe("skipped-malformed");
+    expect(Object.keys(event).includes("content")).toBe(false);
+    expect(Object.keys(event).includes("pairing_attempt_hash")).toBe(false);
+  });
+
+  it("handle matching is canonical on both sides (format/case variants)", async () => {
+    const dir = fixtureDir(root, "mp-canonical");
+    // chat.db formatting variants of the SAME canonical handles.
+    const dbPath = createFixtureChatDb(join(dir, "chat.db"), {
+      handles: [
+        { rowid: 1, id: "+1 (555) 000-0001" },
+        { rowid: 2, id: "Yusra@ICLOUD.com" },
+        { rowid: 3, id: "15550000003" },
+        { rowid: 4, id: "5550000001" },
+      ],
+      messages: [
+        { rowid: 11, guid: "c11", isFromMe: 0, text: "PHONE-FORMAT-VARIANT", handleRowid: 1 },
+        { rowid: 12, guid: "c12", isFromMe: 0, text: "EMAIL-CASE-VARIANT", handleRowid: 2 },
+        { rowid: 13, guid: "c13", isFromMe: 0, text: "NO-PLUS-VARIANT", handleRowid: 3 },
+        // A bare 10-digit local form deliberately does NOT match +1… (no
+        // silent country-code padding — documented in src/paired.ts).
+        { rowid: 14, guid: "c14", isFromMe: 0, text: "LOCAL-FORM-UNMATCHED", handleRowid: 4 },
+      ],
+    });
+    const statePath = join(dir, "state.json");
+    seedState(statePath, 10);
+    const h = makeHarness({
+      dbPath,
+      statePath,
+      once: true,
+      health: () => pairedBody(["+15550000001", "yusra@icloud.com", "+15550000003"]),
+    });
+    await runSensorLoop(h.deps, h.config, () => false, h.clock.sleep, h.clock.now);
+    const batch = (ingestCalls(h.calls)[0]!.body as { batch: Record<string, unknown>[] }).batch;
+    expect(batch[0]!["content"]).toBe("PHONE-FORMAT-VARIANT");
+    expect(batch[1]!["content"]).toBe("EMAIL-CASE-VARIANT");
+    expect(batch[2]!["content"]).toBe("NO-PLUS-VARIANT");
+    expect(batch[3]!["pairing_attempt_hash"]).toBe(canonicalTextSha256("LOCAL-FORM-UNMATCHED"));
+    expect(Object.keys(batch[3]!).includes("content")).toBe(false);
+  });
+
+  it("cache refreshes on every heartbeat (~30s); an unpaired handle stops getting content after refresh", async () => {
+    const dir = fixtureDir(root, "mp-refresh");
+    const dbPath = createFixtureChatDb(join(dir, "chat.db"), {
+      handles: [{ rowid: 1, id: "+15550000001" }],
+      messages: [{ rowid: 10, guid: "s10", isFromMe: 0, text: "seed" }],
+    });
+    const statePath = join(dir, "state.json");
+    seedState(statePath, 10);
+    let handles: string[] = ["+15550000001"];
+    const h = makeHarness({ dbPath, statePath, health: () => pairedBody(handles) });
+    const ctx = freshCtx(loadSensorState(statePath)!);
+
+    // Cycle 1 (no new rows): heartbeat due → cache primed with the handle.
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now);
+    expect(ctx.paired?.has("+15550000001")).toBe(true);
+
+    // Cycle 2 (<30s later, heartbeat not due): row classified with the cached config.
+    appendMessages(dbPath, [{ rowid: 11, guid: "r11", isFromMe: 0, text: "WHILE-PAIRED", handleRowid: 1 }]);
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now);
+    let batch = (ingestCalls(h.calls).at(-1)!.body as { batch: Record<string, unknown>[] }).batch;
+    expect(batch[0]!["content"]).toBe("WHILE-PAIRED");
+
+    // Server drops the pairing; 31s pass → the next heartbeat refreshes
+    // the cache (AFTER that cycle's ingest — config is ≤30s stale by design).
+    handles = [];
+    h.clock.advance(31_000);
+    appendMessages(dbPath, [{ rowid: 12, guid: "r12", isFromMe: 0, text: "STALE-WINDOW", handleRowid: 1 }]);
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now);
+    batch = (ingestCalls(h.calls).at(-1)!.body as { batch: Record<string, unknown>[] }).batch;
+    expect(batch[0]!["content"]).toBe("STALE-WINDOW");
+    expect(ctx.paired?.size).toBe(0);
+
+    // Next cycle: the refreshed (empty) cache → hash only, never content.
+    appendMessages(dbPath, [{ rowid: 13, guid: "r13", isFromMe: 0, text: "AFTER-REFRESH", handleRowid: 1 }]);
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now);
+    batch = (ingestCalls(h.calls).at(-1)!.body as { batch: Record<string, unknown>[] }).batch;
+    expect(batch[0]!["pairing_attempt_hash"]).toBe(canonicalTextSha256("AFTER-REFRESH"));
+    expect(Object.keys(batch[0]!).includes("content")).toBe(false);
+  });
+
+  it("fail closed: 204 old server (no body) → empty cache, hash-only, logged ONCE", async () => {
+    const dir = fixtureDir(root, "mp-204");
+    const dbPath = createFixtureChatDb(join(dir, "chat.db"), {
+      handles: [{ rowid: 1, id: "+15550000001" }],
+      messages: [{ rowid: 10, guid: "s10", isFromMe: 0, text: "seed" }],
+    });
+    const statePath = join(dir, "state.json");
+    seedState(statePath, 10);
+    const h = makeHarness({ dbPath, statePath, health: () => OK_HEALTH() }); // 204, no body
+    const ctx = freshCtx(loadSensorState(statePath)!);
+
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now); // heartbeat #1
+    h.clock.advance(31_000);
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now); // heartbeat #2
+    const notices = h.logs.filter((l) => l.includes("no paired_handles config"));
+    expect(notices).toHaveLength(1);
+
+    appendMessages(dbPath, [{ rowid: 11, guid: "o11", isFromMe: 0, text: "OLD-SERVER-ROW", handleRowid: 1 }]);
+    h.clock.advance(31_000);
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now);
+    const wire = JSON.stringify(ingestCalls(h.calls).at(-1)!.body);
+    expect(wire).not.toContain("OLD-SERVER-ROW");
+    const batch = (ingestCalls(h.calls).at(-1)!.body as { batch: Record<string, unknown>[] }).batch;
+    expect(batch[0]!["pairing_attempt_hash"]).toBe(canonicalTextSha256("OLD-SERVER-ROW"));
+    expect(Object.keys(batch[0]!).includes("content")).toBe(false);
+  });
+
+  it("fail closed: malformed config body → empty cache, hash-only, logged once", async () => {
+    const dir = fixtureDir(root, "mp-invalid");
+    const dbPath = createFixtureChatDb(join(dir, "chat.db"), {
+      handles: [{ rowid: 1, id: "+15550000001" }],
+      messages: [{ rowid: 10, guid: "s10", isFromMe: 0, text: "seed" }],
+    });
+    const statePath = join(dir, "state.json");
+    seedState(statePath, 10);
+    const h = makeHarness({
+      dbPath,
+      statePath,
+      health: () => new Response(JSON.stringify({ nope: true }), { status: 200 }),
+    });
+    const ctx = freshCtx(loadSensorState(statePath)!);
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now);
+    h.clock.advance(31_000);
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now);
+    expect(h.logs.filter((l) => l.includes("paired_handles malformed"))).toHaveLength(1);
+
+    appendMessages(dbPath, [{ rowid: 11, guid: "i11", isFromMe: 0, text: "INVALID-CONFIG-ROW", handleRowid: 1 }]);
+    h.clock.advance(31_000);
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now);
+    const batch = (ingestCalls(h.calls).at(-1)!.body as { batch: Record<string, unknown>[] }).batch;
+    expect(batch[0]!["pairing_attempt_hash"]).toBe(canonicalTextSha256("INVALID-CONFIG-ROW"));
+    expect(Object.keys(batch[0]!).includes("content")).toBe(false);
+  });
+
+  it("fail closed: failed health post → empty cache, no content in any payload", async () => {
+    const dir = fixtureDir(root, "mp-healthfail");
+    const dbPath = createFixtureChatDb(join(dir, "chat.db"), {
+      handles: [{ rowid: 1, id: "+15550000001" }],
+      messages: [{ rowid: 10, guid: "s10", isFromMe: 0, text: "seed" }],
+    });
+    const statePath = join(dir, "state.json");
+    seedState(statePath, 10);
+    const h = makeHarness({
+      dbPath,
+      statePath,
+      health: () => new Response(JSON.stringify({ error: "boom" }), { status: 500 }),
+    });
+    const ctx = freshCtx(loadSensorState(statePath)!);
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now); // heartbeat fails → cache empty
+    appendMessages(dbPath, [{ rowid: 11, guid: "f11", isFromMe: 0, text: "HEALTH-DOWN-ROW", handleRowid: 1 }]);
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now);
+    const wire = JSON.stringify(ingestCalls(h.calls).at(-1)!.body);
+    expect(wire).not.toContain("HEALTH-DOWN-ROW");
+    expect(wire).not.toContain("content");
+    const batch = (ingestCalls(h.calls).at(-1)!.body as { batch: Record<string, unknown>[] }).batch;
+    expect(batch[0]!["pairing_attempt_hash"]).toBe(canonicalTextSha256("HEALTH-DOWN-ROW"));
+    expect(h.logs.join("\n")).toContain("health post failed: 500");
   });
 });
