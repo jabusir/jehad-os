@@ -253,6 +253,49 @@ describe.skipIf(!TEST_DATABASE_URL)("reply conjunction rule (integration, paired
     expect((await decisionFor(unknown)).failedLegs).toEqual(["third-party-recipient"]);
   });
 
+  // ADVERSARIAL (cross-principal identity claims): the full permutation
+  // matrix of requesting/conversation principal × recipient across the two
+  // paired principals plus an unpaired third-party target. Each principal
+  // is paired to exactly her own handle, so the ONLY approved shapes are
+  // the identity-consistent diagonals (conversation = requesting,
+  // recipient = that principal's OWN handle, thirdParty = false). Every
+  // combination that claims the other principal's identity or handle —
+  // or points the reply at a third party — must land in the queue.
+  it("adversarial: identity-claim permutation matrix — only the identity-consistent diagonal approves", async () => {
+    const THIRD = "+15559998888";
+    const ownHandleOf = (principalId: string) =>
+      principalId === ownerPrincipalId ? OWNER_HANDLE : YUSRA_HANDLE;
+    let approvedLegal = 0;
+    let approvedIllegal = 0;
+    for (const rq of [ownerPrincipalId, yusraPrincipalId]) {
+      for (const cv of [ownerPrincipalId, yusraPrincipalId]) {
+        for (const rc of [OWNER_HANDLE, YUSRA_HANDLE, THIRD]) {
+          for (const tp of [false, true]) {
+            const reply = await createReply({
+              requestingPrincipalId: rq,
+              conversationPrincipalId: cv,
+              recipient: rc,
+              payload: { content: "x", recipient: rc },
+              thirdPartyRecipient: tp,
+            });
+            // Legality is principal-relative: the reply must be fully
+            // consistent with the principal that requested it.
+            const diagonal = cv === rq && rc === ownHandleOf(rq) && tp === false;
+            if (reply.status === "approved") {
+              if (diagonal) approvedLegal += 1;
+              else approvedIllegal += 1;
+            } else if (diagonal) {
+              throw new Error(`legal diagonal was NOT approved: rq=${rq} cv=${cv} rc=${rc} tp=${tp}`);
+            }
+          }
+        }
+      }
+    }
+    // 24 distinct combinations; exactly the two diagonals approve.
+    expect(approvedLegal).toBe(2);
+    expect(approvedIllegal).toBe(0);
+  });
+
   it("recipient on a non-reply kind is an input error (claim wire never carries one)", async () => {
     await expect(
       createNotification(db.pool, {
