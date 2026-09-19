@@ -38,6 +38,10 @@ const LONG_TEXT =
 // Single source for spec text + expectation (avoids NFC/NFD drift between the two).
 const UNICODE_TEXT = "你好，世界！ école suī 平仮名";
 
+// Opaque data-detector payload (real blobs archive a plist as NSMutableData;
+// contents are never interpreted by the decoder). Synthetic bytes.
+const PHONE_PAYLOAD_HEX = "0badc0de0badc0de0badc0de0badc0de";
+
 export const FIXTURES: Record<string, FixtureSpec> = {
   ascii: {
     spec: {
@@ -130,6 +134,81 @@ export const FIXTURES: Record<string, FixtureSpec> = {
       ],
     },
     expected: ok("bold text must survive formatting", 1),
+  },
+  // Synthesized equivalent of a real soak blob (1168 bytes, root class
+  // NSMutableAttributedString): a phone-number data-detector run whose dict
+  // carries an opaque NSMutableData payload + tel: link, and a trailing
+  // ORPHAN range pair with no attribute dictionary. Number is synthetic.
+  "data-detector-phone": {
+    spec: {
+      text: "iMessage pairing: yusra at +15550001234 now",
+      runs: [
+        {
+          attrs: [["__kIMMessagePartAttributeName", { kind: "number", value: 0 }]],
+          rangeFirst: 1,
+          rangeLength: 27,
+        },
+        {
+          attrs: [
+            ["__kIMPhoneNumberAttributeName", { kind: "bytes", hex: PHONE_PAYLOAD_HEX }],
+            ["__kIMMessagePartAttributeName", { kind: "number", value: 0 }],
+            ["__kIMLinkAttributeName", { kind: "url", value: "tel:+15550001234" }],
+          ],
+          rangeFirst: 2,
+          rangeLength: 12,
+        },
+        { attrs: null, rangeFirst: 1, rangeLength: 4 },
+      ],
+    },
+    expected: ok("iMessage pairing: yusra at +15550001234 now", 1),
+  },
+  // Multiple formatting runs sharing one content string, with a mid-sequence
+  // orphan range pair (observed in real blobs between attributed runs).
+  "multi-run-formatting": {
+    spec: {
+      text: "bold and italic tail end",
+      runs: [
+        {
+          attrs: [
+            ["__kIMTextEffectAttributeName", { kind: "string", value: "bold" }],
+            ["__kIMMessagePartAttributeName", { kind: "number", value: 0 }],
+          ],
+          rangeFirst: 1,
+          rangeLength: 4,
+        },
+        { attrs: null, rangeFirst: 1, rangeLength: 5 },
+        {
+          attrs: [
+            ["__kIMTextEffectAttributeName", { kind: "string", value: "italic" }],
+            ["__kIMMessagePartAttributeName", { kind: "number", value: 0 }],
+          ],
+          rangeFirst: 2,
+          rangeLength: 6,
+        },
+        {
+          attrs: [["__kIMMessagePartAttributeName", { kind: "number", value: 0 }]],
+          rangeFirst: 3,
+          rangeLength: 9,
+        },
+      ],
+    },
+    expected: ok("bold and italic tail end", 1),
+  },
+  "nsmutable-single-run": {
+    spec: {
+      rootClass: "NSMutableAttributedString",
+      text: "plain single run on mutable root",
+      runs: [
+        {
+          attrs: [
+            ["__kIMTextEffectAttributeName", { kind: "string", value: "default" }],
+            ["__kIMMessagePartAttributeName", { kind: "number", value: 0 }],
+          ],
+          rangeLength: 32,
+        },
+      ],
+    },
+    expected: ok("plain single run on mutable root", 1),
   },
   "multipart-attachment": {
     spec: {
