@@ -1,10 +1,16 @@
 // The sensor agent loop (gateway Phase A). One cycle:
 //
 //   open chat.db read-only → snapshot (reset check, schema check)
-//   → poll new rows (classify + hash own rows) → POST /harness/imessage/ingest
-//   (bearer + capability token) → persist cursor ONLY after a 2xx
+//   → poll new rows (classify + hash own rows; content ONLY for handles
+//     in the paired-handle cache) → POST /harness/imessage/ingest
+//     (bearer + capability token) → persist cursor ONLY after a 2xx
 //   → POST /harness/imessage/health (five dims) every heartbeatSeconds or
-//     on any health-dim transition.
+//     on any health-dim transition. The heartbeat RESPONSE carries the
+//     sensor config `{ paired_handles: string[] }` (multi-principal
+//     contract) — cached here and refreshed on every heartbeat (plus one
+//     fetch at startup). Missing/invalid/absent config → EMPTY cache →
+//     the sensor forwards NO message content (fail closed; every non-own
+//     row degrades to its pairing hash).
 //
 // At-least-once: a failed ingest leaves the local cursor untouched, so the
 // next cycle re-sends the same rows — guid is the server-side idempotency
@@ -29,6 +35,7 @@ import { existsSync } from "node:fs";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { SensorConfig } from "./config.js";
 import { ChatDbError, openChatDb, type ChatDbSnapshot } from "./db.js";
+import { PairedHandleCache, parsePairedHandlesBody } from "./paired.js";
 import { pollOnce, type TransportEventWire } from "./poll.js";
 
 export interface SensorCredentials {
@@ -266,6 +273,14 @@ interface CycleContext {
   lastHeartbeatAt: number | null;
   schemaDrift: boolean;
   ingestFailing: boolean;
+  /**
+   * Paired-handle config cache (heartbeat response). Optional with a
+   * fail-closed default: when absent, runSensorCycle installs an EMPTY
+   * cache — no handle is ever paired, so no content is forwarded.
+   */
+  paired?: PairedHandleCache;
+  /** log-once latch for a missing/invalid paired-handle config. */
+  pairedConfigNotice?: boolean;
 }
 
 function healthEquals(a: SensorHealth, b: SensorHealth): boolean {
@@ -295,6 +310,7 @@ export async function runSensorCycle(
   let rebaselined = false;
   let failed = false;
   const details: Record<string, unknown> = {};
+  ctx.paired ??= new PairedHandleCache();
 
   const { chat } = await openOrAlert(deps, config, ctx, details, now);
   if (chat === null) {
@@ -367,7 +383,7 @@ export async function runSensorCycle(
       ctx.state.schema_fingerprint !== null &&
       ctx.state.schema_fingerprint !== snapshot.schema.fingerprint;
 
-    const poll = pollOnce(chat, ctx.state.cursor_rowid, config.batchCap, () => new Date(now()));
+    const poll = pollOnce(chat, ctx.state.cursor_rowid, config.batchCap, () => new Date(now()), ctx.paired);
     details.new_rows = poll.events.length;
     details.decode_attempted = poll.decodeAttempted;
     details.decode_failed = poll.decodeFailed;
@@ -496,6 +512,9 @@ async function openOrAlert(
 /**
  * Posts health on any dim transition (immediately) or heartbeat cadence.
  * A failed health post is logged and survived — it must not stop ingest.
+ * The response body IS the sensor config (paired_handles): applied on
+ * every successful post; any missing/invalid body or failed post leaves
+ * the cache EMPTY (fail closed — no content forwarding).
  */
 async function heartbeat(
   deps: SensorDeps,
@@ -512,8 +531,32 @@ async function heartbeat(
   const result = await postHealth(deps, config, ctx.health, details);
   if (result.ok) {
     ctx.lastHeartbeatAt = t;
+    applyPairedHandleConfig(deps, ctx, result.body);
   } else {
+    ctx.paired?.refresh([]);
     log(`imessage-sensor: health post failed: ${result.error ?? "unknown"}`);
+  }
+}
+
+/** Applies the heartbeat-response config to the cache; fail closed on anything but a valid body. */
+function applyPairedHandleConfig(deps: SensorDeps, ctx: CycleContext, body: unknown): void {
+  const log = deps.log ?? (() => {});
+  const parsed = parsePairedHandlesBody(body);
+  if (parsed.ok) {
+    ctx.paired?.refresh(parsed.handles);
+    if (ctx.pairedConfigNotice === true) ctx.pairedConfigNotice = false;
+    return;
+  }
+  ctx.paired?.refresh([]);
+  if (ctx.pairedConfigNotice !== true) {
+    ctx.pairedConfigNotice = true;
+    log(
+      parsed.reason === "absent"
+        ? "imessage-sensor: health response carries no paired_handles config (old server, 204) — " +
+            "paired-handle cache EMPTY, content forwarding OFF"
+        : "imessage-sensor: health response paired_handles malformed — " +
+            "paired-handle cache EMPTY, content forwarding OFF (fail closed)",
+    );
   }
 }
 
@@ -581,7 +624,14 @@ export async function runSensorLoop(
     lastHeartbeatAt: null,
     schemaDrift: false,
     ingestFailing: false,
+    paired: new PairedHandleCache(),
   };
+  // Startup config fetch: one health post whose response primes the
+  // paired-handle cache BEFORE the first cycle classifies any rows (it
+  // also satisfies the heartbeat cadence — the first cycle's periodic
+  // heartbeat is not yet due). A failed post leaves the cache empty
+  // (fail closed) and lastHeartbeatAt null → retried on cycle 1.
+  await heartbeat(deps, config, ctx, { startup: true }, now, true);
   await runUntilStop(deps, config, ctx, shouldStop, sleep, now, log, false);
 }
 

@@ -12,6 +12,7 @@
 // is injected, so the loop tests are fully hermetic.
 
 import type { EdgeAgentConfig } from "./config.js";
+import { isValidImessageTarget } from "./imessage-transport.js";
 import { renderNotificationText, renderedTextSha256, type DeliverableNotification } from "./render.js";
 
 export interface EdgeAgentCredentials {
@@ -56,6 +57,31 @@ async function describeFailure(response: Response): Promise<string> {
   return String(response.status);
 }
 
+export type ResolveTargetError = { readonly kind: "invalid-target"; readonly target: string };
+
+/**
+ * The delivery target (multi-principal Lane P): recipient ?? Keychain/env
+ * default — recipient is honored ONLY on kind=reply rows (the server sets
+ * it only there; a recipient on any other kind is IGNORED — defense in
+ * depth). The resolved target is validated with the SAME email/E.164
+ * validators the transport enforces, BEFORE any send is attempted.
+ */
+export function resolveDeliveryTarget(
+  notification: Pick<DeliverableNotification, "kind" | "recipient">,
+  defaultTarget: string,
+): string | ResolveTargetError {
+  const target =
+    notification.kind === "reply" &&
+    typeof notification.recipient === "string" &&
+    notification.recipient.length > 0
+      ? notification.recipient
+      : defaultTarget;
+  if (!isValidImessageTarget(target)) {
+    return { kind: "invalid-target", target };
+  }
+  return target;
+}
+
 /** One claim → send → delivered cycle. Never throws. */
 export async function runOnce(deps: AgentDeps, config: EdgeAgentConfig): Promise<CycleResult> {
   const log = deps.log ?? (() => {});
@@ -94,9 +120,19 @@ export async function runOnce(deps: AgentDeps, config: EdgeAgentConfig): Promise
   }
   if (notification === null) return none;
 
+  // Lane P: reply rows carry their own recipient (validated); everything
+  // else delivers to the configured default target, ignoring any recipient.
+  const target = resolveDeliveryTarget(notification, credentials.target);
+  if (typeof target !== "string") {
+    log(
+      `edge-agent: invalid delivery target for notification ${notification.id} — NOT sending, not marking delivered; row expires via TTL`,
+    );
+    return { claimed: true, delivered: false };
+  }
+
   const text = renderNotificationText(notification);
   try {
-    await deps.transport(credentials.target, text);
+    await deps.transport(target, text);
   } catch (err) {
     // Documented failure path: NOT delivered → the row expires via its TTL
     // (expires_at); Jehad OS never records a false delivery.
@@ -110,8 +146,10 @@ export async function runOnce(deps: AgentDeps, config: EdgeAgentConfig): Promise
 
   // Loop-defense fingerprint (Phase A): the delivered report carries the
   // canonical sha256 of the EXACT text handed to the transport plus the
-  // recipient it was sent to; the API stores a sent_message_fingerprints
-  // row for sensor-side loop correlation (imessage-gateway.md §5.2).
+  // recipient it was ACTUALLY sent to (reply rows: the honored recipient;
+  // everything else: the default target); the API stores a
+  // sent_message_fingerprints row for sensor-side loop correlation
+  // (imessage-gateway.md §5.2).
   let delivered: Response;
   try {
     delivered = await deps.fetchFn(
@@ -120,7 +158,7 @@ export async function runOnce(deps: AgentDeps, config: EdgeAgentConfig): Promise
         method: "POST",
         headers: { ...headers, "content-type": "application/json" },
         body: JSON.stringify({
-          recipient: credentials.target,
+          recipient: target,
           rendered_text_sha256: renderedTextSha256(text),
         }),
       },

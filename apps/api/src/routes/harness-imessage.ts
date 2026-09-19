@@ -1,29 +1,38 @@
 /**
- * iMessage shadow-sensor harness surface (gateway Phase A, Lane B) —
- * EXACTLY two routes, both behind the dedicated `imessage:ingest`
- * capability (a separate grant from send_channel:imessage: the observer
- * and the sender are different principals; neither token validates at the
- * other's seam):
+ * iMessage shadow-sensor harness surface (gateway Phase A Lane B; pairing +
+ * conversation wiring, multi-principal Lane P) — EXACTLY two routes, both
+ * behind the dedicated `imessage:ingest` capability (a separate grant from
+ * send_channel:imessage: the observer and the sender are different
+ * principals; neither token validates at the other's seam):
  *
  *   POST /harness/imessage/ingest   grant imessage:ingest (resource imessage)
  *   POST /harness/imessage/health   same grant
  *
- * PRIVACY RULE (shadow phase): ingest stores metadata, lengths, hashes,
- * decoder status ONLY — third-party message CONTENT never enters the
- * control plane. The schema has no content column and the service nulls
- * any decoded-text hash arriving on a non-own row.
+ * PRIVACY RULE: ingest stores metadata, lengths, hashes, decoder status
+ * ONLY — third-party message CONTENT never persists. Paired-handle content
+ * is transient: it rides memory to the conversation handler (below) and no
+ * further; content on an unpaired handle is discarded + audited (violation).
  *
  * Ingest is idempotent on guid (at-least-once sensor → exactly-once
  * control plane); the cursor upsert rides the same transaction. Health
- * reports upsert the five-dim state + write an audit entry.
+ * reports upsert the five-dim state + write an audit entry, and the
+ * response carries `paired_handles` (canonical, all principals) so the
+ * sensor knows which handles may batch decoded CONTENT vs pairing hashes
+ * (Lane R contract; the server enforces it regardless of the sensor).
  */
 
 import type { FastifyInstance } from "fastify";
+import type { ModelProvider } from "@jehad/adapters";
+import { createOpenRouterProvider } from "@jehad/adapters";
 import type { PromotionDb } from "@jehad/core";
 import {
   HARNESS_CAPABILITIES,
   ImessageInputError,
+  handleInbound,
   ingestBatch,
+  loadConversationPrincipalPolicy,
+  loadEgressPolicyRegistry,
+  pairedHandles,
   recordAudit,
   recordHealth,
   type ImessageCursorInput,
@@ -52,6 +61,19 @@ interface IngestRequestBody {
   cursor?: unknown;
 }
 
+/**
+ * Conversation deps (Lane P): the real provider + egress registry + policy
+ * budgets, resolved lazily once per process — the sensor surface has no
+ * conversations to serve until the first paired message arrives, and the
+ * OpenRouter key is only read at dispatch time.
+ */
+let conversationDeps: Promise<{
+  db: PromotionDb;
+  provider: ModelProvider;
+  registry: Awaited<ReturnType<typeof loadEgressPolicyRegistry>>;
+  principalPolicy: Awaited<ReturnType<typeof loadConversationPrincipalPolicy>>;
+}> | null = null;
+
 export function registerImessageHarnessRoutes(
   app: FastifyInstance,
   opts: ImessageHarnessRoutesOptions,
@@ -66,12 +88,29 @@ export function registerImessageHarnessRoutes(
       if (body === null || typeof body !== "object" || !Array.isArray(body.batch)) {
         return await reply.code(400).send({ error: "invalid_ingest_body", message: "body must be { batch: [...], cursor: {...} }" });
       }
+      if (conversationDeps === null) {
+        conversationDeps = Promise.all([
+          loadEgressPolicyRegistry(),
+          loadConversationPrincipalPolicy(),
+        ]).then(([registry, principalPolicy]) => ({
+          db,
+          provider: createOpenRouterProvider(),
+          registry,
+          principalPolicy,
+        }));
+      }
       try {
         const report = await ingestBatch(
           db,
           body.batch as readonly ImessageTransportEventInput[], // runtime-validated below the route
           body.cursor as ImessageCursorInput,
-          { actor: actorFor(request) },
+          {
+            actor: actorFor(request),
+            onInbound: async (message) => {
+              const deps = await conversationDeps!;
+              await handleInbound(deps, message);
+            },
+          },
         );
         await recordAudit(db, {
           actor: actorFor(request),
@@ -107,7 +146,9 @@ export function registerImessageHarnessRoutes(
         await recordHealth(db, request.body as ImessageHealthInput, {
           actor: actorFor(request),
         });
-        return await reply.code(204).send();
+        return await reply.code(200).send({
+          paired_handles: await pairedHandles(db),
+        });
       } catch (err) {
         if (err instanceof ImessageInputError) {
           return await reply.code(400).send({ error: "invalid_health_body", message: err.message });

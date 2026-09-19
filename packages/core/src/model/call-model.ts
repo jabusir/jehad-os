@@ -61,6 +61,14 @@ export interface ModelCallDb extends SqlExecutor {
 export interface ModelCallInput extends ModelRequest {
   /** model_calls.prompt_version (plan §7); null when the caller has none. */
   readonly promptVersion?: string;
+  /**
+   * Attribution for per-principal × per-surface budgets (gateway §5.4):
+   * stamped on the model_calls row so windows can police the gateway's
+   * spend separately from the global monthly caps. Null on legacy callers.
+   */
+  readonly principalId?: string | null;
+  /** Surface tag, e.g. 'imessage' for gateway conversation turns. */
+  readonly surface?: string | null;
 }
 
 export interface ModelCallDeps {
@@ -168,10 +176,19 @@ async function reserveBudget(
     const reservedUsd = Math.ceil((budget.hardUsd - spentUsd) * 1e6) / 1e6;
     const inserted = await client.query(
       `INSERT INTO model_calls
-         (run_id, provider, model, prompt_version, in_tokens, out_tokens, cost_usd, latency_ms, result_status)
-       VALUES ($1, $2, $3, $4, 0, 0, $5, 0, 'reserved')
+         (run_id, provider, model, prompt_version, in_tokens, out_tokens, cost_usd, latency_ms, result_status,
+          principal_id, surface)
+       VALUES ($1, $2, $3, $4, 0, 0, $5, 0, 'reserved', $6::uuid, $7)
        RETURNING id::text AS id`,
-      [input.runId, input.provider, input.model, input.promptVersion ?? null, reservedUsd],
+      [
+        input.runId,
+        input.provider,
+        input.model,
+        input.promptVersion ?? null,
+        reservedUsd,
+        input.principalId ?? null,
+        input.surface ?? null,
+      ],
     );
     await client.query("COMMIT");
     return {

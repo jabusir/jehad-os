@@ -7,11 +7,15 @@
 // attributedBody-only — the decoder is load-bearing), and compute the
 // canonical loop-defense hash for is_from_me rows ONLY.
 //
-// PRIVACY RULE (shadow phase, binding contract): third-party message
-// CONTENT never leaves this process — the wire batch carries metadata,
-// lengths, hashes and decoder status only, and normalized_text_sha256 is
-// set only on is_from_me rows. The ingest service nulls it again
-// server-side (defense in depth).
+// PRIVACY RULE (multi-principal, binding contract — ig-multiprincipal-
+// contracts.md "Heartbeat response carries sensor config"): non-own
+// message content leaves this process ONLY when the row's handle is in
+// the paired-handle cache the server sends with every heartbeat response
+// (src/paired.ts). EVERY other non-own row with content carries
+// `pairing_attempt_hash` = sha256(canonicalNormalize(content)) instead —
+// metadata, lengths, hashes and decoder status otherwise. Own rows are
+// unchanged: loop hash only, never content. The ingest service enforces
+// the same rule server-side (stray content → discard + audit).
 //
 // Canonical normalization + hash are IDENTICAL to the Lane C edge
 // (apps/edge-agent/src/render.ts; ig-phase-a-contracts.md): NFC + CR/CRLF
@@ -20,6 +24,7 @@
 import { createHash } from "node:crypto";
 import type { ChatDbHandle, ChatDbSnapshot, ChatMessageRow } from "./db.js";
 import { decodeAttributedBody, type DecodeResult } from "./decoder/index.js";
+import type { PairedHandleLookup } from "./paired.js";
 
 export type SensorDecodedStatus =
   | "ok"
@@ -40,6 +45,10 @@ export interface TransportEventWire {
   readonly decoded_status: SensorDecodedStatus;
   readonly text_length: number | null;
   readonly normalized_text_sha256?: string;
+  /** Decoded text — ONLY for non-own rows whose handle is paired (privacy rule). */
+  readonly content?: string;
+  /** sha256(canonicalNormalize(content)) — ONLY for non-own rows with content whose handle is NOT paired. */
+  readonly pairing_attempt_hash?: string;
   readonly observed_at: string;
 }
 
@@ -68,12 +77,15 @@ function failedStatus(result: Extract<DecodeResult, { ok: false }>): SensorDecod
 /**
  * Classifies one chat.db row into its transport-event wire shape. Pure
  * apart from the injected decoder (defaults to the real Lane A decoder).
- * Content (text or decoded attributedBody) influences ONLY length + hash
- * fields — it is never placed on the wire.
+ * Content (text or decoded attributedBody) is placed on the wire ONLY
+ * for non-own rows whose handle is paired (lookup from the heartbeat
+ * config cache); every other non-own row with content carries its
+ * canonical pairing hash instead. Own rows keep the loop hash only.
  */
 export function classifyRow(
   row: ChatMessageRow,
   observedAt: string,
+  paired?: PairedHandleLookup,
   decode: Decoder = decodeAttributedBody,
 ): RowClassification {
   const hasText = row.text !== null && row.text.length > 0;
@@ -97,6 +109,12 @@ export function classifyRow(
 
   if (content !== null) status = row.isFromMe ? "own-ok" : "ok";
 
+  // Multi-principal content rule: paired handle → content; any other
+  // non-own row with content → pairing hash; own rows → loop hash only.
+  const rowContent = content;
+  const pairedRow = !row.isFromMe && rowContent !== null && (paired?.has(row.handleId) ?? false);
+  const unpairedRow = !row.isFromMe && rowContent !== null && !pairedRow;
+
   const event: TransportEventWire = {
     guid: row.guid.length > 0 ? row.guid : `rowid:${row.rowid}`,
     rowid: row.rowid,
@@ -107,9 +125,13 @@ export function classifyRow(
     has_text: hasText,
     has_attributed_body: blob !== null,
     decoded_status: status,
-    text_length: content !== null ? Buffer.byteLength(content, "utf8") : null,
-    ...(row.isFromMe && content !== null
-      ? { normalized_text_sha256: canonicalTextSha256(content) }
+    text_length: rowContent !== null ? Buffer.byteLength(rowContent, "utf8") : null,
+    ...(row.isFromMe && rowContent !== null
+      ? { normalized_text_sha256: canonicalTextSha256(rowContent) }
+      : {}),
+    ...(pairedRow && rowContent !== null ? { content: rowContent } : {}),
+    ...(unpairedRow && rowContent !== null
+      ? { pairing_attempt_hash: canonicalTextSha256(rowContent) }
       : {}),
     observed_at: observedAt,
   };
@@ -141,12 +163,15 @@ export interface PollOutcome {
  * One read pass: rows with rowid > cursorRowid, ascending, capped at
  * batchCap, classified to wire shape. Never writes, never throws on data
  * (decoder failures become per-row skipped-* statuses + counters).
+ * `paired` is the heartbeat-config lookup; omitted → nothing is paired
+ * (fail closed: hash-only for all non-own rows).
  */
 export function pollOnce(
   chat: ChatDbHandle,
   cursorRowid: number,
   batchCap: number,
   now: () => Date = () => new Date(),
+  paired?: PairedHandleLookup,
   decode: Decoder = decodeAttributedBody,
 ): PollOutcome {
   const snapshot = chat.snapshot();
@@ -176,7 +201,7 @@ export function pollOnce(
   let ownDecodeFailure = false;
   const events: TransportEventWire[] = [];
   for (const row of rows) {
-    const classified = classifyRow(row, observedAt, decode);
+    const classified = classifyRow(row, observedAt, paired, decode);
     if (classified.decodeAttempted) {
       decodeAttempted += 1;
       if (classified.decodeFailed) {

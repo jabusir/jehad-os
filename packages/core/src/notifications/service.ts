@@ -58,6 +58,8 @@ export interface NotificationRow {
   readonly conversationPrincipalId: string | null;
   /** True when the delivery target is outside the owner's verified identity. */
   readonly thirdPartyRecipient: boolean | null;
+  /** Delivery target (kind=reply only; null on every other kind). */
+  readonly recipient: string | null;
 }
 
 /** The claim projection: exactly what a granted harness may take. */
@@ -68,6 +70,13 @@ export interface ClaimedNotification {
   readonly payload: Record<string, unknown>;
   readonly claimedAt: string;
   readonly expiresAt: string;
+  /**
+   * Delivery target — present ONLY on approved kind=reply rows (server
+   * enforces; the §4 conjunction approved recipient ∈ the requesting
+   * principal's verified transport identities). The deliverer uses it as
+   * the target, falling back to its own configured default otherwise.
+   */
+  readonly recipient?: string;
 }
 
 export class NotificationInputError extends Error {
@@ -159,13 +168,14 @@ function rowToNotification(row: Record<string, unknown>): NotificationRow {
       row.third_party_recipient === null || row.third_party_recipient === undefined
         ? null
         : Boolean(row.third_party_recipient),
+    recipient: row.recipient === null || row.recipient === undefined ? null : String(row.recipient),
   };
 }
 
 const NOTIFICATION_COLUMNS = `id, kind, title, payload, domain_id, status, source_type, source_id,
        created_by, approved_by, approved_at, claimed_at, claimed_by,
        delivered_by, delivered_at, expires_at, created_at, updated_at,
-       surface, requesting_principal_id, conversation_principal_id, third_party_recipient`;
+       surface, requesting_principal_id, conversation_principal_id, third_party_recipient, recipient`;
 
 export interface CreateNotificationInput {
   readonly kind: NotificationKind;
@@ -186,19 +196,17 @@ export interface CreateNotificationInput {
   readonly conversationPrincipalId?: string | null;
   /** Reply-rule leg: false = recipient is the owner's verified identity. */
   readonly thirdPartyRecipient?: boolean | null;
+  /**
+   * Delivery target (kind=reply ONLY — a recipient on any other kind is an
+   * input error): the requesting principal's verified transport identity.
+   */
+  readonly recipient?: string | null;
 }
 
 export interface NotificationServiceOptions {
   readonly config?: NotificationsConfig;
   readonly actor?: string;
   readonly now?: () => Date;
-  /**
-   * The owner's verified transport identity for the reply conjunction's
-   * recipient leg (gateway Phases A–C: the fixed EDGE_IMESSAGE_TARGET).
-   * Defaults to process.env.EDGE_IMESSAGE_TARGET; unset fails closed
-   * (replies route to the approval queue).
-   */
-  readonly replyVerifiedRecipient?: string | null;
 }
 
 /** What evaluateReplyApproval needs from a notification (input or row shape). */
@@ -208,7 +216,9 @@ export interface ReplyApprovalNotification {
   readonly requestingPrincipalId?: string | null;
   readonly conversationPrincipalId?: string | null;
   readonly thirdPartyRecipient?: boolean | null;
-  /** The reply recipient rides payload.recipient (A–C: the fixed target). */
+  /** The reply recipient (row column; payload.recipient is the fallback). */
+  readonly recipient?: string | null;
+  /** Fallback recipient leg source (row column wins when present). */
   readonly payload: Record<string, unknown>;
 }
 
@@ -226,15 +236,6 @@ export interface ReplyApprovalDecision {
   readonly failedLegs: readonly ReplyApprovalLeg[];
 }
 
-export interface ReplyApprovalOptions {
-  /**
-   * The owner's verified transport identity (A–C: the fixed
-   * EDGE_IMESSAGE_TARGET). Defaults to process.env.EDGE_IMESSAGE_TARGET;
-   * unset → the recipient leg fails closed.
-   */
-  readonly verifiedOwnerRecipient?: string | null;
-}
-
 /**
  * The ONE reply auto-approval rule (gateway §4 — no phase ever ships a
  * weaker version): a kind=reply notification is approved at creation ONLY
@@ -242,52 +243,51 @@ export interface ReplyApprovalOptions {
  *
  *   kind                    = reply
  *   AND surface             = imessage
- *   AND requestingPrincipal = a paired owner        (A–C: a user principal)
- *   AND recipient           = that principal's verified transport identity
+ *   AND requestingPrincipal = a principal with a verified transport identity
+ *                             (transport_identities — pairing IS the auth;
+ *                             no env target, no principal-type shortcut)
+ *   AND recipient           ∈ verifiedHandles(requestingPrincipal)
+ *                             (row column, payload.recipient fallback)
  *   AND conversationPrincipal = requestingPrincipal
  *   AND thirdPartyRecipient = false
  *
  * Any failing leg routes the notification to the normal approval queue.
- * Phases A–C: the fixed EDGE_IMESSAGE_TARGET IS the owner's verified
- * identity — payload.recipient must equal it when present, and the leg
- * fails closed when no verified recipient is configured at all.
+ * EDGE_IMESSAGE_TARGET left this rule entirely: the owner pairs his handle
+ * (pair --add-handle) when he wants converse; owner briefs/alerts
+ * (kind≠reply) still deliver to the fixed edge default target.
  */
 export async function evaluateReplyApproval(
   db: SqlExecutor,
   notification: ReplyApprovalNotification,
-  opts: ReplyApprovalOptions = {},
 ): Promise<ReplyApprovalDecision> {
   const failedLegs: ReplyApprovalLeg[] = [];
   if (notification.kind !== REPLY_NOTIFICATION_KIND) failedLegs.push("kind");
   if (notification.surface !== "imessage") failedLegs.push("surface");
 
   const requestingPrincipalId = notification.requestingPrincipalId ?? null;
+  let verified: readonly string[] = [];
   if (requestingPrincipalId === null) {
     failedLegs.push("requesting-principal");
   } else {
-    // A–C: the paired owner IS a user principal (single-owner system;
-    // Phase B swaps this leg onto the pairing table's verified identities).
-    const principal = await db.query(
-      "SELECT type FROM principals WHERE id = $1::uuid",
+    // Transport-identity leg: pairing proved the handle; the principal
+    // must hold at least one verified identity, and the recipient must BE
+    // one of them. Unset recipient fails closed (leg below).
+    verified = await db.query(
+      `SELECT handle FROM transport_identities
+        WHERE principal_id = $1::uuid AND transport = 'imessage'`,
       [requestingPrincipalId],
-    );
-    const type = principal.rows[0]?.type;
-    if (type !== "user") failedLegs.push("requesting-principal");
+    ).then((r) => r.rows.map((row) => String(row.handle)));
+    if (verified.length === 0) failedLegs.push("requesting-principal");
   }
 
-  const verifiedRecipient =
-    opts.verifiedOwnerRecipient !== undefined
-      ? opts.verifiedOwnerRecipient
-      : (process.env.EDGE_IMESSAGE_TARGET ?? null);
-  if (verifiedRecipient === null || verifiedRecipient === "") {
-    failedLegs.push("recipient"); // fail closed: no verified identity to check against
-  } else {
-    const recipient = notification.payload["recipient"];
-    // A–C fixed-target delivery: an absent recipient rides the target by
-    // construction; a present recipient must BE the verified identity.
-    if (recipient !== undefined && recipient !== null && recipient !== verifiedRecipient) {
-      failedLegs.push("recipient");
-    }
+  const recipient =
+    notification.recipient !== undefined && notification.recipient !== null
+      ? notification.recipient
+      : typeof notification.payload["recipient"] === "string"
+        ? notification.payload["recipient"]
+        : null;
+  if (recipient === null || !verified.includes(recipient)) {
+    failedLegs.push("recipient"); // fail closed: unknown or unverified target
   }
 
   const conversationPrincipalId = notification.conversationPrincipalId ?? null;
@@ -360,6 +360,17 @@ export async function createNotification(
   ) {
     throw new NotificationInputError("thirdPartyRecipient must be null or a boolean");
   }
+  if (
+    input.recipient !== undefined && input.recipient !== null &&
+    (typeof input.recipient !== "string" || input.recipient.trim().length === 0 || input.recipient.length > 320)
+  ) {
+    throw new NotificationInputError("recipient must be null or a non-empty string of at most 320 chars");
+  }
+  // kind=reply ONLY — the claim projection never carries a recipient for
+  // any other kind, so it can never be created with one either.
+  if (input.recipient !== undefined && input.recipient !== null && input.kind !== REPLY_NOTIFICATION_KIND) {
+    throw new NotificationInputError("recipient is allowed only on kind=reply notifications");
+  }
   const config = opts.config ?? DEFAULT_NOTIFICATIONS_CONFIG;
   const now = opts.now?.() ?? new Date();
   // Reply guard: the kind list is dead to replies — the conjunction is the
@@ -374,9 +385,9 @@ export async function createNotification(
             requestingPrincipalId: input.requestingPrincipalId ?? null,
             conversationPrincipalId: input.conversationPrincipalId ?? null,
             thirdPartyRecipient: input.thirdPartyRecipient ?? null,
+            recipient: input.recipient ?? null,
             payload: input.payload,
           },
-          { verifiedOwnerRecipient: opts.replyVerifiedRecipient },
         )
       : null;
   const autoApproved =
@@ -390,9 +401,9 @@ export async function createNotification(
     `INSERT INTO notifications (kind, title, payload, domain_id, status, source_type, source_id,
                                 created_by, approved_at, expires_at, created_at, updated_at,
                                 surface, requesting_principal_id, conversation_principal_id,
-                                third_party_recipient)
+                                third_party_recipient, recipient)
      VALUES ($1, $2, $3::jsonb, $4::uuid, $5, $6, $7, $8::uuid, $9::timestamptz,
-             $10::timestamptz, $11::timestamptz, $11::timestamptz, $12, $13::uuid, $14::uuid, $15)
+             $10::timestamptz, $11::timestamptz, $11::timestamptz, $12, $13::uuid, $14::uuid, $15, $16)
      RETURNING ${NOTIFICATION_COLUMNS}`,
     [
       input.kind,
@@ -410,6 +421,7 @@ export async function createNotification(
       input.requestingPrincipalId ?? null,
       input.conversationPrincipalId ?? null,
       input.thirdPartyRecipient ?? null,
+      input.recipient ?? null,
     ],
   );
   const row = inserted.rows[0];
@@ -574,18 +586,76 @@ export async function claimNextApprovedNotification(
        LIMIT 1
        FOR UPDATE SKIP LOCKED
      )
-     RETURNING id, kind, title, payload, claimed_at, expires_at`,
+     RETURNING id, kind, title, payload, claimed_at, expires_at, recipient,
+               requesting_principal_id`,
     [now.toISOString(), input.claimedBy],
   );
   const row = claimed.rows[0];
   if (row === undefined) return null;
+  const kind = String(row.kind) as NotificationKind;
+  if (
+    kind === REPLY_NOTIFICATION_KIND &&
+    typeof row.requesting_principal_id === "string" &&
+    (typeof row.recipient !== "string" || row.recipient.length === 0)
+  ) {
+    // A reply without a recipient should not exist (conjunction requires
+    // it) — if it does, quarantine it rather than deliver anywhere.
+    await db.query(
+      `UPDATE notifications SET status = 'pending', claimed_at = NULL, updated_at = $2::timestamptz WHERE id = $1::uuid`,
+      [String(row.id), now.toISOString()],
+    );
+    await recordAudit(db, {
+      actor: input.actor ?? `principal:${input.claimedBy}`,
+      action: "notification.reply_recipient_recheck_failed",
+      reversible: true,
+      grantId: input.grantId ?? null,
+      outputsRef: JSON.stringify({ notificationId: String(row.id), reason: "missing-recipient" }),
+    });
+    return null;
+  }
+  if (kind === REPLY_NOTIFICATION_KIND && typeof row.recipient === "string" && row.recipient.length > 0) {
+    // CLAIM-TIME recheck (adversary F1): the conjunction approved recipient
+    // at creation, but the row is mutable — re-derive the verified handles
+    // and refuse to honor a post-approval edit. Fail = requeue + audit,
+    // never deliver to a stale/foreign recipient.
+    const verified = await db.query(
+      `SELECT 1 FROM transport_identities
+        WHERE principal_id = $1::uuid AND transport = 'imessage' AND handle = $2`,
+      [String(row.requesting_principal_id), row.recipient],
+    );
+    if (verified.rows[0] === undefined) {
+      await db.query(
+        `UPDATE notifications SET status = 'pending', claimed_at = NULL, updated_at = $2::timestamptz WHERE id = $1::uuid`,
+        [String(row.id), now.toISOString()],
+      );
+      await recordAudit(db, {
+        actor: input.actor ?? `principal:${input.claimedBy}`,
+        action: "notification.reply_recipient_recheck_failed",
+        reversible: true,
+        grantId: input.grantId ?? null,
+        outputsRef: JSON.stringify({
+          notificationId: String(row.id),
+          reason: "recipient-not-verified",
+          recipient: row.recipient,
+        }),
+      });
+      return null;
+    }
+  }
   const notification: ClaimedNotification = {
     id: String(row.id),
-    kind: String(row.kind) as NotificationKind,
+    kind,
     title: String(row.title),
     payload: isPlainObject(row.payload) ? row.payload : {},
     claimedAt: toIso(row.claimed_at),
     expiresAt: toIso(row.expires_at),
+    // SERVER-ENFORCED: the wire carries a recipient ONLY on kind=reply rows
+    // (the claim query's WHERE guarantees status='approved'). Any other
+    // kind never receives one, whatever the row holds — defense in depth.
+    ...(kind === REPLY_NOTIFICATION_KIND &&
+      typeof row.recipient === "string" && row.recipient.length > 0
+      ? { recipient: row.recipient }
+      : {}),
   };
   await recordAudit(db, {
     actor: input.actor ?? `principal:${input.claimedBy}`,
