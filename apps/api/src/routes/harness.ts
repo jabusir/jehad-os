@@ -7,6 +7,11 @@
  *                                         OR send_channel:imessage (E4-S alias)
  *   POST /harness/notifications/:id/delivered   same alias as claim
  *
+ * The delivered report may carry a loop-defense fingerprint (Phase A):
+ * { recipient, rendered_text_sha256 } — stored as a sent_message_fingerprints
+ * row (table owned by migration 010) for sensor-side loop correlation. A
+ * body-less report still records delivery (legacy edge shape, test-pinned).
+ *
  * The E4-S alias lets a send-only iMessage edge principal hold a grant that
  * says exactly `send_channel:imessage` (nothing generic); the guard accepts
  * either capability and the audit chain records which one authorized the
@@ -25,6 +30,7 @@
  * and only after user review approved them (policy auto-approve aside).
  */
 
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PromotionDb } from "@jehad/core";
 import {
@@ -74,8 +80,9 @@ type PreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<unkn
  * middleware: for principal.type === "harness" every route here additionally
  * demands a verified capability token; users pass as owner; everyone else
  * 403s. Denials are audited inside the guard (harness.grant_denied).
+ * Shared by the iMessage sensor surface (harness-imessage.ts).
  */
-function requireHarnessGrant(
+export function requireHarnessGrant(
   db: PromotionDb,
   capabilities: readonly string[],
   resource: string,
@@ -103,6 +110,80 @@ interface StateSummary {
   pendingReviews: number;
   openEscalations: Readonly<Record<"blocker" | "critical" | "high" | "medium" | "low" | "unranked", number>>;
   todayBriefReady: boolean;
+}
+
+/** Loop-defense fingerprint pair (Phase A — imessage-gateway.md §5.2). */
+interface DeliveryReport {
+  readonly recipient: string;
+  readonly renderedTextSha256: string;
+}
+
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * Parses the delivered-report body.
+ *   undefined → legacy report (no body): delivery recorded, NO fingerprint.
+ *   null      → malformed: 400 before ANY state change.
+ * When present, `recipient` and `rendered_text_sha256` must BOTH be present
+ * (the fingerprint row requires both); the hash is 64 lowercase hex chars.
+ */
+function parseDeliveryReport(body: unknown): DeliveryReport | undefined | null {
+  if (body === undefined || body === null) return undefined;
+  if (typeof body !== "object" || Array.isArray(body)) return null;
+  const record = body as Record<string, unknown>;
+  const recipient = record["recipient"];
+  const hash = record["rendered_text_sha256"];
+  const hasRecipient = recipient !== undefined;
+  const hasHash = hash !== undefined;
+  if (!hasRecipient && !hasHash) return undefined; // {} — legacy-shape body
+  const recipientOk =
+    typeof recipient === "string" && recipient.trim().length > 0 && recipient.length <= 320;
+  const hashOk = typeof hash === "string" && SHA256_HEX_RE.test(hash);
+  if (!recipientOk || !hashOk) return null;
+  return { recipient, renderedTextSha256: hash };
+}
+
+/**
+ * Stores what the edge actually sent so the shadow sensor can correlate our
+ * own deliveries out of the inbound stream (loop defense, defense-in-depth
+ * behind the sensor's is_from_me primary guard). The
+ * sent_message_fingerprints TABLE belongs to migration 010 (Lane B); this
+ * write happens ONLY for delivery reports that carry the fingerprint pair.
+ */
+async function recordSentMessageFingerprint(
+  db: PromotionDb,
+  input: {
+    readonly notificationId: string;
+    readonly recipient: string;
+    readonly renderedTextSha256: string;
+    readonly deliveredAt: string;
+    readonly actor: string;
+    readonly grantId: string | null;
+  },
+): Promise<void> {
+  await db.query(
+    `INSERT INTO sent_message_fingerprints
+       (id, notification_id, recipient, rendered_text_sha256, delivered_at)
+     VALUES ($1::uuid, $2::uuid, $3, $4, $5::timestamptz)`,
+    [
+      randomUUID(),
+      input.notificationId,
+      input.recipient,
+      input.renderedTextSha256,
+      input.deliveredAt,
+    ],
+  );
+  await recordAudit(db, {
+    actor: input.actor,
+    action: "notification.fingerprint_recorded",
+    reversible: true,
+    grantId: input.grantId,
+    outputsRef: JSON.stringify({
+      notificationId: input.notificationId,
+      recipient: input.recipient,
+      renderedTextSha256: input.renderedTextSha256,
+    }),
+  });
 }
 
 export function registerHarnessRoutes(
@@ -179,6 +260,14 @@ export function registerHarnessRoutes(
       if (!UUID_RE.test(id)) {
         return await reply.code(400).send({ error: "invalid_notification_id" });
       }
+      const report = parseDeliveryReport(request.body);
+      if (report === null) {
+        return await reply.code(400).send({
+          error: "invalid_delivery_report",
+          message:
+            "body must be absent/empty or carry BOTH recipient (non-empty string) and rendered_text_sha256 (64-char lowercase sha256 hex)",
+        });
+      }
       const principal = request.principal!;
       try {
         const notification = await markDelivered(db, id, {
@@ -187,6 +276,19 @@ export function registerHarnessRoutes(
           grantId: request.harnessGrantId ?? null,
           grantCapability: request.harnessCapability ?? null,
         });
+        if (report !== undefined) {
+          if (notification.deliveredAt === null) {
+            throw new Error("delivered report missing delivered_at (fingerprint not recorded)");
+          }
+          await recordSentMessageFingerprint(db, {
+            notificationId: notification.id,
+            recipient: report.recipient,
+            renderedTextSha256: report.renderedTextSha256,
+            deliveredAt: notification.deliveredAt,
+            actor: actorFor(request),
+            grantId: request.harnessGrantId ?? null,
+          });
+        }
         return await reply.code(200).send({ notification });
       } catch (err) {
         if (err instanceof NotificationNotFoundError) {

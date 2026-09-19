@@ -31,6 +31,14 @@ export const HARNESS_CAPABILITIES = {
    * capability; every other seam accepts exactly one.
    */
   sendChannelImessage: "send_channel:imessage",
+  /**
+   * iMessage shadow-sensor ingest (gateway Phase A): the sensor principal
+   * reports transport metadata + health through /harness/imessage/*. A
+   * deliberately SEPARATE capability from send_channel:imessage — the
+   * observer and the sender are different principals with different trust
+   * postures; neither grant validates at the other's seam.
+   */
+  ingestImessage: "imessage:ingest",
 } as const;
 
 export interface HarnessPrincipalContext {
