@@ -55,6 +55,7 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
     //    roll back exactly 004 — its down path drops the column.
     await migrateUp(pool, defaultMigrationsDir());
     expect(await migrateDown(pool, { to: "003_evidence_links" }, defaultMigrationsDir())).toEqual([
+      "009_notification_calendar_change",
       "008_feedback",
       "007_calendar",
       "006_notifications",
@@ -78,6 +79,7 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
       "006_notifications",
       "007_calendar",
       "008_feedback",
+      "009_notification_calendar_change",
     ]);
 
     const rows = (
@@ -104,6 +106,7 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
 
     // 5. A post-backfill down path still reverses 004 cleanly (005+ first).
     expect(await migrateDown(pool, { to: "003_evidence_links" }, defaultMigrationsDir())).toEqual([
+      "009_notification_calendar_change",
       "008_feedback",
       "007_calendar",
       "006_notifications",

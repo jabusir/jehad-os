@@ -33,6 +33,8 @@ import {
   upsertCalendarEvent,
   upsertCalendarSyncState,
 } from "./projection.js";
+import { enqueueCalendarChangeNotification } from "../notifications/service.js";
+import type { NotificationsConfig } from "../notifications/config.js";
 
 /** Structural port: what syncCalendar needs from a calendar SourceAdapter. */
 export interface CalendarSourcePort {
@@ -76,6 +78,39 @@ export interface CalendarSyncReport {
 /** The calendar sensor is v1 personal-domain only (owner spec). */
 const CALENDAR_DOMAIN_KEY = "personal";
 
+/**
+ * E4-S noise gate: calendar-change notifications fire only for disruptive
+ * changes (start_end_changed | cancelled) whose (new OR previous) start falls
+ * within the NEXT 48 hours. Created/updated changes ride the morning brief
+ * instead — this window IS the disruption filter.
+ */
+export const CALENDAR_CHANGE_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+/** True when the ISO instant is strictly after `now` and at most now+48h. */
+export function isWithinNext48h(start: string | null, now: Date): boolean {
+  if (start === null) return false;
+  const instant = Date.parse(start);
+  if (Number.isNaN(instant)) return false;
+  return instant > now.getTime() && instant <= now.getTime() + CALENDAR_CHANGE_WINDOW_MS;
+}
+
+/** Title instant format: `2026-09-18 09:00 UTC` (deterministic, iMessage-friendly). */
+function formatInstantForTitle(iso: string): string {
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+}
+
+/** `${summary}: moved to X` | `${summary}: cancelled` — the delivery title. */
+export function calendarChangeNotificationTitle(
+  summary: string,
+  changeClass: "start_end_changed" | "cancelled",
+  newStart: string | null,
+): string {
+  const subject = summary.length > 0 ? summary : "(untitled event)";
+  if (changeClass === "cancelled") return `${subject}: cancelled`;
+  if (newStart === null) return `${subject}: rescheduled`;
+  return `${subject}: moved to ${formatInstantForTitle(newStart)}`;
+}
+
 async function fetchAllPages(
   source: CalendarSourcePort,
   syncToken: string | undefined,
@@ -94,16 +129,32 @@ async function fetchAllPages(
   return { events, nextSyncToken, pageCount };
 }
 
+export interface CalendarSyncOptions {
+  /** Injection point for tests / determinism; defaults to new Date(). */
+  readonly now?: () => Date;
+  /**
+   * E4-S: enqueue kind=calendar-change notifications for disruptive
+   * near-term changes (start_end_changed|cancelled within the next 48h).
+   * Default false — tests and non-notifying callers stay quiet.
+   */
+  readonly notify?: boolean;
+  /** Overrides the policy-file notification config (tests). */
+  readonly notificationConfig?: NotificationsConfig;
+}
+
 /**
  * Runs one sync pass. Reads (and persists) the calendar_sync_state cursor;
  * emits one observation event + one projection upsert per detected change;
  * returns the change report. Safe to re-run: identical input produces zero
- * new events.
+ * new events. With opts.notify, disruptive near-term changes additionally
+ * enqueue a kind=calendar-change notification (48h filter; see
+ * isWithinNext48h) — only for ACCEPTED events, so a redelivered batch
+ * (externalId dedupe) never double-notifies.
  */
 export async function syncCalendar(
   db: EventStoreExecutor,
   source: CalendarSourcePort,
-  opts: { now?: () => Date } = {},
+  opts: CalendarSyncOptions = {},
 ): Promise<CalendarSyncReport> {
   const now = opts.now?.() ?? new Date();
 
@@ -176,6 +227,51 @@ export async function syncCalendar(
       eventId: accepted.envelope.id,
       accepted: accepted.accepted,
     });
+
+    // E4-S producer: disruptive near-term schedule changes reach the owner
+    // without waiting for the morning brief. Noise gate = change class
+    // (start_end_changed|cancelled ONLY) + the 48h window below; deduped
+    // redeliveries (accepted === false) never re-notify.
+    if (
+      opts.notify === true &&
+      accepted.accepted &&
+      (classification.changeClass === "start_end_changed" ||
+        classification.changeClass === "cancelled")
+    ) {
+      const relevantStarts =
+        classification.changeClass === "start_end_changed"
+          ? [incoming.start, classification.previousStart]
+          : [classification.previousStart, incoming.start];
+      if (relevantStarts.some((start) => isWithinNext48h(start, now))) {
+        // Minimal cancelled payloads strip summary — fall back to the
+        // projection's previous summary so titles stay human.
+        const summary =
+          incoming.summary.length > 0 ? incoming.summary : (existing?.summary ?? "");
+        await enqueueCalendarChangeNotification(db, {
+          title: calendarChangeNotificationTitle(
+            summary,
+            classification.changeClass,
+            incoming.start,
+          ),
+          change: {
+            changeClass: classification.changeClass,
+            summary,
+            start: incoming.start,
+            end: incoming.end,
+            previousStart: classification.previousStart,
+            previousEnd: classification.previousEnd,
+          },
+          provenance: {
+            eventId: accepted.envelope.id,
+            googleEventId: incoming.googleEventId,
+            calendarId: source.calendarId,
+          },
+          domainKey: CALENDAR_DOMAIN_KEY,
+          config: opts.notificationConfig,
+          now: () => now,
+        });
+      }
+    }
   }
 
   await upsertCalendarSyncState(db, {

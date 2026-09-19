@@ -54,7 +54,7 @@ export const morningBriefWorkflow = defineScheduledWorkflow({
   fn: async (ctx): Promise<ScheduledRenderResult> => {
     if (!isUtcHour(new Date(), MORNING_BRIEF_UTC_HOUR)) return { skippedWindow: true };
     const outcome = await ctx.step.run("render-morning-brief", () =>
-      renderWithPool((db) => renderMorningBrief(db)),
+      renderWithPool((db) => renderMorningBrief(db, { notify: true })),
     );
     return { outcome };
   },
@@ -66,7 +66,7 @@ export const eveningCloseWorkflow = defineScheduledWorkflow({
   fn: async (ctx): Promise<ScheduledRenderResult> => {
     if (!isUtcHour(new Date(), EVENING_CLOSE_UTC_HOUR)) return { skippedWindow: true };
     const outcome = await ctx.step.run("render-evening-close", () =>
-      renderWithPool((db) => renderEveningClose(db)),
+      renderWithPool((db) => renderEveningClose(db, { notify: true })),
     );
     return { outcome };
   },

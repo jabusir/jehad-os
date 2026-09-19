@@ -20,7 +20,7 @@ const TABLES_001 = [
 const ALL_MIGRATIONS = [
   "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
   "004_commitments_domain", "005_commitments_temporal", "006_notifications",
-  "007_calendar", "008_feedback",
+  "007_calendar", "008_feedback", "009_notification_calendar_change",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -133,6 +133,28 @@ describe("migration files (fs only)", () => {
     expect(guard!.sql).toMatch(/CREATE TRIGGER action_attempts_outcome_guard_trigger/);
     expect(guard!.downSql).toMatch(/DROP TRIGGER IF EXISTS action_attempts_outcome_guard_trigger/);
     expect(guard!.downSql).toMatch(/DROP FUNCTION IF EXISTS action_attempts_outcome_guard/);
+  });
+
+  it("009 widens the notifications kind/source_type CHECKs; down restores the 006 vocabulary", async () => {
+    const migrations = await listMigrations();
+    const widen = migrations.find((m) => m.name === "009_notification_calendar_change");
+    expect(widen).toBeDefined();
+    expect(widen!.sql).toMatch(
+      /CHECK \(kind IN \('brief', 'escalation', 'custom', 'calendar-change'\)\)/,
+    );
+    expect(widen!.sql).toMatch(
+      /CHECK \(source_type IN \('escalation', 'brief', 'run', 'calendar'\)\)/,
+    );
+    // Down purges widened-vocabulary rows BEFORE narrowing (dev-only path).
+    expect(widen!.downSql).toMatch(
+      /DELETE FROM notifications WHERE kind = 'calendar-change' OR source_type = 'calendar'/,
+    );
+    expect(widen!.downSql).toMatch(
+      /CHECK \(kind IN \('brief', 'escalation', 'custom'\)\)/,
+    );
+    expect(widen!.downSql).toMatch(
+      /CHECK \(source_type IN \('escalation', 'brief', 'run'\)\)/,
+    );
   });
 });
 

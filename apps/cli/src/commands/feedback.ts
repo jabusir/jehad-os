@@ -103,7 +103,7 @@ export async function runFeedbackCommand(
 
   const db = (deps.connect ?? defaultFactory)(deps.databaseUrl);
   try {
-    if (parsed.recent) {
+    if ("recent" in parsed && parsed.recent) {
       const rows = await listFeedback(db, { limit: 20 });
       if (rows.length === 0) {
         out.write("no feedback recorded yet\n");
@@ -112,7 +112,7 @@ export async function runFeedbackCommand(
       }
       return 0;
     }
-    if (parsed.candidates) {
+    if ("candidates" in parsed) {
       return await renderCandidates(db, out);
     }
     const { feedback, deduped } = await recordFeedback(

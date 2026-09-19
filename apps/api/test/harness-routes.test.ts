@@ -32,6 +32,10 @@ describe.skipIf(!TEST_DATABASE_URL)("harness routes — owner CAN/CANNOT checkli
   let personalDomainId: string;
   let deliverToken: string;
   let readToken: string;
+  // E4-S: the send-only iMessage edge principal + its single narrow grant.
+  let edgeHarnessId: string;
+  let edgeCredential: string;
+  let sendChannelToken: string;
 
   beforeAll(async () => {
     db = await createIsolatedTestDb(TEST_DATABASE_URL!, "apiharness");
@@ -54,6 +58,13 @@ describe.skipIf(!TEST_DATABASE_URL)("harness routes — owner CAN/CANNOT checkli
       name: "worker-bot",
       credentialHash: sha256Hex(SERVICE_CREDENTIAL),
     });
+    edgeCredential = randomBytes(32).toString("hex");
+    const edgeHarness = await upsertPrincipalCredential(db.pool, {
+      type: "harness",
+      name: "imessage-local",
+      credentialHash: sha256Hex(edgeCredential),
+    });
+    edgeHarnessId = edgeHarness.id;
     const domain = await db.pool.query(`SELECT id FROM domains WHERE key = 'personal'`);
     personalDomainId = String(domain.rows[0].id);
 
@@ -94,6 +105,16 @@ describe.skipIf(!TEST_DATABASE_URL)("harness routes — owner CAN/CANNOT checkli
     });
     deliverToken = deliver.token;
     readToken = read.token;
+    // E4-S: the imessage-local edge holds ONLY the send-channel capability.
+    const sendChannel = await issueGrant(db.pool, {
+      principalId: edgeHarnessId,
+      runId: null,
+      capability: "send_channel:imessage",
+      resource: "notifications",
+      domainId: personalDomainId,
+      ttlMs: 60 * 60_000,
+    });
+    sendChannelToken = sendChannel.token;
   }
 
   async function grantDenials(): Promise<string[]> {
@@ -499,6 +520,87 @@ describe.skipIf(!TEST_DATABASE_URL)("harness routes — owner CAN/CANNOT checkli
     });
     expect(revokedClaim.statusCode).toBe(403);
     expect(revokedClaim.json().code).toBe("revoked");
+  });
+
+  // ------------------------------------------------------- E4-S capability alias
+
+  function edgeHeaders(token?: string): Record<string, string> {
+    const headers: Record<string, string> = { authorization: `Bearer ${edgeCredential}` };
+    if (token !== undefined) headers["x-capability-token"] = token;
+    return headers;
+  }
+
+  it("E4-S: imessage-local + send_channel:imessage grant CAN claim and deliver (the whole edge surface)", async () => {
+    await mintGrants(); // refresh the openclaw tokens other tests consume
+    const id = await seededApprovedNotification();
+
+    const claim = await app.inject({
+      method: "POST",
+      url: "/harness/notifications/claim",
+      headers: edgeHeaders(sendChannelToken),
+    });
+    expect(claim.statusCode).toBe(200);
+    expect(claim.json().notification.id).toBe(id);
+
+    const delivered = await app.inject({
+      method: "POST",
+      url: `/harness/notifications/${id}/delivered`,
+      headers: edgeHeaders(sendChannelToken),
+    });
+    expect(delivered.statusCode).toBe(200);
+    expect(delivered.json().notification).toMatchObject({ id, status: "delivered" });
+
+    // The audit chain records WHICH capability authorized the cycle.
+    const capability = await db.pool.query(
+      `SELECT cg.capability FROM audit_log a
+        JOIN capability_grants cg ON cg.id = a.grant_id
+        WHERE a.action = 'notification.claimed'
+          AND a.outputs_ref::jsonb->>'notificationId' = $1`,
+      [id],
+    );
+    expect(capability.rows[0].capability).toBe("send_channel:imessage");
+    const claimOutputs = await db.pool.query(
+      `SELECT outputs_ref::jsonb->>'grantCapability' AS cap FROM audit_log
+        WHERE action = 'notification.claimed' AND outputs_ref::jsonb->>'notificationId' = $1`,
+      [id],
+    );
+    expect(claimOutputs.rows[0].cap).toBe("send_channel:imessage");
+  });
+
+  it("E4-S: imessage-local CANNOT read state-summary (send-only principal, wrong capability) — denied + audited", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/harness/state-summary",
+      headers: edgeHeaders(sendChannelToken),
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().code).toBe("wrong_capability");
+    const outputs = await db.pool.query(
+      `SELECT outputs_ref::jsonb AS o FROM audit_log
+        WHERE action = 'harness.grant_denied' AND actor = 'harness:imessage-local'
+        ORDER BY created_at DESC LIMIT 1`,
+    );
+    expect(outputs.rows[0].o.reason).toBe("wrong_capability");
+    // The denial audit records the seam's accepted list (state-summary has no alias).
+    expect(outputs.rows[0].o.capabilities).toEqual(["read:state-summary"]);
+  });
+
+  it("E4-S: BOTH capabilities accepted at the claim seam — deliver:notifications still works alongside the alias", async () => {
+    await mintGrants();
+    const id = await seededApprovedNotification();
+    const claim = await app.inject({
+      method: "POST",
+      url: "/harness/notifications/claim",
+      headers: harnessHeaders(deliverToken), // the ORIGINAL capability
+    });
+    expect(claim.statusCode).toBe(200);
+    expect(claim.json().notification.id).toBe(id);
+    const claimOutputs = await db.pool.query(
+      `SELECT outputs_ref::jsonb->>'grantCapability' AS cap FROM audit_log
+        WHERE action = 'notification.claimed' AND outputs_ref::jsonb->>'notificationId' = $1`,
+      [id],
+    );
+    expect(claimOutputs.rows[0].cap).toBe("deliver:notifications");
   });
 
   // ------------------------------------------------------- boundary hygiene

@@ -4,7 +4,14 @@
  *
  *   GET  /harness/state-summary           grant read:state-summary
  *   POST /harness/notifications/claim     grant deliver:notifications
- *   POST /harness/notifications/:id/delivered   grant deliver:notifications
+ *                                         OR send_channel:imessage (E4-S alias)
+ *   POST /harness/notifications/:id/delivered   same alias as claim
+ *
+ * The E4-S alias lets a send-only iMessage edge principal hold a grant that
+ * says exactly `send_channel:imessage` (nothing generic); the guard accepts
+ * either capability and the audit chain records which one authorized the
+ * call (grant_id → capability_grants.capability, plus the explicit
+ * grantCapability on claim/delivered audit rows).
  *
  * The harness authenticates with BOTH its bearer credential (setupAuth) and
  * its capability token (x-capability-token); the grant check is server-side
@@ -39,10 +46,18 @@ export interface HarnessRoutesOptions {
 
 const CAPABILITY_TOKEN_HEADER = "x-capability-token";
 
+/** The claim/delivered seam's accepted capabilities (E4-S alias included). */
+const DELIVER_CAPABILITIES: readonly string[] = [
+  HARNESS_CAPABILITIES.deliverNotifications,
+  HARNESS_CAPABILITIES.sendChannelImessage,
+];
+
 declare module "fastify" {
   interface FastifyRequest {
     /** Grant that authorized the current harness call (guard output). */
     harnessGrantId?: string | null;
+    /** Capability that authorized the current harness call (guard output). */
+    harnessCapability?: string | null;
   }
 }
 
@@ -62,7 +77,7 @@ type PreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<unkn
  */
 function requireHarnessGrant(
   db: PromotionDb,
-  capability: string,
+  capabilities: readonly string[],
   resource: string,
 ): PreHandler {
   return async (request: FastifyRequest, reply: FastifyReply) => {
@@ -72,13 +87,14 @@ function requireHarnessGrant(
       principalType: request.principal?.type,
       principalName: request.principal?.name,
       capabilityToken: typeof header === "string" ? header : undefined,
-    }, { capability, resource });
+    }, { capabilities, resource });
     if (!decision.allowed) {
       return await reply
         .code(decision.status)
         .send({ error: "forbidden", code: decision.code });
     }
     request.harnessGrantId = decision.grantId;
+    request.harnessCapability = decision.capability;
   };
 }
 
@@ -97,7 +113,7 @@ export function registerHarnessRoutes(
 
   app.get(
     "/harness/state-summary",
-    { preHandler: [requireHarnessGrant(db, HARNESS_CAPABILITIES.stateSummary, "state-summary")] },
+    { preHandler: [requireHarnessGrant(db, [HARNESS_CAPABILITIES.stateSummary], "state-summary")] },
     async (request, reply) => {
       const [reviews, escalations, brief] = await Promise.all([
         db.query("SELECT count(*)::int AS n FROM memory_candidates WHERE status = 'in_review'"),
@@ -142,13 +158,14 @@ export function registerHarnessRoutes(
 
   app.post(
     "/harness/notifications/claim",
-    { preHandler: [requireHarnessGrant(db, HARNESS_CAPABILITIES.deliverNotifications, "notifications")] },
+    { preHandler: [requireHarnessGrant(db, DELIVER_CAPABILITIES, "notifications")] },
     async (request, reply) => {
       const principal = request.principal!;
       const notification = await claimNextApprovedNotification(db, {
         claimedBy: principal.id,
         actor: actorFor(request),
         grantId: request.harnessGrantId ?? null,
+        grantCapability: request.harnessCapability ?? null,
       });
       return await reply.code(200).send({ notification });
     },
@@ -156,7 +173,7 @@ export function registerHarnessRoutes(
 
   app.post(
     "/harness/notifications/:id/delivered",
-    { preHandler: [requireHarnessGrant(db, HARNESS_CAPABILITIES.deliverNotifications, "notifications")] },
+    { preHandler: [requireHarnessGrant(db, DELIVER_CAPABILITIES, "notifications")] },
     async (request, reply) => {
       const { id } = request.params as { id: string };
       if (!UUID_RE.test(id)) {
@@ -168,6 +185,7 @@ export function registerHarnessRoutes(
           deliveredBy: principal.id,
           actor: actorFor(request),
           grantId: request.harnessGrantId ?? null,
+          grantCapability: request.harnessCapability ?? null,
         });
         return await reply.code(200).send({ notification });
       } catch (err) {
