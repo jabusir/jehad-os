@@ -13,6 +13,7 @@
     "eval": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/runner.ts",
     "eval:live": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/live.ts",
     "eval:compare": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/compare.ts",
+    "eval:models": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/model-routing.ts",
     "lint": "eslint .",
     "dev": "pnpm run build && pnpm -r --parallel --if-present run dev",
     "setup:db": "bash infra/dev/setup-db.sh",

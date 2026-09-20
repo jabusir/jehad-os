@@ -43,6 +43,7 @@ The edge node lives in a separate repo (`/Users/Shared/tito`).
 | `pnpm eval` | Golden-set extraction eval, hermetic fake provider (M5B); writes `evals/.last-hermetic.json` baseline |
 | `pnpm eval:live` | Same golden set through the real OpenRouter path (skips cleanly without `OPENROUTER_API_KEY`; budget + egress gated, spend reported) |
 | `pnpm eval:compare` | Hermetic-vs-live per-field comparison + `evals/.eval-report-<ts>.md`; gates (F1 ≥ 0.80, action-precision ≥ 0.90) enforced against the live numbers |
+| `pnpm eval:models` | Gateway route+answer model comparison on real prompts/parsers (lane R2; fixtures `evals/model-routing.fixtures.json`, results `docs/evals/model-routing-2026-09.*`; live via OPENROUTER_API_KEY, `EVAL_RESCORE=1` re-scores offline) |
 
 ## Commit style
 
