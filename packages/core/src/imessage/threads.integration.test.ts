@@ -518,6 +518,30 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     expect(auditRow.rows).toHaveLength(1);
   });
 
+  it("H-PROPOSE: full details (location, guests, note) ride through to the render — the Henna follow-up", async () => {
+    await grant(jehadId);
+    queue = [
+      {
+        text: '{"reply_kind":"action","action":"calendar.create","title":"Henna","day":"tomorrow","time":"2pm","end_time":"11pm","duration_minutes":null,"location":"15038 River Rock, Fontana CA","description":"bring snacks","attendees":["SAM@example.com","lea@example.com","sam@example.com"]}',
+      },
+    ];
+    await turn(jehadId, JEHAD, "add Henna tomorrow from 2pm to 11pm at 15038 River Rock, invite SAM@example.com and lea@example.com");
+    const reply = (
+      await db.pool.query(
+        "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
+      )
+    ).rows[0]!.c as string;
+    expect(reply).toContain("Location: 15038 River Rock, Fontana CA");
+    expect(reply).toContain("Guests: sam@example.com, lea@example.com");
+    const payload = (
+      await db.pool.query(
+        "SELECT payload FROM action_intents WHERE status = 'proposed' ORDER BY created_at DESC LIMIT 1",
+      )
+    ).rows[0]!.payload;
+    expect(payload.description).toBe("bring snacks");
+    expect(payload.attendees).toEqual(["sam@example.com", "lea@example.com"]);
+  });
+
   it("H-PROPOSE: no time given → deterministic clarification, nothing proposed", async () => {
     await grant(jehadId);
     queue = [
