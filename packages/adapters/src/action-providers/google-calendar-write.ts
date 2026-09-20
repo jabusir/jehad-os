@@ -2,8 +2,9 @@
  * Google Calendar WRITE ActionProvider (Phase H;
  * docs/plans/ig-phase-h-contracts.md §1–§3) — the first real external
  * side-effect provider. Exactly ONE operation: events.insert on the owner's
- * primary calendar. Deletes, modifications, invitees, recurrence are
- * permanently not-now for v1 (contract §10).
+ * primary calendar. Deletes, modifications, recurrence are permanently
+ * not-now for v1 (contract §10); the event-details lane adds optional
+ * location/description/attendees to the SAME single operation.
  *
  * Honesty contract (ADR-0011 T13): this provider NEVER retries a write —
  * the M4B attempt machinery owns retries (idempotency keys are inherited
@@ -64,6 +65,11 @@ export interface CalendarEventInput {
   readonly endIso: string;
   /** ESCALATE-2 default: agent-created events insert as `tentative`. */
   readonly tentative: boolean;
+  /** Optional event details (event-details lane) — sent only when present. */
+  readonly location?: string;
+  readonly description?: string;
+  /** Guest emails — dispatched verbatim; invites go out (sendUpdates=all). */
+  readonly attendees?: readonly string[];
   readonly intentId: string;
   readonly idempotencyKey: string;
 }
@@ -132,13 +138,21 @@ export function createGoogleCalendarWriteProvider(
     async createEvent(input: CalendarEventInput): Promise<{ readonly eventId: string }> {
       const token = await resolveToken();
       // Conferencing off: no conferenceDataVersion param, no conferenceData
-      // field — v1 events never create meeting links. Attendees, recurrence,
-      // description, location are structurally absent (contract §4/§5).
+      // field — v1 events never create meeting links. Recurrence and
+      // reminders remain structurally absent; location/description/attendees
+      // ride ONLY when present (event-details lane — guests were already
+      // shown verbatim in the confirm render, so sendUpdates=all is
+      // explicit: guests get their invites).
       const body = JSON.stringify({
         summary: input.title,
         status: input.tentative ? "tentative" : "confirmed",
         start: { dateTime: input.startIso, timeZone },
         end: { dateTime: input.endIso, timeZone },
+        ...(input.location ? { location: input.location } : {}),
+        ...(input.description ? { description: input.description } : {}),
+        ...(input.attendees && input.attendees.length > 0
+          ? { attendees: input.attendees.map((email) => ({ email })) }
+          : {}),
         extendedProperties: {
           private: {
             idempotencyKey: input.idempotencyKey,
@@ -148,7 +162,7 @@ export function createGoogleCalendarWriteProvider(
       });
       let response: Response;
       try {
-        response = await doFetch(eventsUrl, {
+        response = await doFetch(`${eventsUrl}?sendUpdates=all`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${token}`,
@@ -221,6 +235,9 @@ export function createGoogleCalendarWriteProvider(
       const startIso = payload?.["startIso"];
       const endIso = payload?.["endIso"];
       const tentative = payload?.["tentative"];
+      const location = payload?.["location"];
+      const description = payload?.["description"];
+      const attendees = payload?.["attendees"];
       if (
         typeof title !== "string" ||
         typeof startIso !== "string" ||
@@ -231,11 +248,32 @@ export function createGoogleCalendarWriteProvider(
           "google-calendar-write: intent payload must carry { title, startIso, endIso, tentative }",
         );
       }
+      // Optional detail fields: absent/null → omitted; wrong shape → caller bug.
+      if (location !== undefined && location !== null && typeof location !== "string") {
+        throw new TypeError("google-calendar-write: payload location must be a string when present");
+      }
+      if (description !== undefined && description !== null && typeof description !== "string") {
+        throw new TypeError(
+          "google-calendar-write: payload description must be a string when present",
+        );
+      }
+      if (
+        attendees !== undefined &&
+        attendees !== null &&
+        !(Array.isArray(attendees) && attendees.every((a) => typeof a === "string"))
+      ) {
+        throw new TypeError(
+          "google-calendar-write: payload attendees must be an array of email strings when present",
+        );
+      }
       const { eventId } = await this.createEvent({
         title,
         startIso,
         endIso,
         tentative,
+        ...(typeof location === "string" ? { location } : {}),
+        ...(typeof description === "string" ? { description } : {}),
+        ...(Array.isArray(attendees) ? { attendees: attendees as readonly string[] } : {}),
         intentId: request.intentId,
         idempotencyKey: request.idempotencyKey,
       });

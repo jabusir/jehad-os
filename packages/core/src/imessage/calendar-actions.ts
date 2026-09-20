@@ -61,6 +61,10 @@ export const CALENDAR_TITLE_MAX_CHARS = 120;
 export const CALENDAR_DURATION_MIN_MS = 15 * 60_000;
 export const CALENDAR_DURATION_MAX_MS = 12 * 60 * 60_000;
 export const CALENDAR_START_MAX_AHEAD_MS = 14 * 24 * 60 * 60_000;
+export const CALENDAR_LOCATION_MAX_CHARS = 200;
+export const CALENDAR_DESCRIPTION_MAX_CHARS = 2000;
+export const CALENDAR_ATTENDEE_MAX_CHARS = 254;
+export const CALENDAR_ATTENDEES_MAX = 10;
 
 const CALENDAR_ACTOR = "system:imessage-gateway";
 
@@ -176,7 +180,10 @@ export type CalendarPayloadViolation =
   | "start-too-far"
   | "duration-too-short"
   | "duration-too-long"
-  | "duration-not-whole-minutes";
+  | "duration-not-whole-minutes"
+  | "location-too-long"
+  | "description-too-long"
+  | "attendees-invalid";
 
 const VIOLATION_PHRASES: Readonly<Record<CalendarPayloadViolation, string>> = {
   "title-missing": "a title is required",
@@ -188,7 +195,56 @@ const VIOLATION_PHRASES: Readonly<Record<CalendarPayloadViolation, string>> = {
   "duration-too-short": "the duration must be at least 15 minutes",
   "duration-too-long": "the duration must be at most 12 hours",
   "duration-not-whole-minutes": "the duration must be whole minutes",
+  "location-too-long": `the location must be at most ${CALENDAR_LOCATION_MAX_CHARS} characters`,
+  "description-too-long": `the description must be at most ${CALENDAR_DESCRIPTION_MAX_CHARS} characters`,
+  "attendees-invalid":
+    `guests must be valid email addresses — at most ${CALENDAR_ATTENDEES_MAX} unique ` +
+    `addresses, each at most ${CALENDAR_ATTENDEE_MAX_CHARS} characters`,
 };
+
+/** Email shape for guests: local@domain.tld, no whitespace. */
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Guest normalization (event-details lane): trim + lowercase each entry,
+ * dedupe preserving order, and drop the field to null when nothing
+ * remains. "invalid" = not an array of email-shaped strings within the
+ * §4 bounds (any entry >254 chars after trim, or >10 after dedupe).
+ */
+export type NormalizedCalendarAttendees = readonly string[] | "invalid" | null;
+
+export function normalizeCalendarAttendees(
+  raw: NormalizedCalendarAttendees | readonly string[] | null | undefined,
+): NormalizedCalendarAttendees {
+  if (raw === "invalid") return "invalid"; // idempotent sentinel pass-through
+  if (raw === null || raw === undefined) return null;
+  if (!Array.isArray(raw)) return "invalid";
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== "string") return "invalid";
+    const email = entry.trim().toLowerCase();
+    if (email.length === 0 || email.length > CALENDAR_ATTENDEE_MAX_CHARS) return "invalid";
+    if (!EMAIL_SHAPE.test(email)) return "invalid";
+    seen.add(email);
+  }
+  if (seen.size === 0) return null;
+  if (seen.size > CALENDAR_ATTENDEES_MAX) return "invalid";
+  return [...seen];
+}
+
+/** Location normalization: control-strip + redact (it renders in replies) + trim; null when absent. */
+function normalizeLocation(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const location = redactContent(raw.replaceAll(/[\p{C}\p{Cf}]/gu, "")).trim();
+  return location.length > 0 ? location : null;
+}
+
+/** Description normalization: control-strip + trim; null when absent (never rendered). */
+function normalizeDescription(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const description = raw.replaceAll(/[\p{C}\p{Cf}]/gu, "").trim();
+  return description.length > 0 ? description : null;
+}
 
 /**
  * Contract §4 payload table — deterministic, server-side, non-negotiable.
@@ -196,13 +252,28 @@ const VIOLATION_PHRASES: Readonly<Record<CalendarPayloadViolation, string>> = {
  * never sees the constraints as negotiable "guidelines".
  */
 export function validateCalendarPayload(
-  input: { readonly title: string; readonly startIso: string; readonly endIso: string },
+  input: {
+    readonly title: string;
+    readonly startIso: string;
+    readonly endIso: string;
+    readonly location?: string | null;
+    readonly description?: string | null;
+    readonly attendees?: NormalizedCalendarAttendees;
+  },
   now: Date,
 ): readonly CalendarPayloadViolation[] {
   const violations: CalendarPayloadViolation[] = [];
   const title = redactContent(input.title.replaceAll(/[\p{C}\p{Cf}]/gu, "")).trim();
   if (title.length === 0) violations.push("title-missing");
   else if (title.length > CALENDAR_TITLE_MAX_CHARS) violations.push("title-too-long");
+
+  const location = input.location?.trim() ?? "";
+  if (location.length > CALENDAR_LOCATION_MAX_CHARS) violations.push("location-too-long");
+  const description = input.description?.trim() ?? "";
+  if (description.length > CALENDAR_DESCRIPTION_MAX_CHARS) violations.push("description-too-long");
+  if (normalizeCalendarAttendees(input.attendees) === "invalid") {
+    violations.push("attendees-invalid");
+  }
 
   const start = Date.parse(input.startIso);
   if (Number.isNaN(start)) violations.push("start-unparsable");
@@ -264,16 +335,31 @@ export function formatDurationMs(durationMs: number): string {
   return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
 }
 
+/** Optional event details carried through render (description NEVER renders — too long for iMessage). */
+export interface CalendarProposalDetails {
+  readonly location?: string | null;
+  readonly description?: string | null;
+  readonly attendees?: readonly string[] | null;
+}
+
 /** Contract §8 "proposed / awaiting-confirm": one message, no model call. */
 export function renderCalendarProposal(
   _confirmToken: string,
   title: string,
   startIso: string,
   endIso: string,
+  details: CalendarProposalDetails = {},
 ): string {
+  const segments: string[] = [];
+  if (details.location !== undefined && details.location !== null) {
+    segments.push(` · Location: ${details.location}`);
+  }
+  if (details.attendees !== undefined && details.attendees !== null && details.attendees.length > 0) {
+    segments.push(` · Guests: ${details.attendees.join(", ")}`);
+  }
   return (
     `Calendar event proposed: "${title}" · ${formatCivilRange(startIso, endIso)} ` +
-    `(${formatDurationMs(Date.parse(endIso) - Date.parse(startIso))}) · your calendar. ` +
+    `(${formatDurationMs(Date.parse(endIso) - Date.parse(startIso))}) · your calendar${segments.join("")}. ` +
     `Reply "confirm" to add it, or "cancel" to drop it.`
   );
 }
@@ -328,16 +414,25 @@ function sha256Hex(text: string): string {
   return createHash("sha256").update(text, "utf-8").digest("hex");
 }
 
-/** Canonical JSON of the frozen action fields (sorted keys, written once). */
-export function canonicalActionPayload(action: {
+/** Frozen action fields hashed at propose and re-checked at confirm (binding). */
+export interface CalendarActionFields {
   readonly title: string;
   readonly startIso: string;
   readonly endIso: string;
   readonly tentative: boolean;
-}): string {
+  readonly location?: string | null;
+  readonly description?: string | null;
+  readonly attendees?: readonly string[] | null;
+}
+
+/** Canonical JSON of the frozen action fields (sorted keys, written once). */
+export function canonicalActionPayload(action: CalendarActionFields): string {
   return JSON.stringify({
     action: CALENDAR_ACTION_TYPE,
+    attendees: action.attendees ?? null,
+    description: action.description ?? null,
     endIso: action.endIso,
+    location: action.location ?? null,
     startIso: action.startIso,
     tentative: action.tentative,
     title: action.title,
@@ -345,12 +440,7 @@ export function canonicalActionPayload(action: {
 }
 
 /** Payload-hash binding (contract §4): sha256(intentId + canonical). */
-export function actionPayloadHash(intentId: string, action: {
-  readonly title: string;
-  readonly startIso: string;
-  readonly endIso: string;
-  readonly tentative: boolean;
-}): string {
+export function actionPayloadHash(intentId: string, action: CalendarActionFields): string {
   return sha256Hex(`${intentId}:${canonicalActionPayload(action)}`);
 }
 
@@ -427,6 +517,9 @@ interface IntentRow {
     readonly startIso?: unknown;
     readonly endIso?: unknown;
     readonly tentative?: unknown;
+    readonly location?: unknown;
+    readonly description?: unknown;
+    readonly attendees?: unknown;
     readonly provenance?: {
       readonly principalId?: unknown;
       readonly principalName?: unknown;
@@ -502,6 +595,10 @@ export interface ProposeCalendarActionInput {
   readonly title: string;
   readonly startIso: string;
   readonly endIso: string;
+  /** Optional event details (event-details lane) — validated, normalized, hash-bound. */
+  readonly location?: string | null;
+  readonly description?: string | null;
+  readonly attendees?: readonly string[] | null;
   readonly threadId?: string | null;
   readonly now: Date;
   readonly policy?: CalendarActionPolicy | null;
@@ -548,11 +645,20 @@ export async function proposeCalendarAction(
   }
 
   // 2. Payload constraints — deterministic gate before any intent exists.
-  const violations = validateCalendarPayload(input, now);
+  //    Details are normalized FIRST so validation sees exactly what is stored.
+  const location = normalizeLocation(input.location);
+  const description = normalizeDescription(input.description);
+  const attendees = normalizeCalendarAttendees(input.attendees);
+  const violations = validateCalendarPayload(
+    { ...input, location, description, attendees },
+    now,
+  );
   if (violations.length > 0) {
     await audit(db, "imessage.action.invalid", { violations });
     return { status: "invalid", reply: calendarInvalidReply(violations), violations };
   }
+  // Post-validation the sentinel is impossible — narrow to the stored shape.
+  const boundAttendees = attendees === "invalid" ? null : attendees;
 
   // 3. Proposal quota — UTC-day flood bound per principal (§7).
   const proposed = await proposalsToday(db, input.principalId, now);
@@ -594,6 +700,11 @@ export async function proposeCalendarAction(
       endIso: input.endIso,
       tentative: true, // ESCALATE-2 default
       calendar: "primary",
+      // Event details (null when absent) — frozen into the payload hash so
+      // confirm binds them exactly as rendered.
+      location,
+      description,
+      attendees: boundAttendees,
       provenance: {
         surface: CALENDAR_ACTION_SURFACE,
         principalId: input.principalId,
@@ -616,6 +727,9 @@ export async function proposeCalendarAction(
     startIso: input.startIso,
     endIso: input.endIso,
     tentative: true,
+    location,
+    description,
+    attendees: boundAttendees,
   });
   const expiresAt = new Date(now.getTime() + policy.confirmTtlMinutes * 60_000);
   await db.query(
@@ -647,7 +761,11 @@ export async function proposeCalendarAction(
     confirmToken,
     expiresAt,
     payloadHash,
-    render: renderCalendarProposal(confirmToken, title, input.startIso, input.endIso),
+    render: renderCalendarProposal(confirmToken, title, input.startIso, input.endIso, {
+      location,
+      description,
+      attendees: boundAttendees,
+    }),
   };
 }
 
@@ -865,26 +983,31 @@ async function confirmIntentRow(
   }
 
   // 5. Payload-hash binding — swap between render and confirm fails closed.
+  //    The canonical object includes location/description/attendees (?? null),
+  //    so every detail shown in the proposal render is bound at confirm.
   const storedHash = row.payload.confirm?.payloadSha256;
   const currentFields = {
     title: row.payload.title,
     startIso: row.payload.startIso,
     endIso: row.payload.endIso,
     tentative: row.payload.tentative,
+    location: row.payload.location ?? null,
+    description: row.payload.description ?? null,
+    attendees: row.payload.attendees ?? null,
   };
   const wellFormed =
     typeof storedHash === "string" &&
     typeof currentFields.title === "string" &&
     typeof currentFields.startIso === "string" &&
     typeof currentFields.endIso === "string" &&
-    typeof currentFields.tentative === "boolean";
+    typeof currentFields.tentative === "boolean" &&
+    (currentFields.location === null || typeof currentFields.location === "string") &&
+    (currentFields.description === null || typeof currentFields.description === "string") &&
+    (currentFields.attendees === null ||
+      (Array.isArray(currentFields.attendees) &&
+        currentFields.attendees.every((a) => typeof a === "string")));
   const currentHash = wellFormed
-    ? actionPayloadHash(row.intent.id, currentFields as {
-        title: string;
-        startIso: string;
-        endIso: string;
-        tentative: boolean;
-      })
+    ? actionPayloadHash(row.intent.id, currentFields as CalendarActionFields)
     : null;
   if (
     !wellFormed ||
