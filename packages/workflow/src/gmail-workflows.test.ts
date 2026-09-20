@@ -17,11 +17,21 @@ import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../te
 const mocks = vi.hoisted(() => ({
   syncGmail: vi.fn(),
   gmailTokenProvider: vi.fn(),
-  createGmailSource: vi.fn(() => ({ id: "adapter:gmail" })),
+  createGmailAdapter: vi.fn(() => fakeAdapter()),
   issueGrant: vi.fn(),
   verifyGrant: vi.fn(),
   revokeGrant: vi.fn(),
 }));
+
+function fakeAdapter() {
+  return {
+    id: "adapter:gmail",
+    historyList: vi.fn(),
+    bootstrapList: vi.fn(),
+    getMessage: vi.fn(),
+    profileHistoryId: vi.fn(),
+  };
+}
 
 vi.mock("@jehad/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@jehad/core")>();
@@ -44,7 +54,7 @@ vi.mock("@jehad/adapters", async (importOriginal) => {
   return {
     ...actual,
     gmailTokenProvider: mocks.gmailTokenProvider,
-    createGmailSource: mocks.createGmailSource,
+    createGmailAdapter: mocks.createGmailAdapter,
   };
 });
 
@@ -133,7 +143,7 @@ function fakeGrantDb() {
 beforeEach(() => {
   mocks.syncGmail.mockReset();
   mocks.gmailTokenProvider.mockReset();
-  mocks.createGmailSource.mockReset().mockImplementation(() => ({ id: "adapter:gmail" }));
+  mocks.createGmailAdapter.mockReset().mockImplementation(() => fakeAdapter());
   // mockClear (not reset): keeps the real-service delegation set in the
   // vi.mock factory, clears cross-test call counts.
   mocks.issueGrant.mockClear();
@@ -184,7 +194,7 @@ describe("gmail-sync no-token clean skip (plan §3.7)", () => {
 
 describe("gmail-sync tick (hermetic: contract seam + in-memory grants)", () => {
   it("mints, verifies, and revokes the gmail:ingest grant around every tick", async () => {
-    mocks.syncGmail.mockResolvedValue({ status: "ok", newEvents: 2 });
+    mocks.syncGmail.mockResolvedValue({ status: "ok", mode: "incremental", messages: [], emitted: 2, deduped: 0, nonInboxSkipped: 0, failed: 0, deferred: 0, capped: false, fullResync: false, cursorHistoryId: 1, health: {} });
     const db = fakeGrantDb();
     captureLogs();
 
@@ -210,15 +220,13 @@ describe("gmail-sync tick (hermetic: contract seam + in-memory grants)", () => {
   });
 
   it("calls syncGmail with the constructed adapter and the pinned actor", async () => {
-    mocks.syncGmail.mockResolvedValue({ status: "ok", newEvents: 0 });
-    const source = { id: "adapter:gmail" };
-    mocks.createGmailSource.mockImplementation(() => source);
+    mocks.syncGmail.mockResolvedValue({ status: "ok", mode: "incremental", messages: [], emitted: 0, deduped: 0, nonInboxSkipped: 0, failed: 0, deferred: 0, capped: false, fullResync: false, cursorHistoryId: 1, health: {} });
     captureLogs();
 
     await runGmailSyncTick(fakeGrantDb(), "tok");
 
-    expect(mocks.createGmailSource).toHaveBeenCalledTimes(1);
-    const constructed = mocks.createGmailSource.mock.calls[0]![0] as { tokenProvider: () => string };
+    expect(mocks.createGmailAdapter).toHaveBeenCalledTimes(1);
+    const constructed = mocks.createGmailAdapter.mock.calls[0]![0] as { tokenProvider: () => string };
     expect(constructed.tokenProvider()).toBe("tok");
     expect(mocks.syncGmail).toHaveBeenCalledTimes(1);
     const [syncDb, syncAdapter, syncOpts] = mocks.syncGmail.mock.calls[0]! as [
@@ -226,14 +234,14 @@ describe("gmail-sync tick (hermetic: contract seam + in-memory grants)", () => {
       unknown,
       { actor: string; now(): Date },
     ];
-    expect(syncAdapter).toBe(source);
+    expect((syncAdapter as { id: string }).id).toBe("adapter:gmail");
     expect(typeof syncDb.query).toBe("function");
     expect(syncOpts.actor).toBe(GMAIL_SYNC_ACTOR);
     expect(syncOpts.now()).toBeInstanceOf(Date);
   });
 
   it("logs a content-free JSON tick line (never the token)", async () => {
-    mocks.syncGmail.mockResolvedValue({ status: "ok", newEvents: 3 });
+    mocks.syncGmail.mockResolvedValue({ status: "ok", mode: "incremental", messages: [], emitted: 3, deduped: 0, nonInboxSkipped: 0, failed: 0, deferred: 0, capped: false, fullResync: false, cursorHistoryId: 1, health: {} });
     const logs = captureLogs();
 
     await runGmailSyncTick(fakeGrantDb(), "tok-secret");
@@ -279,9 +287,10 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail-sync tick (integration: real grant ta
 
   it("runs the full workflow fn against a real database: mint → verify → sync → revoke", async () => {
     const prevDatabaseUrl = process.env.DATABASE_URL;
+    const prevToken = process.env.GMAIL_ACCESS_TOKEN;
     process.env.DATABASE_URL = db.dsn;
-    mocks.gmailTokenProvider.mockResolvedValue("tok-integration");
-    mocks.syncGmail.mockResolvedValue({ status: "ok", newEvents: 5 });
+    process.env.GMAIL_ACCESS_TOKEN = "tok-integration";
+    mocks.syncGmail.mockResolvedValue({ status: "ok", mode: "bootstrap", messages: [], emitted: 5, deduped: 0, nonInboxSkipped: 0, failed: 0, deferred: 0, capped: false, fullResync: false, cursorHistoryId: 9, health: {} });
     const logs = captureLogs();
 
     try {
@@ -294,6 +303,8 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail-sync tick (integration: real grant ta
     } finally {
       if (prevDatabaseUrl === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = prevDatabaseUrl;
+      if (prevToken === undefined) delete process.env.GMAIL_ACCESS_TOKEN;
+      else process.env.GMAIL_ACCESS_TOKEN = prevToken;
     }
 
     const principal = await db.pool.query(

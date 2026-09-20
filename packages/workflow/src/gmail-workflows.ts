@@ -16,8 +16,22 @@
  */
 
 import { Pool } from "pg";
-import { issueGrant, revokeGrant, syncGmail, verifyGrant, type SqlExecutor } from "@jehad/core";
-import { createGmailSource, gmailTokenProvider } from "@jehad/adapters";
+import {
+  gmailSensorPolicyOf,
+  issueGrant,
+  parsePolicyV1,
+  revokeGrant,
+  syncGmail,
+  verifyGrant,
+  type GmailSyncPort,
+  type SqlExecutor,
+} from "@jehad/core";
+import {
+  createGmailAdapter,
+  gmailEnvOrKeychainTokenProvider,
+  isHistoryExpired as adapterHistoryExpired,
+  type GmailAdapter,
+} from "@jehad/adapters";
 import { defineScheduledWorkflow, type ScheduledWorkflowDefinition } from "./definition.js";
 
 export interface GmailSyncResult {
@@ -68,7 +82,7 @@ export async function runGmailSyncTick(db: SqlExecutor, token: string): Promise<
       throw new Error("gmail-sync: workflow principal or personal domain missing (pnpm setup:db / migrate)");
     }
 
-    const source = createGmailSource({ tokenProvider: () => token });
+    const source = gmailWorkflowPort(createGmailAdapter({ tokenProvider: () => token }));
     const issued = await issueGrant(db, {
       principalId: String(principalId),
       runId: null,
@@ -87,8 +101,9 @@ export async function runGmailSyncTick(db: SqlExecutor, token: string): Promise<
       if (!decision.allowed) {
         throw new Error(`gmail-sync: ${GMAIL_INGEST_CAPABILITY} grant denied (${decision.reason})`);
       }
-      const report = await syncGmail(db, source, { now: () => new Date(), policy: undefined, actor: GMAIL_SYNC_ACTOR });
-      const outcome: GmailSyncResult = { status: report.status, newEvents: report.newEvents };
+      const policy = await loadGmailSensorPolicy();
+      const report = await syncGmail(db, source, { now: () => new Date(), policy, actor: GMAIL_SYNC_ACTOR });
+      const outcome: GmailSyncResult = { status: report.status, newEvents: report.emitted };
       console.log(JSON.stringify({ workflow: "gmail-sync", ...outcome }));
       return outcome;
     } finally {
@@ -107,6 +122,67 @@ export async function runGmailSyncTick(db: SqlExecutor, token: string): Promise<
   }
 }
 
+/** Map the G1 adapter onto the G2 sync port, translating the adapter's
+ *  404-historyId-expiry error into the core-recognized error name. */
+function gmailWorkflowPort(adapter: GmailAdapter): GmailSyncPort {
+  return {
+    id: adapter.id,
+    hasToken: async () => true,
+    listBootstrapMessages: async (opts) => {
+      const page = await adapter.bootstrapList(opts.newerThanDays, opts);
+      return {
+        messages: page.messageIds,
+        nextPageToken: page.nextPageToken,
+        historyId: page.newestHistoryId ?? 0,
+      };
+    },
+    listHistory: async (opts) => {
+      let page;
+      try {
+        page = await adapter.historyList(opts.startHistoryId, opts);
+      } catch (err) {
+        if (adapterHistoryExpired(err)) {
+          throw Object.assign(new Error("gmail history cursor expired"), {
+            name: "GmailHistoryExpiredError",
+          });
+        }
+        throw err;
+      }
+      return {
+        records: page.records.map((r) => ({ id: r.historyId, messagesAdded: r.messages })),
+        nextPageToken: page.nextPageToken,
+        historyId: page.nextHistoryId ?? opts.startHistoryId,
+      };
+    },
+    getMessage: async (opts) => {
+      const m = await adapter.getMessage(opts.id);
+      return {
+        id: m.id,
+        threadId: m.threadId ?? "",
+        labelIds: m.labelIds,
+        internalDate: m.internalDate === null ? "" : String(m.internalDate),
+        sizeEstimate: m.sizeEstimate ?? null,
+        from: m.from,
+        to: [],
+        subject: m.subject,
+        textPlain: m.textPlain,
+      };
+    },
+  };
+}
+
+async function loadGmailSensorPolicy() {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const { resolve } = await import("node:path");
+    const file = process.env.POLICY_YAML_PATH ?? resolve(process.cwd(), "../../policy.yaml");
+    const policy = parsePolicyV1(await readFile(file, "utf8"));
+    return gmailSensorPolicyOf(policy);
+  } catch {
+    return undefined;
+  }
+}
+
 async function syncWithPool(): Promise<GmailSyncResult> {
   // gmailTokenProvider: GMAIL_ACCESS_TOKEN first, else the hourly refresher's
   // `jehad-gmail` Keychain item (the LaunchAgent sets no env). The provider
@@ -114,7 +190,7 @@ async function syncWithPool(): Promise<GmailSyncResult> {
   // the documented clean skip, not a thrown tick.
   let token: string;
   try {
-    token = await gmailTokenProvider();
+    token = await gmailEnvOrKeychainTokenProvider();
   } catch {
     console.log(JSON.stringify({ workflow: "gmail-sync", skipped: "no-token" }));
     return { skipped: "no-token" };
