@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   ACTION_TYPES,
   AUTONOMY_LEVELS,
+  DEFAULT_GMAIL_SENSOR_POLICY,
   decideAutonomy,
+  gmailSensorPolicyOf,
   loadPolicyFile,
   parsePolicyV1,
 } from "./ceiling";
@@ -335,5 +337,74 @@ describe("policy gateway.actions (Phase H action lane)", () => {
     expect(() =>
       parsePolicyV1(`${BASE}\ngateway:\n${ENTRY}\n${ENTRY}\n`),
     ).toThrow(/duplicate gateway.actions/);
+  });
+});
+
+describe("policy sensors.gmail (GMAIL §5/§10.3)", () => {
+  const ENTRY =
+    "  gmail: { enabled: true, poll_cron: \"*/5 * * * *\", bootstrap_window_days: 30, extract_senders: [billing@*, statements@*, *@stripe.com], max_messages_per_poll: 50, max_candidates_per_day: 20 }";
+
+  it("parses the strict ordered flow mapping onto GmailSensorPolicy", () => {
+    const policy = parsePolicyV1(`${VALID}\nsensors:\n${ENTRY}\n`);
+    expect(policy.sensors?.gmail).toEqual({
+      enabled: true,
+      pollCron: "*/5 * * * *",
+      bootstrapDays: 30,
+      extractSenders: ["billing@*", "statements@*", "*@stripe.com"],
+      maxMessagesPerPoll: 50,
+      maxCandidatesPerDay: 20,
+    });
+  });
+
+  it("absent section → gmailSensorPolicyOf returns fail-safe defaults (enabled:false)", () => {
+    const policy = parsePolicyV1(VALID);
+    expect(policy.sensors).toBeUndefined();
+    expect(gmailSensorPolicyOf(policy)).toEqual(DEFAULT_GMAIL_SENSOR_POLICY);
+    expect(DEFAULT_GMAIL_SENSOR_POLICY.enabled).toBe(false);
+    expect(DEFAULT_GMAIL_SENSOR_POLICY.bootstrapDays).toBe(30);
+    expect(DEFAULT_GMAIL_SENSOR_POLICY.maxMessagesPerPoll).toBe(50);
+    expect(DEFAULT_GMAIL_SENSOR_POLICY.extractSenders).toEqual([]);
+  });
+
+  it("disabled entry parses and stays explicit (kill switch, §9.4)", () => {
+    const policy = parsePolicyV1(
+      `${VALID}\nsensors:\n  gmail: { enabled: false, poll_cron: "*/15 * * * *", bootstrap_window_days: 7, extract_senders: [], max_messages_per_poll: 10, max_candidates_per_day: 5 }\n`,
+    );
+    expect(policy.sensors?.gmail).toMatchObject({ enabled: false, bootstrapDays: 7, maxMessagesPerPoll: 10 });
+  });
+
+  it("malformed gmail entries fail closed (shape, order, positivity, bad globs, unknown sensor keys)", () => {
+    const cases = [
+      "  gmail: { enabled: true }",
+      "  gmail: { enabled: true, poll_cron: \"*/5 * * * *\" }",
+      `  gmail: { poll_cron: "*/5 * * * *", enabled: true, bootstrap_window_days: 30, extract_senders: [], max_messages_per_poll: 50, max_candidates_per_day: 20 }`,
+      `  gmail: { enabled: maybe, poll_cron: "*/5 * * * *", bootstrap_window_days: 30, extract_senders: [], max_messages_per_poll: 50, max_candidates_per_day: 20 }`,
+      `  gmail: { enabled: true, poll_cron: unquoted, bootstrap_window_days: 30, extract_senders: [], max_messages_per_poll: 50, max_candidates_per_day: 20 }`,
+      `  gmail: { enabled: true, poll_cron: "*/5 * * * *", bootstrap_window_days: 0, extract_senders: [], max_messages_per_poll: 50, max_candidates_per_day: 20 }`,
+      `  gmail: { enabled: true, poll_cron: "*/5 * * * *", bootstrap_window_days: 30, extract_senders: [], max_messages_per_poll: 0, max_candidates_per_day: 20 }`,
+      `  gmail: { enabled: true, poll_cron: "*/5 * * * *", bootstrap_window_days: 30, extract_senders: [], max_messages_per_poll: 50, max_candidates_per_day: 0 }`,
+      `  gmail: { enabled: true, poll_cron: "*/5 * * * *", bootstrap_window_days: 30, extract_senders: [no-at-sign], max_messages_per_poll: 50, max_candidates_per_day: 20 }`,
+      `  gmail: { enabled: true, poll_cron: "*/5 * * * *", bootstrap_window_days: 30, extract_senders: [a@b@c], max_messages_per_poll: 50, max_candidates_per_day: 20 }`,
+      `  gmail: { enabled: true, poll_cron: "*/5 * * * *", bootstrap_window_days: 30, extract_senders: [billing@*], quiet_mode: true, max_messages_per_poll: 50, max_candidates_per_day: 20 }`,
+      "  slack: { enabled: true }",
+      "  gmail: just a string",
+    ];
+    for (const entry of cases) {
+      expect(() => parsePolicyV1(`${VALID}\nsensors:\n${entry}\n`), entry).toThrow();
+    }
+    expect(() => parsePolicyV1(`${VALID}\nsensors:\n${ENTRY}\n${ENTRY}\n`)).toThrow(/duplicate sensors.gmail/);
+    expect(() => parsePolicyV1(`${VALID}\nsensors:\nsensors:\n${ENTRY}\n`)).toThrow(/duplicate sensors/);
+  });
+
+  it("duplicate extract_senders entries collapse; the repo-root policy.yaml parses with the sensors section", async () => {
+    const policy = parsePolicyV1(
+      `${VALID}\nsensors:\n  gmail: { enabled: true, poll_cron: "* * * * *", bootstrap_window_days: 30, extract_senders: [billing@*, billing@*], max_messages_per_poll: 50, max_candidates_per_day: 20 }\n`,
+    );
+    expect(policy.sensors?.gmail?.extractSenders).toEqual(["billing@*"]);
+
+    const fromDisk = await loadPolicyFile(new URL("../../../../policy.yaml", import.meta.url));
+    expect(fromDisk.sensors?.gmail).toBeDefined();
+    expect(fromDisk.sensors?.gmail?.enabled).toBe(false); // fail-safe until ratified
+    expect(gmailSensorPolicyOf(fromDisk).maxCandidatesPerDay).toBe(20);
   });
 });

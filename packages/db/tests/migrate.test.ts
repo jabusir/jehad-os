@@ -21,6 +21,7 @@ const ALL_MIGRATIONS = [
   "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
   "004_commitments_domain", "005_commitments_temporal", "006_notifications",
   "007_calendar", "008_feedback", "009_notification_calendar_change", "010_imessage_sensor", "011_imessage_pairing", "012_interaction_threads", "013_review_refs", "014_confirm_token_unique",
+  "015_gmail_sensor",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -190,6 +191,31 @@ describe("migration files (fs only)", () => {
     expect(refs!.downSql).toMatch(/DROP TABLE IF EXISTS review_refs\b/);
   });
 
+  it("015 creates the gmail sync-state singleton with cursor + jsonb health; down drops it", async () => {
+    const migrations = await listMigrations();
+    const gmail = migrations.find((m) => m.name === "015_gmail_sensor");
+    expect(gmail).toBeDefined();
+    expect(gmail!.sql).toMatch(/CREATE TABLE gmail_sync_state\b/);
+    // Singleton pinned (the calendar cursor precedent).
+    expect(gmail!.sql).toMatch(/CHECK \(id = 'singleton'\)/);
+    expect(gmail!.sql).toMatch(/cursor_history_id\s+bigint/);
+    expect(gmail!.sql).toMatch(/health\s+jsonb NOT NULL DEFAULT '\{\}'::jsonb/);
+    expect(gmail!.sql).toMatch(/last_tick_at\s+timestamptz/);
+    // Health vocabulary constrained in SQL (jsonpath): five dims, three states.
+    expect(gmail!.sql).toMatch(
+      /jsonb_path_query_array\(health, '\$\.keyvalue\(\)\.key'\) <@ '\["process", "credential", "cursor", "decode", "quota"\]'/,
+    );
+    expect(gmail!.sql).toMatch(
+      /jsonb_path_query_array\(health, '\$\.keyvalue\(\)\.value'\) <@ '\["healthy", "degraded", "failed"\]'/,
+    );
+    // Privacy rule (§7): no content columns anywhere in the sensor state
+    // (column-shaped scan — comments may mention the rule itself).
+    expect(gmail!.sql).not.toMatch(/subject\s+text/);
+    expect(gmail!.sql).not.toMatch(/body\s+text/);
+    expect(gmail!.sql).not.toMatch(/snippet\s+text/);
+    expect(gmail!.downSql).toMatch(/DROP TABLE IF EXISTS gmail_sync_state\b/);
+  });
+
   it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {
     const migrations = await listMigrations();
     const guard = migrations.find((m) => m.name === "002_action_transition_guard");
@@ -251,6 +277,7 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate up/down (integration)", () => {
     expect(afterUp.has("sent_message_fingerprints")).toBe(true);
     expect(afterUp.has("imessage_sensor_state")).toBe(true);
     expect(afterUp.has("review_refs")).toBe(true);
+    expect(afterUp.has("gmail_sync_state")).toBe(true);
 
     const records = await pool.query<{ name: string }>("SELECT name FROM schema_migrations");
     expect(records.rows.map((r) => r.name)).toEqual([...ALL_MIGRATIONS]);
@@ -262,7 +289,7 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate up/down (integration)", () => {
     for (const table of [
       ...TABLES_001, "principals",
       "imessage_transport_events", "sent_message_fingerprints", "imessage_sensor_state",
-      "review_refs",
+      "review_refs", "gmail_sync_state",
     ]) {
       expect(afterDown.has(table)).toBe(false);
     }

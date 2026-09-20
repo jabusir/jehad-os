@@ -31,6 +31,11 @@ export const EVENT_CATALOG_V1 = [
   "calendar.event.created",
   "calendar.event.updated",
   "calendar.event.cancelled",
+  // GMAIL additive (inbox sensor): ONE observation type per received
+  // message; payload is content-free metadata for ALL senders (plan §4 —
+  // never body text, snippet, subject, or full addresses). Additive name
+  // only (ADR-0006); schemaVersion stays 1.
+  "gmail.message.received",
 ] as const;
 
 export type EventTypeName = (typeof EVENT_CATALOG_V1)[number];

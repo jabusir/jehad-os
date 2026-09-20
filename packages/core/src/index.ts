@@ -17,4 +17,5 @@ export * from "./feedback/index.js";
 export * from "./trust/index.js";
 export * from "./calendar/index.js";
 export * from "./imessage/index.js";
+export * from "./gmail/index.js";
 export * from "./memory/candidate-contract.js";
