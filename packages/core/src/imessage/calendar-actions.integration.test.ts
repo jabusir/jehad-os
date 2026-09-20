@@ -364,6 +364,17 @@ describe.skipIf(!TEST_DATABASE_URL)("iMessage calendar actions (integration)", (
     });
   });
 
+  it("payload binding: tampering description in the stored payload fails closed (C3 pin)", async () => {
+    const prop = await propose({ title: "Note", description: "original note" });
+    if (prop.status !== "proposed") throw new Error("propose failed");
+    await db.pool.query(
+      `UPDATE action_intents SET payload = jsonb_set(payload, '{description}', '"swapped note"') WHERE id = $1`,
+      [prop.intentId],
+    );
+    const out = await confirm(prop.confirmToken);
+    expect(out.status).toBe("payload-mismatch");
+  });
+
   it("confirm dispatch: the provider request carries location/description/attendees from the frozen payload", async () => {
     const provider = fakeWriteProvider("succeed");
     const prop = await propose({

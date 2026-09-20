@@ -355,7 +355,15 @@ export function renderCalendarProposal(
     segments.push(` · Location: ${details.location}`);
   }
   if (details.attendees !== undefined && details.attendees !== null && details.attendees.length > 0) {
-    segments.push(` · Guests: ${details.attendees.join(", ")}`);
+    const guestTail = ` · Guests: ${details.attendees.join(", ")}`;
+    const baseLen =
+      title.length + formatCivilRange(startIso, endIso).length +
+      formatDurationMs(Date.parse(endIso) - Date.parse(startIso)).length;
+    if (segments.join("").length + guestTail.length + baseLen + 120 > 1400) {
+      segments.push(` · Guests: ${details.attendees.length} invited — reply "guests" to list all`);
+    } else {
+      segments.push(guestTail);
+    }
   }
   return (
     `Calendar event proposed: "${title}" · ${formatCivilRange(startIso, endIso)} ` +
@@ -428,6 +436,7 @@ export interface CalendarActionFields {
 /** Canonical JSON of the frozen action fields (sorted keys, written once). */
 export function canonicalActionPayload(action: CalendarActionFields): string {
   return JSON.stringify({
+    v: 2,
     action: CALENDAR_ACTION_TYPE,
     attendees: action.attendees ?? null,
     description: action.description ?? null,
@@ -902,6 +911,28 @@ const CALENDAR_AMBIGUOUS_REPLY = "More than one proposal is open — reply with 
 export type SoleCalendarActionResult =
   | ({ readonly status: "none" | "ambiguous"; readonly reply: string })
   | ConfirmCalendarActionResult;
+
+/** Bare "guests": list the full invite list of the sole live proposal
+ *  (the render truncates long lists — the gate must never hide a guest). */
+export async function guestsSoleCalendarAction(
+  db: SqlExecutor,
+  input: { readonly principalId: string; readonly now: Date },
+): Promise<{ readonly status: string; readonly reply: string }> {
+  const sole = await soleLiveCalendarIntent(db, input);
+  if (sole.kind === "none") return { status: "none", reply: CALENDAR_NOTHING_PENDING_REPLY };
+  if (sole.kind === "ambiguous") return { status: "ambiguous", reply: CALENDAR_AMBIGUOUS_REPLY };
+  const rawAttendees = sole.row.payload.attendees;
+  const attendees = Array.isArray(rawAttendees)
+    ? rawAttendees.filter((a): a is string => typeof a === "string")
+    : [];
+  if (attendees.length === 0) {
+    return { status: "ok", reply: `No guests on the current proposal ("${sole.row.payload.title ?? "event"}").` };
+  }
+  return {
+    status: "ok",
+    reply: `Guests (${attendees.length}): ${attendees.join(", ")}`,
+  };
+}
 
 export async function confirmSoleCalendarAction(
   db: SqlExecutor,

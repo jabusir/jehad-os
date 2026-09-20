@@ -44,6 +44,7 @@ import {
 import {
   cancelSoleCalendarAction,
   confirmSoleCalendarAction,
+  guestsSoleCalendarAction,
   proposeCalendarAction,
   type CalendarActionPolicy,
 } from "./calendar-actions.js";
@@ -456,6 +457,17 @@ async function converseTurn(
       });
     }
     // Parsed as a command but not handled (grammar edge) — fall through.
+  }
+
+  // "guests": list the invite list of the sole live proposal (the render
+  // truncates long lists; the confirm gate must never hide a guest).
+  if (/^guests[.!]*$/i.test(input.text.trim())) {
+    const result = await guestsSoleCalendarAction(db, { principalId: input.principalId, now });
+    return deterministicReply(deps, input, ctx, {
+      content: result.reply,
+      outboundTrust: "system_generated",
+      marker: `action-guests-${result.status}`,
+    });
   }
 
   // Phase H resolver verbs: "confirm"/"cancel", optionally with a code,
