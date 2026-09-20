@@ -142,8 +142,15 @@ export function resolveDayBounds(
   return { dayStart: tomorrow.dayStart, dayEnd: tomorrow.dayEnd, dateIso: dayIso(tomorrow.dayStart) };
 }
 
+/** Civil date of the day's START in BRIEF_TIMEZONE (verifier C2 — a UTC
+ *  slice would mislabel days in zones east of UTC). */
 function dayIso(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: BRIEF_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
 }
 
 /** Execute one policy-approved read tool. Deterministic, read-only. */

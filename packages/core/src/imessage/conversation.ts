@@ -122,11 +122,14 @@ export function buildRoutingPrompt(text: string): string {
 }
 
 /** Phase E answer pass — grounded, coverage-honest, injection-bounded. */
+export type LookupNote = "denied" | "failed" | null;
+
 export function buildAnswerPrompt(
   principalName: string,
   model: string,
   text: string,
   results: readonly ReadToolResult[],
+  lookupNote: LookupNote = null,
 ): string {
   const lines = [
     `You are a helpful, concise assistant chatting over iMessage with ${principalName}.`,
@@ -145,6 +148,14 @@ export function buildAnswerPrompt(
     lines.push("END DATA");
     lines.push(
       "Coverage honesty: report what each queried source shows, and never imply you checked sources you did not. Prefer \"You have N calendar items tomorrow.\" plus \"I don't currently see any tracked commitments due then.\" over anything that sounds comprehensive. Times in the data are already rendered in the owner's timezone — quote them exactly as given; never convert, recalculate, or reformat them.",
+    );
+  } else if (lookupNote === "failed") {
+    lines.push(
+      "A data lookup was attempted but failed on the system side. Say plainly that you tried but could not retrieve the data right now — do not claim it is empty, and do not invent contents.",
+    );
+  } else if (lookupNote === "denied") {
+    lines.push(
+      "A data lookup was requested but this chat is not permitted to query it. Say plainly that you do not have access to that data for this chat.",
     );
   } else {
     lines.push(
@@ -317,6 +328,25 @@ async function converseTurn(
   const db = deps.db;
   const { handle, actor, policy, now, principalName } = ctx;
   if (isTextOnlyAttachment(input.text)) {
+    // Adversary 4b: the deterministic path consumes no model_calls, so the
+    // budget check below never applies — cap by reply notifications per
+    // rolling hour instead (same number, notifications table).
+    const hourAgo = new Date(now.getTime() - 60 * 60_000).toISOString();
+    const replies = await db.query(
+      `SELECT count(*)::int AS n FROM notifications
+        WHERE surface = $1 AND requesting_principal_id = $2::uuid
+          AND kind = 'reply' AND created_at >= $3::timestamptz`,
+      [CONVERSATION_SURFACE, input.principalId, hourAgo],
+    );
+    if (Number(replies.rows[0]?.n ?? 0) >= policy.requestsPerHour) {
+      await audit(db, actor, "imessage.converse.denied", {
+        reason: "over-requests-hour",
+        principalId: input.principalId,
+        handle,
+        deterministic: "attachment-only",
+      });
+      return { replied: false, reason: "over-requests-hour" };
+    }
     const createdBy = await resolveGatewayServicePrincipal(db);
     const notification = await createNotification(
       db,
@@ -417,6 +447,7 @@ async function converseTurn(
       const route = await dispatch(buildRoutingPrompt(input.text), ROUTE_PROMPT_VERSION);
       const parsed = parseRouteJson(route.result.text);
       const results: ReadToolResult[] = [];
+      let lookupNote: LookupNote = null;
       if (parsed !== null) {
         const source = readToolSource(parsed.tool);
         if (policy.reads.includes(source)) {
@@ -430,6 +461,7 @@ async function converseTurn(
             });
           } catch (err) {
             // Read failed — answer honestly without data (fail safe).
+            lookupNote = "failed";
             await audit(db, actor, "imessage.converse.tool_error", {
               principalId: input.principalId,
               handle,
@@ -438,6 +470,7 @@ async function converseTurn(
             });
           }
         } else {
+          lookupNote = "denied";
           await audit(db, actor, "imessage.converse.tool_denied", {
             principalId: input.principalId,
             handle,
@@ -447,7 +480,7 @@ async function converseTurn(
         }
       }
       const answer = await dispatch(
-        buildAnswerPrompt(String(principalName), policy.model, input.text, results),
+        buildAnswerPrompt(String(principalName), policy.model, input.text, results, lookupNote),
         CONVERSATION_PROMPT_VERSION,
       );
       replyText = capReplyText(answer.result.text);
@@ -490,6 +523,9 @@ async function converseTurn(
     principalId: input.principalId,
     handle,
     notificationId: notification.id,
+    // Adversary 7b: conjunction outcome — "pending" means the reply may
+    // never deliver; the audit must never imply it did.
+    notificationStatus: notification.status,
     runId,
     costUsd,
     model: policy.model,
@@ -535,12 +571,20 @@ export function gatewayPrincipalsFromPolicyV1(
   return policy?.gateway?.principals ?? {};
 }
 
-let defaultPrincipalPolicy: Promise<((name: string) => GatewayPrincipalPolicy | null)> | null = null;
+/**
+ * TTL-refreshed cache (adversary L2): revoking a principal's budgets or
+ * `reads` takes effect within POLICY_TTL_MS without a process restart.
+ * First load still throws loudly (startup surfaces malformed policy);
+ * a later transient read/parse failure keeps the LAST GOOD closure and
+ * retries next window — never silently deny-all, never sticky-broken.
+ */
+const POLICY_TTL_MS = 60_000;
+let policyCache: { at: number; fn: (principalName: string) => GatewayPrincipalPolicy | null } | null = null;
+let policyRead: Promise<(principalName: string) => GatewayPrincipalPolicy | null> | null = null;
 
 /**
  * The conversation budget source: repo-root policy.yaml
- * `gateway.principals`, read once per process (an explicit `file` always
- * re-reads; same caching discipline as loadNotificationsConfig).
+ * `gateway.principals` (an explicit `file` always re-reads fresh).
  */
 export async function loadConversationPrincipalPolicy(
   file?: string,
@@ -548,15 +592,25 @@ export async function loadConversationPrincipalPolicy(
   if (file !== undefined) {
     return principalPolicyFromPolicy(await loadPolicyFile(file));
   }
-  defaultPrincipalPolicy ??= (async () => {
+  if (policyCache !== null && Date.now() - policyCache.at < POLICY_TTL_MS) {
+    return policyCache.fn;
+  }
+  policyRead ??= (async () => {
     try {
-      return principalPolicyFromPolicy(parsePolicyV1(await readFile(defaultPolicyYamlPath(), "utf8")));
+      const fn = principalPolicyFromPolicy(parsePolicyV1(await readFile(defaultPolicyYamlPath(), "utf8")));
+      policyCache = { at: Date.now(), fn };
+      return fn;
     } catch (err) {
+      if (policyCache !== null) return policyCache.fn; // last good holds
       if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
-        return principalPolicyFromPolicy(null);
+        const fn = principalPolicyFromPolicy(null);
+        policyCache = { at: Date.now(), fn };
+        return fn;
       }
-      throw err;
+      throw err; // loud at first load — startup must surface bad policy
+    } finally {
+      policyRead = null;
     }
   })();
-  return defaultPrincipalPolicy;
+  return policyRead;
 }

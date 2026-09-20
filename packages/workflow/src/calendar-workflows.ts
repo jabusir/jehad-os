@@ -26,16 +26,20 @@ export interface CalendarSyncResult {
 async function syncWithPool(): Promise<CalendarSyncResult> {
   // envOrKeychainTokenProvider: GCALENDAR_ACCESS_TOKEN first, else the
   // hourly refresher's Keychain item (the LaunchAgent sets no env).
-  const token = await envOrKeychainTokenProvider();
+  let token: string;
+  try {
+    token = await envOrKeychainTokenProvider();
+  } catch {
+    // The provider THROWS when no token exists (env unset + keychain item
+    // missing) — map to the documented clean skip, not a thrown tick.
+    console.log(JSON.stringify({ workflow: "calendar-sync", skipped: "no-token" }));
+    return { skipped: "no-token" };
+  }
   const calendarId = process.env.GCALENDAR_ID ?? "primary";
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL ?? "postgres://localhost:5432/jehad",
   });
   try {
-    if (token === null || token.length === 0) {
-      console.log(JSON.stringify({ workflow: "calendar-sync", skipped: "no-token" }));
-      return { skipped: "no-token" };
-    }
     const source = createGoogleCalendarSource({ tokenProvider: async () => token, calendarId });
     // E4-S: the scheduled sensor enqueues calendar-change notifications for
     // disruptive near-term changes (48h filter + policy auto-approve gate).

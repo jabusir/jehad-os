@@ -159,11 +159,11 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage harness routes (integration)", () 
     const body = { batch, cursor: { rowid: 216996, db_generation: "gen-a" } };
     const first = await postIngest(body, sensorHeaders(ingestToken));
     expect(first.statusCode).toBe(200);
-    expect(first.json()).toEqual({ accepted: 2, duplicates: 0, fingerprint_matches: [] });
+    expect(first.json()).toEqual({ accepted: 2, duplicates: 0, fingerprint_matches: [], quarantined: [] });
 
     const second = await postIngest(body, sensorHeaders(ingestToken));
     expect(second.statusCode).toBe(200);
-    expect(second.json()).toEqual({ accepted: 0, duplicates: 2, fingerprint_matches: [] });
+    expect(second.json()).toEqual({ accepted: 0, duplicates: 2, fingerprint_matches: [], quarantined: [] });
 
     const count = await db.pool.query("SELECT count(*)::int AS n FROM imessage_transport_events");
     expect(Number(count.rows[0].n)).toBe(2);
@@ -186,18 +186,24 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage harness routes (integration)", () 
       sensorHeaders(ingestToken),
     );
     expect(notArray.statusCode).toBe(400);
+    // Row-level invalids QUARANTINE (200 + quarantined report — the sensor
+    // cursor must advance; adversary 8c), while batch-level malformations
+    // stay 400.
     const badStatus = await postIngest(
       { batch: [batchRow({ decoded_status: "garbage" })], cursor: { rowid: 1 } },
       sensorHeaders(ingestToken),
     );
-    expect(badStatus.statusCode).toBe(400);
+    expect(badStatus.statusCode).toBe(200);
+    expect(badStatus.json().quarantined).toHaveLength(1);
     const badCursor = await postIngest(
       { batch: [], cursor: { rowid: -1 } },
       sensorHeaders(ingestToken),
     );
     expect(badCursor.statusCode).toBe(400);
+    // Quarantine ADVANCES the cursor (poison rows must never wedge the
+    // pipeline); only the invalid-cursor 400 persisted nothing.
     const state = await db.pool.query(
-      "SELECT count(*)::int AS n FROM imessage_sensor_state WHERE cursor_rowid = 1 OR cursor_rowid = -1",
+      "SELECT count(*)::int AS n FROM imessage_sensor_state WHERE cursor_rowid = -1",
     );
     expect(Number(state.rows[0].n)).toBe(0);
   });

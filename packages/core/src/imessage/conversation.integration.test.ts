@@ -607,7 +607,14 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation phase E (integration)
     expect(outcome.replied).toBe(true);
     expect(provider.requests).toHaveLength(2);
     expect(provider.requests[0]!.prompt).toContain("ONLY one JSON object");
+    // Verifier C1: the router carries NO principal tokens at all.
+    expect(provider.requests[0]!.prompt).not.toContain("jehad");
+    expect(provider.requests[0]!.prompt).not.toContain("yusra");
+    expect(provider.requests[0]!.prompt).not.toContain("Jehad");
     const answerPrompt = provider.requests[1]!.prompt;
+    // Answer prompt: the greeting name only, never the other principal.
+    expect(answerPrompt).toContain("jehad");
+    expect(answerPrompt).not.toContain("yusra");
     expect(answerPrompt).toContain("BEGIN DATA");
     expect(answerPrompt).toContain("calendar events only; email, chat, and notes are not connected");
     expect(answerPrompt).toContain("Interview with Shahed");
@@ -670,7 +677,7 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation phase E (integration)
     await handleInbound(restrictedDeps, { principalId: jehadId, handle: JEHAD_HANDLE, text: "what do I owe?" });
     const actions = await auditActions();
     expect(actions).toContain("imessage.converse.tool_denied");
-    expect(provider.requests[1]!.prompt).toContain("No data lookup was performed");
+    expect(provider.requests[1]!.prompt).toContain("not permitted to query it");
   });
 
   it("commitments.waiting: overdue + due-soon land in the data block", async () => {
@@ -681,6 +688,23 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation phase E (integration)
     expect(answerPrompt).toContain("Pay internet bill");
     expect(answerPrompt).toContain("Book squash court");
     expect(answerPrompt).toContain("manually captured commitments in the world model only");
+  });
+
+  it("attachment-only flood is rate-capped by the same hourly limit (adversary 4b)", async () => {
+    const tightDeps: ConversationDeps = {
+      ...deps,
+      principalPolicy: () => ({ ...OWNER_POLICY, requestsPerHour: 1 }),
+    };
+    await grantConverse(jehadId);
+    const first = await handleInbound(tightDeps, {
+      principalId: jehadId, handle: JEHAD_HANDLE, text: "\uFFFC ",
+    });
+    expect(first.replied).toBe(true);
+    const second = await handleInbound(tightDeps, {
+      principalId: jehadId, handle: JEHAD_HANDLE, text: "\uFFFC ",
+    });
+    expect(second.replied).toBe(false);
+    expect(second.reason).toBe("over-requests-hour");
   });
 
   it("budget: a grounded turn consumes 2 requests; cap 2 denies the next turn", async () => {

@@ -111,11 +111,11 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage sensor service (integration)", () 
       event({ guid: "dup-3", rowid: 3, is_from_me: true, decoded_status: "own-ok" }),
     ];
     const first = await ingestBatch(db.pool, batch, { rowid: 3 });
-    expect(first).toEqual({ accepted: 3, duplicates: 0, fingerprint_matches: [] });
+    expect(first).toEqual({ accepted: 3, duplicates: 0, fingerprint_matches: [], quarantined: [] });
     expect(await countEvents()).toBe(3);
 
     const second = await ingestBatch(db.pool, batch, { rowid: 3 });
-    expect(second).toEqual({ accepted: 0, duplicates: 3, fingerprint_matches: [] });
+    expect(second).toEqual({ accepted: 0, duplicates: 3, fingerprint_matches: [], quarantined: [] });
     expect(await countEvents()).toBe(3); // exactly-once, not double rows
   });
 
@@ -125,6 +125,23 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage sensor service (integration)", () 
     expect(report.accepted).toBe(1);
     expect(report.duplicates).toBe(1);
     expect(await countEvents()).toBe(1);
+  });
+
+  it("a poison row is quarantined, not fatal: good rows ingest and the cursor advances (adversary 8c)", async () => {
+    const poison = { ...event({ guid: "poison-1", rowid: 11 }), content: "A".repeat(5001) };
+    const good = event({ guid: "good-8c", rowid: 12 });
+    const report = await ingestBatch(db.pool, [poison, good], { rowid: 12 });
+    expect(report.accepted).toBe(1);
+    expect(report.quarantined).toHaveLength(1);
+    expect(report.quarantined[0]).toMatchObject({ guid: "poison-1" });
+    // The good row's cursor persisted — the sensor will never resend.
+    const cursor = await db.pool.query("SELECT cursor_rowid FROM imessage_sensor_state");
+    expect(Number(cursor.rows[0].cursor_rowid)).toBe(12);
+    // ...and the quarantine is audited.
+    const q = await db.pool.query(
+      "SELECT count(*)::int AS n FROM audit_log WHERE action = 'imessage.ingest.quarantined'",
+    );
+    expect(q.rows[0].n).toBe(1);
   });
 
   it("cursor upserts in the same transaction: one singleton row, latest cursor wins", async () => {
@@ -232,24 +249,37 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage sensor service (integration)", () 
     expect(row.normalized_text_sha256).toBeNull();
   });
 
-  it("rejects malformed batches with ImessageInputError", async () => {
-    await expect(
-      ingestBatch(db.pool, [event({ decoded_status: "garbage" as never })], { rowid: 1 }),
-    ).rejects.toBeInstanceOf(ImessageInputError);
-    await expect(
-      ingestBatch(db.pool, [event({ normalized_text_sha256: "not-a-hash" })], { rowid: 1 }),
-    ).rejects.toBeInstanceOf(ImessageInputError);
-    await expect(
-      ingestBatch(db.pool, [event({ observed_at: "yesterday-ish" })], { rowid: 1 }),
-    ).rejects.toBeInstanceOf(ImessageInputError);
+  it("rejects malformed batches with ImessageInputError (row-level invalids quarantine instead)", async () => {
+    const quarantinedRow = await ingestBatch(
+      db.pool,
+      [event({ decoded_status: "garbage" as never })],
+      { rowid: 1 },
+    );
+    expect(quarantinedRow.quarantined).toHaveLength(1);
+    const quarantinedHash = await ingestBatch(
+      db.pool,
+      [event({ normalized_text_sha256: "not-a-hash" })],
+      { rowid: 1 },
+    );
+    expect(quarantinedHash.quarantined).toHaveLength(1);
+    const quarantinedTime = await ingestBatch(
+      db.pool,
+      [event({ observed_at: "yesterday-ish" })],
+      { rowid: 1 },
+    );
+    expect(quarantinedTime.quarantined).toHaveLength(1);
     await expect(ingestBatch(db.pool, [], { rowid: -5 })).rejects.toBeInstanceOf(ImessageInputError);
     await expect(
       ingestBatch(db.pool, "not-an-array" as never, { rowid: 1 }),
     ).rejects.toBeInstanceOf(ImessageInputError);
-    // Nothing partial persisted: validation happens before the transaction.
+    // No events persisted (all row-level invalids quarantined), and the
+    // quarantine path itself advanced the cursor exactly once (rowid 1).
     expect(await countEvents()).toBe(0);
-    const state = await db.pool.query("SELECT count(*)::int AS n FROM imessage_sensor_state");
-    expect(Number(state.rows[0].n)).toBe(0);
+    const state = await db.pool.query(
+      "SELECT count(*)::int AS n, max(cursor_rowid)::int AS cur FROM imessage_sensor_state",
+    );
+    expect(Number(state.rows[0].n)).toBe(1);
+    expect(Number(state.rows[0].cur)).toBe(1);
   });
 
   // ------------------------------------------------------------- health

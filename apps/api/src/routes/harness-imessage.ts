@@ -128,6 +128,7 @@ export function registerImessageHarnessRoutes(
           accepted: report.accepted,
           duplicates: report.duplicates,
           fingerprint_matches: report.fingerprint_matches,
+          quarantined: report.quarantined,
         });
       } catch (err) {
         if (err instanceof ImessageInputError) {

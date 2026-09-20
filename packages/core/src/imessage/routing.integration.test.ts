@@ -285,10 +285,12 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage ingest routing (integration)", () 
     expect(inbound).toHaveLength(1);
   });
 
-  it("content + pairing_attempt_hash together → 400 input error (fail closed)", async () => {
-    await expect(
-      ingest([event({ content: "x", pairing_attempt_hash: "a".repeat(64) })]),
-    ).rejects.toMatchObject({ code: "IMESSAGE_INPUT_INVALID" });
+  it("content + pairing_attempt_hash together → quarantined, never processed (fail closed, batch survives)", async () => {
+    // Adversary 8c contract: a bad row is rejected WITHOUT killing the
+    // batch (the old whole-batch throw froze the sensor cursor forever).
+    const report = await ingest([event({ content: "x", pairing_attempt_hash: "a".repeat(64) })]);
+    expect(report.accepted).toBe(0);
+    expect(report.quarantined).toHaveLength(1);
   });
 
   // ADVERSARIAL (pre-auth §5.1.1): unpaired sender with CONTENT while a

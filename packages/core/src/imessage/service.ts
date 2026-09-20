@@ -101,6 +101,9 @@ export interface ImessageIngestReport {
   readonly accepted: number;
   readonly duplicates: number;
   readonly fingerprint_matches: readonly ImessageFingerprintMatch[];
+  /** Adversary 8c: rows rejected at validation but quarantined (never
+   *  fatal to the batch); the sensor's cursor still advances. */
+  readonly quarantined: readonly { guid: string; reason: string }[];
 }
 
 export interface ImessageHealthInput {
@@ -351,7 +354,25 @@ export async function ingestBatch(
     throw new ImessageInputError(`batch exceeds the ${MAX_IMESSAGE_INGEST_BATCH}-row limit`);
   }
   validateCursor(cursor);
-  const rows = batch.map(validateTransportEvent);
+  // Adversary 8c (hardening): per-row validation with QUARANTINE — one
+  // bad row (e.g. oversized content from a paired handle) is audited and
+  // skipped while the rest of the batch proceeds and the sensor's cursor
+  // still advances. Batch-wide throw froze the cursor forever: a single
+  // 5000-char text killed the entire ingest pipeline (conversations,
+  // pairing, correlation) with no self-healing.
+  const valid: ValidatedTransportEvent[] = [];
+  const quarantined: { guid: string; reason: string }[] = [];
+  for (const row of batch) {
+    try {
+      valid.push(validateTransportEvent(row));
+    } catch (err) {
+      quarantined.push({
+        guid: typeof row?.guid === "string" ? row.guid.slice(0, 64) : "(unset)",
+        reason: err instanceof ImessageInputError ? err.message.slice(0, 120) : "invalid row",
+      });
+    }
+  }
+  const rows = valid;
   const now = (opts.now?.() ?? new Date()).toISOString();
   const actor = opts.actor ?? "harness:imessage-sensor";
 
@@ -368,6 +389,11 @@ export async function ingestBatch(
     });
   try {
     await client.query("BEGIN");
+    // Quarantined rows are audited inside the tx (atomic with the cursor
+    // advance) so a poison row can never wedge the pipeline (8c).
+    for (const q of quarantined) {
+      await routeAudit("imessage.ingest.quarantined", q);
+    }
     for (const row of rows) {
       const canonicalHandle = canonicalizeHandle(row.transport_handle);
       const inserted = await client.query(INSERT_EVENT_SQL, [
@@ -474,6 +500,7 @@ export async function ingestBatch(
     accepted,
     duplicates: rows.length - accepted,
     fingerprint_matches: matches,
+    quarantined,
   };
 }
 

@@ -91,7 +91,12 @@ export function classifyRow(
   const hasText = row.text !== null && row.text.length > 0;
   const blob = row.attributedBody;
 
-  let content: string | null = hasText ? row.text : null;
+  // Adversary 8c hardening: the server rejects content > 4000 chars —
+  // truncate BEFORE forwarding so one pasted log can never poison a batch.
+  const CAP = 4000;
+  const capContent = (text: string): string =>
+    text.length <= CAP ? text : text.slice(0, CAP - 14) + "…[truncated]";
+  let content: string | null = hasText ? capContent(row.text) : null;
   let status: SensorDecodedStatus = "not-attempted";
   let decodeAttempted = false;
   let decodeFailed = false;
@@ -100,7 +105,7 @@ export function classifyRow(
     decodeAttempted = true;
     const result = decode(blob);
     if (result.ok) {
-      content = result.text;
+      content = capContent(result.text);
     } else {
       decodeFailed = true;
       status = failedStatus(result);
