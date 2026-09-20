@@ -61,7 +61,7 @@ gateway:
   actions: { enabled: true, principals: [josctl], max_proposals_per_day: 10, max_dispatches_per_day: 5, confirm_ttl_minutes: 10 }
   principals:
     yusra: { model: openai/gpt-4o-mini, requests_per_hour: 20, cost_per_day: 2.0 }
-    josctl: { model: openai/gpt-4o-mini, requests_per_hour: 30, cost_per_day: 5.0, reads: [calendar, commitments] }
+    josctl: { model: openai/gpt-4o-mini, requests_per_hour: 30, cost_per_day: 5.0, reads: [calendar, commitments, gmail] }
 
 # sensors — cloud sensor policy (GMAIL; gmail-sensor-contracts.md §5/§10.3).
 # sensors.gmail: metadata ingest for ALL senders; deterministic extraction
@@ -70,4 +70,4 @@ gateway:
 # switch (§9.4): the sync grant fails closed and the sensor halts without
 # touching the Google credential. Absent section = same fail-safe defaults.
 sensors:
-  gmail: { enabled: false, poll_cron: "*/5 * * * *", bootstrap_window_days: 30, extract_senders: [billing@*, statements@*, *@stripe.com], max_messages_per_poll: 50, max_candidates_per_day: 20 }
+  gmail: { enabled: false, poll_cron: "*/5 * * *", bootstrap_window_days: 30, extract_senders: [billing@*, statements@*, *@stripe.com], max_messages_per_poll: 50, max_candidates_per_day: 20 }

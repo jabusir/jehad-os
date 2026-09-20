@@ -23,9 +23,10 @@ import { BRIEF_TIMEZONE } from "../briefs/timezone.js";
 export type ReadToolCall =
   | { readonly tool: "calendar.day"; readonly day: "today" | "tomorrow" }
   | { readonly tool: "calendar.next" }
-  | { readonly tool: "commitments.waiting" };
+  | { readonly tool: "commitments.waiting" }
+  | { readonly tool: "gmail.recent" };
 
-export type ReadSource = "calendar" | "commitments";
+export type ReadSource = "calendar" | "commitments" | "gmail";
 
 export interface ReadToolResult {
   readonly tool: string;
@@ -43,14 +44,28 @@ const CAP_DESCRIPTION = 160;
 const CAP_DAY_ROWS = 25;
 const CAP_NEXT_ROWS = 3;
 const CAP_WAITING_ROWS = 15;
+// Phase GMAIL §8: gmail.recent caps — sender-domain field truncation,
+// aggregate row cap 25, latest-arrivals bound 5. NEVER subjects/bodies.
+const CAP_GMAIL_DOMAIN = 80;
+const CAP_GMAIL_DOMAIN_ROWS = 25;
+const CAP_GMAIL_LATEST = 5;
+const GMAIL_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 const CALENDAR_COVERAGE =
   "calendar events only; email, chat, and notes are not connected";
 const COMMITMENTS_COVERAGE =
   "manually captured commitments in the world model only";
+// Coverage honesty (Phase GMAIL §8.4): Gmail = the owner's ONE connected
+// account, metadata only — never "email" in general, never message content.
+const GMAIL_COVERAGE =
+  "Gmail (your connected account): recent inbox arrivals, last 24h (metadata only; no subjects or bodies)";
+const GMAIL_NO_SENSOR_COVERAGE =
+  "no gmail events ingested — gmail sensor may not be enabled";
 
 export function readToolSource(tool: ReadToolCall["tool"]): ReadSource {
-  return tool === "commitments.waiting" ? "commitments" : "calendar";
+  if (tool === "commitments.waiting") return "commitments";
+  if (tool === "gmail.recent") return "gmail";
+  return "calendar";
 }
 
 /**
@@ -76,16 +91,62 @@ export function parseRouteJson(text: string): ReadToolCall | null {
     if (obj["day"] !== "today" && obj["day"] !== "tomorrow") return null;
     return { tool: "calendar.day", day: obj["day"] };
   }
-  if (obj["tool"] === "calendar.next" || obj["tool"] === "commitments.waiting") {
+  if (obj["tool"] === "calendar.next" || obj["tool"] === "commitments.waiting" || obj["tool"] === "gmail.recent") {
     if (keys.length !== 1) return null;
     return { tool: obj["tool"] } as ReadToolCall;
   }
   return null; // "none", unknown tools, garbage — all fail safe
 }
 
+/**
+ * The gmail.recent instruction line for the route pass (Phase GMAIL §8).
+ * buildRoutingPrompt is orchestrator-owned; the orchestrator splices this
+ * line in with the other tool lines. Pure constant — returns the exact
+ * route JSON plus its natural-language triggers.
+ */
+export function gmailRoutingLine(): string {
+  return '{"tool":"gmail.recent"} — asks what email arrived recently / what came in over email / inbox today';
+}
+
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : text.slice(0, max - 1) + "…";
 }
+
+// Phase GMAIL §8.1: deterministic SQL over gmail.message.received events
+// (contract §4: source `adapter:gmail`; content-free payloads — only
+// fromDomain + the event timestamp are ever read). Read-only SELECTs,
+// personal-domain-scoped like every other read. Lane G2 owns the sync
+// that emits these rows; if its source naming differs from the contract,
+// these constants are the single place to reconcile.
+const GMAIL_EVENT_TYPE = "gmail.message.received";
+const GMAIL_EVENT_SOURCE = "adapter:gmail";
+
+const GMAIL_DOMAIN_AGGREGATE_SQL = `
+  SELECT ev.payload->>'fromDomain' AS from_domain, count(*)::int AS n
+  FROM events ev JOIN domains d ON d.id = ev.domain_id
+  WHERE ev.type = $1 AND ev.source = $2
+    AND ev.occurred_at >= $3::timestamptz AND ev.occurred_at < $4::timestamptz
+    AND d.key = $5
+  GROUP BY ev.payload->>'fromDomain'
+  ORDER BY n DESC, from_domain ASC
+`;
+
+const GMAIL_LATEST_SQL = `
+  SELECT ev.occurred_at
+  FROM events ev JOIN domains d ON d.id = ev.domain_id
+  WHERE ev.type = $1 AND ev.source = $2
+    AND ev.occurred_at >= $3::timestamptz AND ev.occurred_at < $4::timestamptz
+    AND d.key = $5
+  ORDER BY ev.occurred_at DESC, ev.id DESC
+  LIMIT $6::int
+`;
+
+const GMAIL_SENSOR_EXISTS_SQL = `
+  SELECT 1 AS ok
+  FROM events ev JOIN domains d ON d.id = ev.domain_id
+  WHERE ev.type = $1 AND ev.source = $2 AND d.key = $3
+  LIMIT 1
+`;
 
 /**
  * Times are PRE-RENDERED server-side in BRIEF_TIMEZONE (deterministic
@@ -214,6 +275,53 @@ export async function executeReadTool(
           dueSoonCount: dueSoon.length,
           dueSoon: dueSoon.slice(0, CAP_WAITING_ROWS).map(item),
           otherOpenCount: otherOpen,
+        },
+      };
+    }
+    case "gmail.recent": {
+      // Last 24h rolling window, resolved server-side from the injected
+      // clock (deterministic, pinnable); half-open like every other read.
+      const windowStart = new Date(now.getTime() - GMAIL_WINDOW_MS);
+      const params = [
+        GMAIL_EVENT_TYPE,
+        GMAIL_EVENT_SOURCE,
+        windowStart.toISOString(),
+        now.toISOString(),
+        BRIEF_DOMAIN_KEY,
+      ];
+      const [byDomain, latest, sensor] = await Promise.all([
+        query.query(GMAIL_DOMAIN_AGGREGATE_SQL, params),
+        query.query(GMAIL_LATEST_SQL, [...params, CAP_GMAIL_LATEST]),
+        query.query(GMAIL_SENSOR_EXISTS_SQL, [
+          GMAIL_EVENT_TYPE,
+          GMAIL_EVENT_SOURCE,
+          BRIEF_DOMAIN_KEY,
+        ]),
+      ]);
+      const domains = byDomain.rows.map((row) => ({
+        fromDomain:
+          row.from_domain === null || row.from_domain === undefined
+            ? null
+            : truncate(String(row.from_domain), CAP_GMAIL_DOMAIN),
+        count: Number(row.n ?? 0),
+      }));
+      const total = domains.reduce((sum, d) => sum + d.count, 0);
+      return {
+        tool: call.tool,
+        source: "gmail",
+        coverage:
+          sensor.rows.length > 0 ? GMAIL_COVERAGE : GMAIL_NO_SENSOR_COVERAGE,
+        data: {
+          timezone: BRIEF_TIMEZONE,
+          windowHours: GMAIL_WINDOW_MS / 3_600_000,
+          totalMessages: total,
+          domains: domains.slice(0, CAP_GMAIL_DOMAIN_ROWS),
+          truncated: domains.length > CAP_GMAIL_DOMAIN_ROWS,
+          // SQL LIMIT bounds the query; the slice re-asserts the cap at the
+          // render layer (contract §8.1) regardless of executor behavior.
+          latestTimes: latest.rows
+            .slice(0, CAP_GMAIL_LATEST)
+            .map((row) => hhmm(new Date(row.occurred_at as string))),
         },
       };
     }

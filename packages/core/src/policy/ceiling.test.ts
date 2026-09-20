@@ -227,7 +227,7 @@ describe("policy gateway section (multi-principal Lane P)", () => {
       model: "openai/gpt-4o-mini",
       requestsPerHour: 30,
       costPerDay: 5,
-      reads: ["calendar", "commitments"],
+      reads: ["calendar", "commitments", "gmail"], // gmail: Phase GMAIL §8.3
     });
     expect(policy.gateway?.actions).toEqual({
       enabled: true,
