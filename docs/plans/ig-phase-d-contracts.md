@@ -70,6 +70,7 @@ table. Phase D **deliberately changes this**, bounded:
 | --- | --- | --- |
 | `idle_hours` | 6 | gap ≥ this since `last_activity_at` → new thread |
 | `max_messages` | 40 | thread reaching this on inbound → new thread |
+| `max_thread_tokens` | 24000 | est. tokens across thread turns → new thread (derived via the deterministic estimator — no column) |
 | `window_max_messages` | 24 | window injection cap (count) |
 | `window_max_tokens` | 8000 | window injection cap (est. tokens) |
 | `window_max_age_hours` | 24 | window injection cap (age of oldest turn) |
