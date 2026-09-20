@@ -13,6 +13,7 @@ import { defineScheduledWorkflow, type ScheduledWorkflowDefinition } from "./def
 export interface ThreadRetentionResult {
   readonly messagesDeleted: number;
   readonly threadsDeleted: number;
+  readonly replyPayloadsRedacted: number;
 }
 
 async function retentionWithPool(): Promise<ThreadRetentionResult> {

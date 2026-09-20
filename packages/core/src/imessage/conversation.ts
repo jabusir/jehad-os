@@ -134,7 +134,11 @@ function renderHistoryBlock(history: WorkingContext | null): string[] {
       minute: "2-digit",
       timeZone: BRIEF_TIMEZONE,
     }).format(new Date(m.receivedAt));
-    lines.push(`[${who}, ${when}] ${m.content}`);
+    // Adversary POC-1: stored content is rendered with newlines flattened
+    // to a visible escape — multi-line payloads can never forge line-start
+    // BEGIN/END markers or impersonated transcript lines.
+    const flat = m.content.replace(/\r?\n/g, "\\n");
+    lines.push(`[${who}, ${when}] ${flat}`);
   }
   lines.push("END HISTORY");
   if (history.truncated) {
@@ -408,6 +412,21 @@ async function converseTurn(
     });
     return { replied: false, reason: "over-cost-day" };
   }
+  // Adversary 8a: deterministic replies (attachment/\new) consume no
+  // model_calls, so a mixed sequence could double the hourly reply cap.
+  // The model path honors the SAME notification counter.
+  const hourlyReplies = await replyNotificationsLastHour(db, input.principalId, now);
+  if (hourlyReplies >= policy.requestsPerHour) {
+    await audit(db, actor, "imessage.converse.denied", {
+      reason: "over-requests-hour",
+      principalId: input.principalId,
+      handle,
+      repliesLastHour: hourlyReplies,
+      cap: policy.requestsPerHour,
+      scope: "notifications",
+    });
+    return { replied: false, reason: "over-requests-hour" };
+  }
 
   // 3+4. One model call through the existing provider + egress path; the
   // ledger row carries principal_id + surface. callModel requires a run —
@@ -444,7 +463,11 @@ async function converseTurn(
     content: input.text.slice(0, 4000),
     receivedAt: now,
   });
-  const history = await buildWorkingContext(db, { threadId: thread.id, now });
+  const history = await buildWorkingContext(db, {
+    threadId: thread.id,
+    principalId: input.principalId,
+    now,
+  });
 
   let replyText: string;
   let costUsd: number;
@@ -586,6 +609,23 @@ async function converseTurn(
   return { replied: true, notificationId: notification.id };
 }
 
+/** Reply notifications for (principal, surface) in the rolling hour —
+ *  the shared outbound cap for model and deterministic turns (8a). */
+async function replyNotificationsLastHour(
+  db: ConversationDeps["db"],
+  principalId: string,
+  now: Date,
+): Promise<number> {
+  const hourAgo = new Date(now.getTime() - 60 * 60_000).toISOString();
+  const replies = await db.query(
+    `SELECT count(*)::int AS n FROM notifications
+      WHERE surface = $1 AND requesting_principal_id = $2::uuid
+        AND kind = 'reply' AND created_at >= $3::timestamptz`,
+    [CONVERSATION_SURFACE, principalId, hourAgo],
+  );
+  return Number(replies.rows[0]?.n ?? 0);
+}
+
 /** Deterministic (no-model) reply path shared by attachment-only inbound
  *  and /new reset: notification-hourly cap (adversary 4b), thread appends
  *  on BOTH sides (single canonical content path), audited with marker. */
@@ -602,14 +642,7 @@ async function deterministicReply(
 ): Promise<ConverseOutcome> {
   const db = deps.db;
   const { handle, actor, policy, now } = ctx;
-  const hourAgo = new Date(now.getTime() - 60 * 60_000).toISOString();
-  const replies = await db.query(
-    `SELECT count(*)::int AS n FROM notifications
-      WHERE surface = $1 AND requesting_principal_id = $2::uuid
-        AND kind = 'reply' AND created_at >= $3::timestamptz`,
-    [CONVERSATION_SURFACE, input.principalId, hourAgo],
-  );
-  if (Number(replies.rows[0]?.n ?? 0) >= policy.requestsPerHour) {
+  if (await replyNotificationsLastHour(db, input.principalId, now) >= policy.requestsPerHour) {
     await audit(db, actor, "imessage.converse.denied", {
       reason: "over-requests-hour",
       principalId: input.principalId,
@@ -624,15 +657,20 @@ async function deterministicReply(
     now,
     forceReset: opts.forceReset,
   });
-  await appendInteractionMessage(db, {
-    threadId: thread.id,
-    principalId: input.principalId,
-    surface: CONVERSATION_SURFACE,
-    direction: "inbound",
-    trustClass: "authenticated_user_intent",
-    content: input.text.slice(0, 4000),
-    receivedAt: now,
-  });
+  // The reset COMMAND itself never joins the fresh thread (verifier C4) —
+  // post-/new history starts clean. Non-reset deterministic turns (e.g.
+  // attachment-only) still record the inbound for continuity.
+  if (!opts.forceReset) {
+    await appendInteractionMessage(db, {
+      threadId: thread.id,
+      principalId: input.principalId,
+      surface: CONVERSATION_SURFACE,
+      direction: "inbound",
+      trustClass: "authenticated_user_intent",
+      content: input.text.slice(0, 4000),
+      receivedAt: now,
+    });
+  }
   const createdBy = await resolveGatewayServicePrincipal(db);
   const notification = await createNotification(
     db,

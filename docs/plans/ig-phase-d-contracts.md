@@ -1,5 +1,13 @@
 # Phase D contracts — bounded conversational threads
 
+**Implementation notes (2026-09-20, post-verifier reconciliation):**
+segmentation = idle-72h turnover + `/new`|`/reset` + window caps
+(20 messages / 6000 est-tokens / 72h age per turn) — the draft's
+idle-6h/max-40-message/max-24k-token turnover triggers were superseded by
+the owner spec's 72h model; stored inbound cap is 4000 chars (matches the
+ingest cap), reply cap 1500. Redaction (denylist masking) is NOT yet
+implemented — tracked as follow-up.
+
 **Owner decision (2026-09-20, ADR-0014):** bounded raw persistence
 APPROVED. Active working context 72h · raw retention 7-day rolling
 maximum (the earlier 30-day draft is REJECTED) · working/episodic only,

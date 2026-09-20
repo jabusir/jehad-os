@@ -197,10 +197,22 @@ export async function buildWorkingContext(
   opts: {
     readonly threadId: string;
     readonly now: Date;
+    /** REQUIRED (adversary 1b): the requesting principal — verified
+     *  against the thread owner; mismatch fails closed. Structurally
+     *  closes the WorkingContextProvider seam against foreign threads. */
+    readonly principalId: string;
     readonly maxMessages?: number;
     readonly tokenBudget?: number;
   },
 ): Promise<WorkingContext> {
+  const owner = await db.query(
+    `SELECT principal_id FROM interaction_threads WHERE id = $1::uuid`,
+    [opts.threadId],
+  );
+  const ownerId = owner.rows[0] === undefined ? undefined : String(owner.rows[0].principal_id);
+  if (ownerId !== opts.principalId) {
+    throw new Error("buildWorkingContext: thread does not belong to the requesting principal");
+  }
   const maxMessages = opts.maxMessages ?? CONTEXT_MAX_MESSAGES;
   const tokenBudget = opts.tokenBudget ?? CONTEXT_TOKEN_BUDGET;
   const activeSince = new Date(opts.now.getTime() - ACTIVE_CONTEXT_TTL_MS).toISOString();
@@ -256,6 +268,7 @@ export function createDefaultWorkingContextProvider(db: QueryExecutor): WorkingC
     async buildContext(input) {
       return buildWorkingContext(db, {
         threadId: input.threadId,
+        principalId: input.principalId,
         now: new Date(),
         tokenBudget: input.tokenBudget,
       });
@@ -266,10 +279,19 @@ export function createDefaultWorkingContextProvider(db: QueryExecutor): WorkingC
 /** Retention pass (§13): delete raw content past the 7-day horizon, delete
  *  expired empty threads, and report counts for audit/metrics — content
  *  NEVER enters the report. Idempotent by construction. */
+export interface RetentionReport {
+  readonly messagesDeleted: number;
+  readonly threadsDeleted: number;
+  /** Adversary 4d: gateway reply notifications whose payload content was
+   *  stripped at the 7d horizon (the row survives for delivery audit; the
+   *  quoted text does not). */
+  readonly replyPayloadsRedacted: number;
+}
+
 export async function enforceRetention(
   db: QueryExecutor,
   opts: { readonly now: Date } = { now: new Date() },
-): Promise<{ messagesDeleted: number; threadsDeleted: number }> {
+): Promise<RetentionReport> {
   const messages = await db.query(
     `DELETE FROM interaction_messages WHERE expires_at <= $1::timestamptz RETURNING id`,
     [opts.now.toISOString()],
@@ -281,9 +303,23 @@ export async function enforceRetention(
       RETURNING t.id`,
     [opts.now.toISOString()],
   );
+  // Replies QUOTE inbound text and grounded data — without this, the
+  // notification payload is an unbounded content store that outlives the
+  // 7-day horizon (ADR-0014's "single canonical path" would be false).
+  // Strip content only; the row + status remain the delivery audit trail.
+  const replies = await db.query(
+    `UPDATE notifications
+        SET payload = payload - 'content'
+      WHERE kind = 'reply' AND surface = 'imessage'
+        AND payload ? 'content'
+        AND created_at <= $1::timestamptz
+      RETURNING id`,
+    [new Date(opts.now.getTime() - RAW_RETENTION_MS).toISOString()],
+  );
   return {
     messagesDeleted: messages.rows.length,
     threadsDeleted: threads.rows.length,
+    replyPayloadsRedacted: replies.rows.length,
   };
 }
 
