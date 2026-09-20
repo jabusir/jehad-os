@@ -605,6 +605,44 @@ describe("decoder drift (loud stop)", () => {
     expect(loadSensorState(statePath)?.cursor_rowid).toBe(31);
     expect(h.logs.join("\n")).toContain("decoder recovered");
   });
+
+  it("sub-threshold decode failure degrades; an IDLE cycle (zero decode attempts) reports healthy again", async () => {
+    const dir = fixtureDir(root, "decoder-idle");
+    const dbPath = createFixtureChatDb(join(dir, "chat.db"), {
+      messages: [{ rowid: 10, guid: "g10", isFromMe: 0, text: "x" }],
+    });
+    const statePath = join(dir, "state.json");
+    seedState(statePath, 10);
+    // One malformed attributedBody row: a decode failure BELOW the drift
+    // threshold → degraded (not stopped), forwarding continues.
+    appendMessages(dbPath, [
+      { rowid: 11, guid: "bad11", isFromMe: 0, text: null, attributedBody: malformedBody() as Uint8Array },
+    ]);
+    const h = makeHarness({ dbPath, statePath, once: true });
+    const ctx = freshCtx(loadSensorState(statePath)!);
+
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now);
+    expect(ctx.health.decoder).toBe("degraded");
+    expect(ingestCalls(h.calls)).toHaveLength(1); // below threshold → still forwarding
+    const posted = healthCalls(h.calls).at(-1)!.body as { health_decoder: string };
+    expect(posted.health_decoder).toBe("degraded");
+
+    // Next cycle: quiet chat.db — no new rows, ZERO decode attempts. A
+    // stale 'degraded' would live on the dashboard forever; the honest
+    // per-cycle report is healthy (nothing is failing NOW).
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now);
+    expect(ctx.health.decoder).toBe("healthy");
+    expect(ingestCalls(h.calls)).toHaveLength(1); // still nothing to forward
+
+    // The failure RUN survived the idle cycle for drift accounting: the
+    // next decode failure degrades again immediately.
+    appendMessages(dbPath, [
+      { rowid: 12, guid: "bad12", isFromMe: 0, text: null, attributedBody: malformedBody() as Uint8Array },
+    ]);
+    await runSensorCycle(h.deps, h.config, ctx, h.clock.now);
+    expect(ctx.health.decoder).toBe("degraded");
+    expect(ingestCalls(h.calls)).toHaveLength(2);
+  });
 });
 
 describe("heartbeat + failure health", () => {

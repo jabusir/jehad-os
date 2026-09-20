@@ -143,9 +143,21 @@ export function registerImessageHarnessRoutes(
     "/harness/imessage/health",
     { preHandler: [requireHarnessGrant(db, SENSOR_GRANT.capabilities, SENSOR_GRANT.resource)] },
     async (request, reply) => {
+      // Same shape guard as ingest: a non-object body (null/array/scalar)
+      // would otherwise surface as a 500 TypeError below the route; the
+      // core module owns dim/details validation and maps to 400 via
+      // ImessageInputError.
+      const body = (request.body ?? null) as ImessageHealthInput | null;
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        return await reply.code(400).send({
+          error: "invalid_health_body",
+          message: "body must be a health report object",
+        });
+      }
       try {
-        await recordHealth(db, request.body as ImessageHealthInput, {
+        await recordHealth(db, body, {
           actor: actorFor(request),
+          grantId: request.harnessGrantId ?? null,
         });
         return await reply.code(200).send({
           paired_handles: await pairedHandles(db),

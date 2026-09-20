@@ -263,25 +263,53 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage harness routes (integration)", () 
     expect(after.health_decoder).toBe("degraded");
 
     const audits = await db.pool.query(
-      "SELECT outputs_ref::jsonb AS o FROM audit_log WHERE action = 'imessage.sensor.health'",
+      "SELECT grant_id, outputs_ref::jsonb AS o FROM audit_log WHERE action = 'imessage.sensor.health'",
     );
     expect(audits.rows.length).toBe(2);
     expect(audits.rows[0].o).toMatchObject({ details: { uptimeSeconds: 120 } });
+    // Health audit rows carry the harness grant id, like ingest's.
+    expect(audits.rows[0].grant_id).not.toBeNull();
   });
 
-  it("health with malformed dims maps to 400", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: "/harness/imessage/health",
-      headers: { ...sensorHeaders(ingestToken), "content-type": "application/json" },
-      payload: JSON.stringify({
-        health_process: "on-fire",
-        health_database: "healthy",
-        health_decoder: "healthy",
-        health_cursor: "healthy",
-        health_shadow: "healthy",
-      }),
-    });
-    expect(res.statusCode).toBe(400);
+  it("health with malformed bodies maps to 400 (bad dims, non-object details, non-object body)", async () => {
+    const valid = {
+      health_process: "healthy",
+      health_database: "healthy",
+      health_decoder: "healthy",
+      health_cursor: "healthy",
+      health_shadow: "healthy",
+    };
+    const healthAudits = async () =>
+      Number(
+        (
+          await db.pool.query(
+            "SELECT count(*)::int AS n FROM audit_log WHERE action = 'imessage.sensor.health'",
+          )
+        ).rows[0].n,
+      );
+    const before = await healthAudits();
+    const post = async (payload: string) =>
+      app.inject({
+        method: "POST",
+        url: "/harness/imessage/health",
+        headers: { ...sensorHeaders(ingestToken), "content-type": "application/json" },
+        payload,
+      });
+    // Bad dim (core module validation → ImessageInputError → 400).
+    const badDim = await post(JSON.stringify({ ...valid, health_decoder: "on-fire" }));
+    expect(badDim.statusCode).toBe(400);
+    expect(badDim.json()).toMatchObject({ error: "invalid_health_body" });
+    // Non-object details (array) — core module validation, same 400 path.
+    const arrayDetails = await post(JSON.stringify({ ...valid, details: ["nope"] }));
+    expect(arrayDetails.statusCode).toBe(400);
+    expect(arrayDetails.json()).toMatchObject({ error: "invalid_health_body" });
+    // Non-object body (would otherwise be a 500 TypeError below the route).
+    for (const payload of ["[]", '"nope"', "null"]) {
+      const nonObject = await post(payload);
+      expect(nonObject.statusCode).toBe(400);
+      expect(nonObject.json()).toMatchObject({ error: "invalid_health_body" });
+    }
+    // Nothing from the malformed posts reached the audit trail.
+    expect(await healthAudits()).toBe(before);
   });
 });
