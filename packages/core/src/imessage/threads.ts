@@ -13,6 +13,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { QueryExecutor } from "../queries/executor.js";
+import { redactContent } from "./redact.js";
 
 /** Active-context horizon (owner decision 2026-09-20). */
 export const ACTIVE_CONTEXT_TTL_MS = 72 * 60 * 60_000;
@@ -154,12 +155,22 @@ async function touchThread(
  * Append one message to a thread. Content lives ONLY here (canonical
  * path). Trust class is stamped by the caller per ADR-0014 §8; it never
  * confers authority — it only labels provenance for the context builder.
+ *
+ * Denylist redaction (Phase D §2.1) is applied HERE, the single choke
+ * point, so every stored message passes it: card numbers and
+ * bearer/api-token shapes are masked before persistence and can never
+ * survive the 7-day retention window nor replay into HISTORY prompts.
+ * Loop-defense lineage is unaffected: sent-message fingerprints
+ * (rendered_text_sha256) and sensor hashes (normalized_text_sha256) are
+ * computed UPSTREAM from RAW content at delivery/observation time —
+ * nothing hashes interaction_messages.content.
  */
 export async function appendInteractionMessage(
   db: QueryExecutor,
   input: AppendMessageInput,
 ): Promise<string> {
   const id = randomUUID();
+  const content = redactContent(input.content);
   await db.query(
     `INSERT INTO interaction_messages
        (id, thread_id, principal_id, surface, direction, trust_class,
@@ -173,8 +184,8 @@ export async function appendInteractionMessage(
       input.surface,
       input.direction,
       input.trustClass,
-      input.content,
-      estimateTokens(input.content),
+      content,
+      estimateTokens(content),
       input.receivedAt.toISOString(),
       new Date(input.receivedAt.getTime() + RAW_RETENTION_MS).toISOString(),
       input.sourceRef ?? null,

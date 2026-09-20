@@ -498,4 +498,32 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     expect(second.replied).toBe(false);
     expect(second.reason).toBe("over-requests-hour");
   });
+
+  it("DENYLIST REDACTION (Phase D §2.1): card numbers are masked in storage; the reply notification payload is NOT redacted (delivery channel, stripped at 7d)", async () => {
+    await grant(jehadId);
+    const replyText = "noted, charging 4111 1111 1111 1111 tomorrow"; // reply itself quotes a Luhn-valid card
+    queue = [{ text: '{"tool":"none"}' }, { text: replyText }];
+    await turn(jehadId, JEHAD, "my card is 4242 4242 4242 4242");
+
+    // Storage (the 7-day canonical path, replayed into HISTORY) is
+    // masked on BOTH sides of the turn.
+    const rows = await db.pool.query<{ direction: string; content: string }>(
+      `SELECT direction, content FROM interaction_messages ORDER BY received_at, id`,
+    );
+    expect(rows.rows).toHaveLength(2);
+    for (const r of rows.rows) {
+      expect(r.content).toContain("⦙redacted⦙");
+      expect(r.content).not.toMatch(/4242|4111/);
+    }
+    expect(rows.rows[0].direction).toBe("inbound");
+    expect(rows.rows[0].content).toContain("my card is");
+
+    // The reply notification is the DELIVERY channel, not storage: the
+    // payload keeps the FULL reply text (edge must render it); retention
+    // (enforceRetention) strips payload content at the 7d horizon.
+    const payload = await db.pool.query(
+      `SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply'`,
+    );
+    expect(payload.rows[0].c).toBe(replyText);
+  });
 });
