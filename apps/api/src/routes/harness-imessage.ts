@@ -76,6 +76,7 @@ let conversationDeps: Promise<{
   provider: ModelProvider;
   registry: Awaited<ReturnType<typeof loadEgressPolicyRegistry>>;
   principalPolicy: Awaited<ReturnType<typeof loadConversationPrincipalPolicy>>;
+  actionProvider: unknown;
 }> | null = null;
 
 export function registerImessageHarnessRoutes(
@@ -96,16 +97,24 @@ export function registerImessageHarnessRoutes(
         conversationDeps = Promise.all([
           loadEgressPolicyRegistry(),
           loadConversationPrincipalPolicy(),
-        ]).then(([registry, principalPolicy]) => ({
-          db,
-          provider: createOpenRouterProvider(),
-          registry,
-          principalPolicy,
-          actionProvider: createGoogleCalendarWriteProvider({
-            tokenProvider: envOrKeychainTokenProvider,
-            calendarId: process.env.GCALENDAR_ID ?? "primary",
-          }),
-        }));
+        ])
+          .then(([registry, principalPolicy]) => ({
+            db,
+            provider: createOpenRouterProvider(),
+            registry,
+            principalPolicy,
+            actionProvider: createGoogleCalendarWriteProvider({
+              tokenProvider: envOrKeychainTokenProvider,
+              calendarId: process.env.GCALENDAR_ID ?? "primary",
+            }),
+          }))
+          .catch((err: unknown) => {
+            // Reset memoization on failure: a transient (or loud, at
+            // startup-surface) config error must not wedge every later
+            // inbound until restart — the next request retries.
+            conversationDeps = null;
+            throw err;
+          });
       }
       try {
         const report = await ingestBatch(

@@ -486,6 +486,26 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     expect(denied.reason).toBe("over-requests-hour");
   });
 
+  it("TURN ORDER: control commands never reach the model; malformed control falls through bounded (verifier C3)", async () => {
+    await grant(jehadId);
+    // "approve [REF]" with no such ref: G handles it (bad-ref path), the
+    // model is NEVER called, and the reply is deterministic.
+    const callsBefore = provider.requests.length;
+    const outcome = await turn(jehadId, JEHAD, "approve [ZZZ]");
+    expect(outcome.replied).toBe(true);
+    expect(provider.requests.length).toBe(callsBefore); // zero model calls
+    // "confirm X" (H verb) also never reaches G or the model.
+    now = new Date(now.getTime() + 1000);
+    const confirmOutcome = await turn(jehadId, JEHAD, "confirm AAAAA");
+    expect(confirmOutcome.replied).toBe(true);
+    expect(provider.requests.length).toBe(callsBefore);
+    // Capture + control ordering: a "remember" line goes to capture, not chat.
+    now = new Date(now.getTime() + 1000);
+    const capOutcome = await turn(jehadId, JEHAD, "Remember that ordering tests matter.");
+    expect(capOutcome.replied).toBe(true);
+    expect(provider.requests.length).toBe(callsBefore); // capture is deterministic
+  });
+
   it("estimateTokens is deterministic (ceil chars/4), and /new also honors the deterministic rate cap", async () => {
     expect(estimateTokens("")).toBe(0);
     expect(estimateTokens("abcd")).toBe(1);

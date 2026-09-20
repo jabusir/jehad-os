@@ -227,6 +227,13 @@ describe("policy gateway section (multi-principal Lane P)", () => {
       costPerDay: 5,
       reads: ["calendar", "commitments"],
     });
+    expect(policy.gateway?.actions).toEqual({
+      enabled: true,
+      principals: ["josctl"],
+      maxProposalsPerDay: 10,
+      maxDispatchesPerDay: 5,
+      confirmTtlMinutes: 10,
+    });
     // Phase F/G gateway sub-policies land in the parsed policy.
     expect(policy.gateway?.capture).toEqual({
       enabled: true,

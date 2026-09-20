@@ -52,6 +52,7 @@ import {
   handleReviewCommand,
   mintReviewRef,
   parseReviewCommand,
+  type ReviewPolicy,
 } from "./review-commands.js";
 import {
   DEFAULT_CALENDAR_ACTION_POLICY,
@@ -414,12 +415,20 @@ async function converseTurn(
   // Phase G: review/control commands are exact-match and win over
   // everything conversational (gateway §3.1). Zero model calls.
   if (parseReviewCommand(input.text) !== null) {
-    const reviewOutcome = await handleReviewCommand(db, {
-      principalId: input.principalId,
-      principalName: String(principalName),
-      text: input.text,
-      now,
-    });
+    const gatewayPolicy = await loadConversationPolicyFile();
+    const reviewOutcome = await handleReviewCommand(
+      db,
+      {
+        principalId: input.principalId,
+        principalName: String(principalName),
+        text: input.text,
+        now,
+      },
+      {
+        egressRegistry: deps.registry,
+        ...reviewPolicyFromGateway(gatewayPolicy),
+      },
+    );
     if (reviewOutcome.handled) {
       if (reviewOutcome.reply === undefined) {
         // Bad-ref lockout: audited silent drop (no notification).
@@ -505,7 +514,18 @@ async function converseTurn(
   // short-circuits the model entirely (no route pass, no budget spend).
   // LLM-fallback routing rides the route pass in a later integration.
   if (matchCaptureIntent(input.text).triggered) {
-    const policy = deps.capturePolicy ?? DEFAULT_CAPTURE_POLICY;
+    const gatewayFile = await loadConversationPolicyFile();
+    const fileCapture = gatewayFile?.gateway?.capture;
+    const policy =
+      deps.capturePolicy ??
+      (fileCapture !== undefined
+        ? {
+            enabled: fileCapture.enabled,
+            principals: fileCapture.principals,
+            maxCandidatesPerHour: fileCapture.maxPerHour,
+            dedupeWindowHours: fileCapture.dedupeWindowHours,
+          }
+        : DEFAULT_CAPTURE_POLICY);
     const outcome = await considerCapture(db, {
       principalId: input.principalId,
       principalName: String(principalName),
@@ -818,7 +838,7 @@ async function deterministicReply(
     {
       kind: "reply",
       title: "Reply",
-      payload: { content: opts.content, recipient: handle },
+      payload: { content: capReplyText(opts.content), recipient: handle },
       recipient: handle,
       sourceType: "run",
       sourceId: null,
@@ -905,6 +925,25 @@ let policyRead: Promise<(principalName: string) => GatewayPrincipalPolicy | null
  * The conversation budget source: repo-root policy.yaml
  * `gateway.principals` (an explicit `file` always re-reads fresh).
  */
+/** Project gateway.review (policy.yaml) onto the module policy shape. */
+function reviewPolicyFromGateway(
+  policy: PolicyV1 | null,
+): { policy?: ReviewPolicy } {
+  const review = policy?.gateway?.review;
+  if (review === undefined) return {};
+  return {
+    policy: {
+      enabled: review.enabled,
+      principals: review.principals,
+      maxBadRefs: review.maxBadRefs,
+      snoozeHours: review.snoozeHours,
+      refTtlHours: review.refTtlHours,
+      digestMaxCandidates: review.digestMaxCandidates,
+      digestMaxEscalations: review.digestMaxEscalations,
+    },
+  };
+}
+
 /** TTL-cached full policy (gateway.actions projection; same 60s
  *  discipline as the principal cache below). */
 let gatewayFileCache: { at: number; policy: PolicyV1 | null } | null = null;
