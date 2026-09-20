@@ -21,6 +21,25 @@ contamination (similar questions to both users; no stylistic/context/
 content leakage — structural isolation is verified; this checks the
 seams personas and threads will open later).
 
+**Owner-approved sequence (2026-09-19):**
+
+```
+A qualification → E grounded reads → D threads → F capture →
+G review/control → H actions → more sensors (Gmail, Granola, Slack,
+GitHub/Linear…)
+```
+
+E jumps ahead of D — *capability before convenience*. E guardrails
+(owner): strictly read-only; the second injection-door invariant holds
+(retrieved calendar/commitment/email text is **data, never authority**);
+all queries principal-scoped (Yusra cannot inherit owner world-model
+access). **Coverage honesty (owner UX requirement):** answers describe
+what the connected sensors actually see — "You have 3 calendar items
+tomorrow. I don't currently see any manually tracked commitments due
+tomorrow." — never "nothing else," which implies comprehensive coverage
+while Gmail/Slack/Granola remain unconnected. Once A's matrix exits
+clean, A is formally promoted and B/C marked fully accepted.
+
 ## 1. Objective and non-goals
 
 **Objective.** Turn iMessage into a general interaction surface for Jehad OS:
@@ -432,11 +451,17 @@ each opening its own implementation plan when its predecessor soaks clean.
 
 ## 10. Not-now list
 
-Group chats · attachments/tapbacks/edits parsing · SMS fallback · outbound
-messages to third parties initiated from iMessage conversations · voice/web
-surfaces · auto-promotion of conversation history to semantic memory · model
-selection as user-facing UX (capability routing chooses; `/model` remains a
-debug override).
+The remaining *inbound* gaps, precisely (inbound iMessage as a surface is
+live since B/C — the old "inbound-replies lane" backlog item is retired):
+**group chats** (multi-principal privacy boundaries) · **attachments /
+multimodal** (2026-09-19 evidence: attachment-only messages get a
+deterministic text-only reply; real image understanding = sensor
+attachment extraction + vision model, a future lane) · **tapbacks/edits
+parsing** · **SMS fallback**. Also not-now: outbound messages to third
+parties initiated from iMessage conversations · voice/web surfaces ·
+auto-promotion of conversation history to semantic memory · model
+selection as user-facing UX (capability routing chooses; `/model` remains
+a debug override).
 
 ## 11. Assumptions (chosen, not asked — flag any wrong one)
 
