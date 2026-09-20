@@ -110,6 +110,60 @@ describe("createGoogleCalendarWriteProvider", () => {
     }
   });
 
+  it("event details ride when present: location/description map verbatim, guests become [{email}] and get invites (sendUpdates=all)", async () => {
+    const { fetch, calls } = stubFetch(() => jsonResponse(200, { id: "evt-det-1" }));
+    const provider = createGoogleCalendarWriteProvider({ tokenProvider: token, calendarId: "primary", fetchImpl: fetch });
+
+    const response = await provider.dispatch(dispatchRequest({
+      location: "War Room",
+      description: "Quarterly numbers — bring the deck",
+      attendees: ["a@b.com", "c@d.com"],
+    }));
+
+    expect(response).toEqual({ status: "succeeded", providerRef: "evt-det-1" });
+    const call = calls[0]!;
+    const body = call.body as Record<string, unknown>;
+    expect(body["location"]).toBe("War Room");
+    expect(body["description"]).toBe("Quarterly numbers — bring the deck");
+    expect(body["attendees"]).toEqual([{ email: "a@b.com" }, { email: "c@d.com" }]);
+    // Idempotency stamp + tentative transparency unchanged by the details.
+    expect(body["extendedProperties"]).toEqual({
+      private: { idempotencyKey: "idem_123", intentId: "0a1b2c3d-0000-4000-8000-000000000001" },
+    });
+    expect(body["status"]).toBe("tentative");
+    // Explicit sendUpdates=all — guests were shown in the confirm render first.
+    expect(new URL(call.url).searchParams.get("sendUpdates")).toBe("all");
+  });
+
+  it("each detail field is independently optional: absent or null → key absent from the body; sendUpdates=all is explicit either way", async () => {
+    for (const over of [
+      { location: "Somewhere" },
+      { description: "Only a note" },
+      { attendees: ["solo@x.com"] },
+      { location: null, description: null, attendees: null },
+    ] as Array<Record<string, unknown>>) {
+      const { fetch, calls } = stubFetch(() => jsonResponse(200, { id: "evt-opt" }));
+      const provider = createGoogleCalendarWriteProvider({ tokenProvider: token, calendarId: "primary", fetchImpl: fetch });
+      await provider.dispatch(dispatchRequest(over));
+      const body = calls[0]!.body as Record<string, unknown>;
+      expect(body["location"], JSON.stringify(over)).toEqual(over.location ?? undefined);
+      expect(body["description"], JSON.stringify(over)).toEqual(over.description ?? undefined);
+      expect(body["attendees"], JSON.stringify(over)).toEqual(
+        over.attendees === undefined || over.attendees === null
+          ? undefined
+          : [{ email: over.attendees[0] }],
+      );
+      expect(new URL(calls[0]!.url).searchParams.get("sendUpdates"), JSON.stringify(over)).toBe("all");
+    }
+  });
+
+  it("empty attendee list is omitted from the body (nothing to invite)", async () => {
+    const { fetch, calls } = stubFetch(() => jsonResponse(200, { id: "evt-empty" }));
+    const provider = createGoogleCalendarWriteProvider({ tokenProvider: token, calendarId: "primary", fetchImpl: fetch });
+    await provider.dispatch(dispatchRequest({ attendees: [] }));
+    expect((calls[0]!.body as Record<string, unknown>)["attendees"]).toBeUndefined();
+  });
+
   it("tentative flag maps both ways (ESCALATE-2 default: tentative)", async () => {
     for (const [tentative, status] of [[true, "tentative"], [false, "confirmed"]] as const) {
       const { fetch, calls } = stubFetch(() => jsonResponse(200, { id: "evt-x" }));
@@ -159,6 +213,10 @@ describe("createGoogleCalendarWriteProvider", () => {
     const provider = createGoogleCalendarWriteProvider({ tokenProvider: token, calendarId: "primary", fetchImpl: fetch });
     await expect(provider.dispatch(dispatchRequest({ title: 42 }))).rejects.toBeInstanceOf(TypeError);
     await expect(provider.dispatch(dispatchRequest({ startIso: undefined }))).rejects.toBeInstanceOf(TypeError);
+    await expect(provider.dispatch(dispatchRequest({ location: 7 }))).rejects.toBeInstanceOf(TypeError);
+    await expect(provider.dispatch(dispatchRequest({ description: {} }))).rejects.toBeInstanceOf(TypeError);
+    await expect(provider.dispatch(dispatchRequest({ attendees: "a@b.com" }))).rejects.toBeInstanceOf(TypeError);
+    await expect(provider.dispatch(dispatchRequest({ attendees: [1, 2] }))).rejects.toBeInstanceOf(TypeError);
   });
 
   it("read-back: findEventByIdempotencyKey queries the private extended property and resolves exactly one event", async () => {

@@ -99,15 +99,18 @@ describe.skipIf(!TEST_DATABASE_URL)("iMessage calendar actions (integration)", (
     seq += 1;
   });
 
-function propose(overrides: {
-    principalId?: string;
-    principalName?: string;
-    title?: string;
-    startIso?: string;
-    endIso?: string;
-    now?: Date;
-    policy?: CalendarActionPolicy | null;
-  } = {}) {
+  function propose(overrides: {
+     principalId?: string;
+     principalName?: string;
+     title?: string;
+     startIso?: string;
+     endIso?: string;
+     location?: string | null;
+     description?: string | null;
+     attendees?: readonly string[] | null;
+     now?: Date;
+     policy?: CalendarActionPolicy | null;
+   } = {}) {
     // Single base keeps the default duration exactly 1h (whole minutes).
     const base = Date.now() + 2 * HOUR;
     return proposeCalendarAction(db.pool, {
@@ -116,6 +119,9 @@ function propose(overrides: {
       title: overrides.title ?? `Test event ${seq}`,
       startIso: overrides.startIso ?? new Date(base).toISOString(),
       endIso: overrides.endIso ?? new Date(base + HOUR).toISOString(),
+      location: overrides.location,
+      description: overrides.description,
+      attendees: overrides.attendees,
       now: overrides.now ?? new Date(),
       policy: overrides.policy === undefined ? DEFAULT_CALENDAR_ACTION_POLICY : overrides.policy,
     });
@@ -253,6 +259,129 @@ function propose(overrides: {
     }
     expect(await intentCount()).toBe(1);
     expect(await auditRows("imessage.action.capped")).toHaveLength(1);
+  });
+
+  // ------------------------------------------------------------ event details
+
+  it("propose: location + guests render as segments and ride in the payload; description stored but never rendered", async () => {
+    const out = await propose({
+      title: "Board sync",
+      location: "War Room",
+      description: "Quarterly numbers — bring the deck",
+      attendees: ["A@B.com", "c@d.com", "a@b.com"],
+    });
+
+    expect(out.status).toBe("proposed");
+    if (out.status !== "proposed") return;
+    // Segments appended on the single line, in order, before the fixed tail.
+    expect(out.render).toContain("your calendar · Location: War Room · Guests: a@b.com, c@d.com.");
+    expect(out.render).toContain('Reply "confirm" to add it, or "cancel" to drop it.');
+    // Description rides in the payload only — too long for iMessage.
+    expect(out.render).not.toContain("Quarterly numbers");
+
+    const rows = await db.pool.query(`SELECT payload FROM action_intents`);
+    expect(rows.rows).toHaveLength(1);
+    const payload = rows.rows[0]!.payload as Record<string, unknown>;
+    expect(payload.location).toBe("War Room");
+    expect(payload.description).toBe("Quarterly numbers — bring the deck");
+    // Lowercased + deduped (order preserved) BEFORE storing.
+    expect(payload.attendees).toEqual(["a@b.com", "c@d.com"]);
+  });
+
+  it("propose: absent details store as null (hash binds the same canonical shape)", async () => {
+    const out = await propose({ title: "Bare bones" });
+    expect(out.status).toBe("proposed");
+    const payload = (await db.pool.query(`SELECT payload FROM action_intents`)).rows[0]!.payload as Record<string, unknown>;
+    expect(payload.location).toBeNull();
+    expect(payload.description).toBeNull();
+    expect(payload.attendees).toBeNull();
+  });
+
+  it("propose: detail violations get the fixed constraint replies and NO intent row", async () => {
+    const eleven = Array.from({ length: 11 }, (_, i) => `g${i}@example.com`);
+    const cases: Array<{ over: { location?: string | null; description?: string | null; attendees?: readonly string[] }; phrase: string }> = [
+      { over: { location: "x".repeat(201) }, phrase: "location must be at most 200 characters" },
+      { over: { description: "y".repeat(2001) }, phrase: "description must be at most 2000 characters" },
+      { over: { attendees: ["not-an-email"] }, phrase: "guests must be valid email addresses" },
+      { over: { attendees: eleven }, phrase: "at most 10 unique" },
+      { over: { attendees: [`${"z".repeat(250)}@example.com`] }, phrase: "at most 254 characters" },
+    ];
+    for (const c of cases) {
+      const out = await propose(c.over);
+      expect(out.status, JSON.stringify(c.over)).toBe("invalid");
+      if (out.status === "invalid") expect(out.reply).toContain(c.phrase);
+    }
+    expect(await intentCount()).toBe(0);
+    expect(await auditRows("imessage.action.invalid")).toHaveLength(cases.length);
+  });
+
+  it("attendees dedupe + case-normalize: 11 raw entries collapsing to ≤10 unique are VALID", async () => {
+    const raw = ["A@B.com", "a@b.com", "C@D.com"];
+    const withDuplicates = [...raw, ...raw, ...raw, ...raw]; // 12 raw → 2 unique
+    const out = await propose({ attendees: withDuplicates });
+    expect(out.status).toBe("proposed");
+    if (out.status !== "proposed") return;
+    expect(out.render).toContain("Guests: a@b.com, c@d.com");
+    const payload = (await db.pool.query(`SELECT payload FROM action_intents`)).rows[0]!.payload as Record<string, unknown>;
+    expect(payload.attendees).toEqual(["a@b.com", "c@d.com"]);
+  });
+
+  it("payload binding widened: tampering location in the stored payload makes confirm fail payload-mismatch", async () => {
+    const prop = await propose({ title: "Binding", location: "Original spot", attendees: ["x@y.com"] });
+    if (prop.status !== "proposed") throw new Error("propose failed");
+
+    await db.pool.query(
+      `UPDATE action_intents SET payload = jsonb_set(payload, '{location}', '"Evil spot"') WHERE id = $1`,
+      [prop.intentId],
+    );
+    const swapped = await confirm(prop.confirmToken);
+    expect(swapped.status).toBe("payload-mismatch");
+    expect(swapped.reply).toBe(CALENDAR_CONFIRM_MISMATCH_REPLY);
+    expect(await db.pool.query(`SELECT count(*)::int AS n FROM action_attempts`)).toMatchObject({
+      rows: [{ n: 0 }],
+    });
+
+    // Restore; the untampered payload still confirms (hash matches).
+    await db.pool.query(
+      `UPDATE action_intents SET payload = jsonb_set(payload, '{location}', '"Original spot"') WHERE id = $1`,
+      [prop.intentId],
+    );
+    const ok = await confirm(prop.confirmToken);
+    expect(ok.status).toBe("succeeded");
+  });
+
+  it("payload binding widened: tampering attendees in the stored payload fails closed too", async () => {
+    const prop = await propose({ title: "Guest list", attendees: ["real@x.com"] });
+    if (prop.status !== "proposed") throw new Error("propose failed");
+    await db.pool.query(
+      `UPDATE action_intents SET payload = jsonb_set(payload, '{attendees}', '["sneaky@x.com"]') WHERE id = $1`,
+      [prop.intentId],
+    );
+    const out = await confirm(prop.confirmToken);
+    expect(out.status).toBe("payload-mismatch");
+    expect(await db.pool.query(`SELECT count(*)::int AS n FROM action_attempts`)).toMatchObject({
+      rows: [{ n: 0 }],
+    });
+  });
+
+  it("confirm dispatch: the provider request carries location/description/attendees from the frozen payload", async () => {
+    const provider = fakeWriteProvider("succeed");
+    const prop = await propose({
+      title: "With guests",
+      location: "Big room",
+      description: "Agenda: things",
+      attendees: ["a@b.com"],
+    });
+    if (prop.status !== "proposed") throw new Error("propose failed");
+
+    const out = await confirm(prop.confirmToken, { provider });
+    expect(out.status).toBe("succeeded");
+    expect(provider.fake.requests[0]?.payload).toMatchObject({
+      title: "With guests",
+      location: "Big room",
+      description: "Agenda: things",
+      attendees: ["a@b.com"],
+    });
   });
 
   // ------------------------------------------------------------ confirm
