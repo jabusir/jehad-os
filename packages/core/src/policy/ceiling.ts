@@ -80,8 +80,9 @@ export interface GatewayPrincipalPolicy {
   readonly reads: readonly string[];
 }
 
-/** Valid Phase E read sources (fail-closed parse: unknown names throw). */
-export const READ_SOURCES = ["calendar", "commitments"] as const;
+/** Valid grounded-read sources (fail-closed parse: unknown names throw).
+ *  `gmail` added additively by Phase GMAIL §8.3 (gmail.recent read tool). */
+export const READ_SOURCES = ["calendar", "commitments", "gmail"] as const;
 
 /**
  * Phase F capture policy — `gateway.capture` (ig-phase-f-contracts.md §8):
