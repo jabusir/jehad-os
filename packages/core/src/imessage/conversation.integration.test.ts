@@ -317,13 +317,21 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation (integration)", () =>
     expect((notification.payload as { content: string }).content.endsWith("…[truncated]")).toBe(true);
   });
 
-  it("her message text is NEVER persisted (full text-column scan)", async () => {
+  it("her message text lives ONLY in interaction_messages — every other text column scanned (ADR-0014)", async () => {
     await grantConverse();
-    const secret = "HERINBOUNDTEXT-77aa-not-stored";
+    const secret = "HERINBOUNDTEXT-77aa-only-threads";
     await handleInbound(deps, { principalId: yusraId, handle: YUSRA_HANDLE, text: secret });
+    // The approved canonical path holds it exactly once.
+    const stored = await db.pool.query(
+      `SELECT count(*)::int AS n FROM interaction_messages WHERE content LIKE $1`,
+      [`%${secret}%`],
+    );
+    expect(stored.rows[0].n).toBe(1);
+    // Nowhere else — the old never-persisted invariant minus the carve-out.
     const columns = await db.pool.query<{ table_name: string; column_name: string }>(
       `SELECT table_name, column_name FROM information_schema.columns
         WHERE table_schema = 'public'
+          AND table_name <> 'interaction_messages'
           AND data_type IN ('text', 'character varying', 'character', 'jsonb', 'json')`,
     );
     for (const { table_name, column_name } of columns.rows) {

@@ -230,11 +230,11 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage ingest routing (integration)", () 
     expect(await scanAllColumnsFor(secret)).toEqual([]);
   });
 
-  it("HARD INVARIANT: paired-handle content is NEVER persisted — every text-bearing column of every public table scanned", async () => {
+  it("HARD INVARIANT: INGEST itself persists no content — every text-bearing column of every public table scanned (the approved canonical path is the conversation handler's interaction_messages, covered in threads.integration)", async () => {
     await issueConverseGrant(yusraId);
     const secret = "TRANSIENTCONTENT-b2c4d6-never-anywhere";
     await ingest([event({ content: secret, text_length: secret.length })], { onInbound: true });
-    expect(inbound).toHaveLength(1); // it DID reach the handler
+    expect(inbound).toHaveLength(1); // it DID reach the (stub) handler
     expect(await scanAllColumnsFor(secret)).toEqual([]);
   });
 

@@ -1,5 +1,11 @@
 # Phase D contracts — bounded conversational threads
 
+**Owner decision (2026-09-20, ADR-0014):** bounded raw persistence
+APPROVED. Active working context 72h · raw retention 7-day rolling
+maximum (the earlier 30-day draft is REJECTED) · working/episodic only,
+never auto-promoted · Hermes (future) curates but never owns canonical
+conversation state.
+
 Parent: `docs/plans/imessage-gateway.md` §5.3, §7 (owner-approved sequence
 2026-09-19: A → E → **D** → F → G → H). Owner framing encoded here:
 **in-place thread turnover** — idle gap, turn cap, TTL; one rolling thread

@@ -40,6 +40,10 @@ export {
 } from "./brief-workflows.js";
 
 export { calendarSyncWorkflow, type CalendarSyncResult } from "./calendar-workflows.js";
+export {
+  threadRetentionWorkflow,
+  type ThreadRetentionResult,
+} from "./thread-workflows.js";
 
 export {
   APPROVE_SIGNAL_PREFIX,

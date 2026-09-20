@@ -3,7 +3,12 @@
  * brief workflows (M6B: morning brief 07:00 UTC, evening close 21:00 UTC).
  */
 
-import { defineWorkflow, briefWorkflows, calendarSyncWorkflow } from "@jehad/workflow";
+import {
+  defineWorkflow,
+  briefWorkflows,
+  calendarSyncWorkflow,
+  threadRetentionWorkflow,
+} from "@jehad/workflow";
 
 export const smokeWorkflow = defineWorkflow({
   name: "smoke",
@@ -13,4 +18,9 @@ export const smokeWorkflow = defineWorkflow({
   },
 });
 
-export const workflows = [smokeWorkflow, ...briefWorkflows, calendarSyncWorkflow];
+export const workflows = [
+  smokeWorkflow,
+  ...briefWorkflows,
+  calendarSyncWorkflow,
+  threadRetentionWorkflow,
+];
