@@ -308,7 +308,6 @@ export async function considerCapture(
   }
 
   // 2. Detection — deterministic pre-pass, then optional route fallback.
-  const text = redactContent(input.text).slice(0, CAPTURE_TEXT_LIMIT);
   const match = matchCaptureIntent(input.text);
   let trigger: CaptureTrigger;
   let content: string;
