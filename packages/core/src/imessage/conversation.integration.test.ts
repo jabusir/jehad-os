@@ -334,13 +334,32 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation (integration)", () =>
   });
 
   it("the fixed prompt helper carries nothing principal-specific beyond the name", () => {
-    const prompt = buildConversationPrompt("yusra", "hi");
+    const prompt = buildConversationPrompt("yusra", "fake/model-x", "hi");
     expect(prompt).toContain("yusra");
     expect(prompt).not.toContain("Jehad");
     expect(prompt).not.toContain("commitment");
     expect(prompt).not.toContain("finance");
     // No tool surface, no world-model access claim.
     expect(prompt).toContain("no access to any external systems");
+    // Honest model identity + text-only disclosure.
+    expect(prompt).toContain('"fake/model-x"');
+    expect(prompt).toContain("cannot see images or attachments");
+  });
+
+  it("attachment-only inbound gets a deterministic reply, no model call", async () => {
+    await grantConverse();
+    provider.requests.length = 0;
+    const outcome = await handleInbound(deps, {
+      principalId: yusraId,
+      handle: YUSRA_HANDLE,
+      text: "\uFFFC\uFFFC ",
+    });
+    expect(outcome.replied).toBe(true);
+    expect(provider.requests).toHaveLength(0); // no LLM, no budget
+    const reply = await db.pool.query(
+      "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
+    );
+    expect(reply.rows[0].c).toContain("can't see images or attachments");
   });
 
   it("capReplyText keeps short text verbatim and marks truncation", () => {

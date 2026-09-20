@@ -84,14 +84,25 @@ export interface ConversationDeps {
  * no commitments/calendar/finance access, no personal data of ANY
  * principal; the only principal-specific token is the greeting name.
  */
-export function buildConversationPrompt(principalName: string, text: string): string {
+export function buildConversationPrompt(principalName: string, model: string, text: string): string {
   return [
     `You are a helpful, concise assistant chatting over iMessage with ${principalName}.`,
+    `You are running as the model "${model}" via OpenRouter on the Jehad OS message gateway — when asked what model you are, answer honestly and specifically with that model id.`,
     "You have no access to any external systems, tools, calendars, files, or accounts, and you cannot perform actions — answer from this conversation alone.",
+    "You are text-only: you cannot see images or attachments; if one seems to be referenced, say so plainly.",
     "Keep each reply under 1500 characters.",
     "",
     text,
   ].join("\n");
+}
+
+/** Attachment-only inbound (U+FFFC placeholders / whitespace) — answered
+ *  deterministically, no model call, no budget consumption. */
+const ATTACHMENT_ONLY_REPLY =
+  "I can't see images or attachments yet — text only for now. (Attachment support is on the roadmap.)";
+
+export function isTextOnlyAttachment(text: string): boolean {
+  return text.replace(/\uFFFC/g, "").trim().length === 0;
 }
 
 /** Reply content capped to the edge render rule at creation (same marker). */
@@ -243,6 +254,33 @@ async function converseTurn(
 ): Promise<ConverseOutcome> {
   const db = deps.db;
   const { handle, actor, policy, now, principalName } = ctx;
+  if (isTextOnlyAttachment(input.text)) {
+    const createdBy = await resolveGatewayServicePrincipal(db);
+    const notification = await createNotification(
+      db,
+      {
+        kind: "reply",
+        title: "Reply",
+        payload: { content: ATTACHMENT_ONLY_REPLY, recipient: handle },
+        recipient: handle,
+        sourceType: "run",
+        sourceId: null,
+        createdBy,
+        surface: CONVERSATION_SURFACE,
+        requestingPrincipalId: input.principalId,
+        conversationPrincipalId: input.principalId,
+        thirdPartyRecipient: false,
+      },
+      { actor, now: () => now },
+    );
+    await audit(db, actor, "imessage.converse.replied", {
+      principalId: input.principalId,
+      handle,
+      notificationId: notification.id,
+      deterministic: "attachment-only",
+    });
+    return { replied: true, notificationId: notification.id };
+  }
   const usage = await conversationUsage(db, input.principalId, { now: () => now });
   if (usage.requestsLastHour >= policy.requestsPerHour) {
     await audit(db, actor, "imessage.converse.denied", {
@@ -294,7 +332,7 @@ async function converseTurn(
         sensitivity: "normal",
         provider: deps.provider.id,
         model: policy.model,
-        prompt: buildConversationPrompt(String(principalName), input.text),
+        prompt: buildConversationPrompt(String(principalName), policy.model, input.text),
         runId,
         promptVersion: CONVERSATION_PROMPT_VERSION,
         principalId: input.principalId,
