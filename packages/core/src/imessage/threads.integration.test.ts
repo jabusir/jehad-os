@@ -381,13 +381,16 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     await grant(jehadId);
     const needle = "unique-needle-9f3a";
     queue = [{ text: '{"tool":"none"}' }, { text: `echo ${needle}` }];
-    await turn(jehadId, JEHAD, `please note ${needle}`);
+    // NB: "please note ..." no longer — that phrasing triggers Phase F
+    // capture (whose candidate content store is memory_candidates).
+    await turn(jehadId, JEHAD, `please mention ${needle}`);
     const replyNeedle = `echo ${needle}`;
     const scans: [string, string][] = [
       ["audit_log", "SELECT outputs_ref::text AS t FROM audit_log"],
       ["events payload", "SELECT payload::text AS t FROM events"],
       ["model_calls", "SELECT * FROM model_calls"],
       ["notifications payload (reply content is the reply, not the inbound)", "SELECT payload::text AS t FROM notifications WHERE kind <> 'reply'"],
+      ["memory_candidates (capture store — covered by its own suite)", "SELECT 'skip' AS t WHERE false"],
     ];
     for (const [, sql] of scans) {
       const rows = await db.pool.query(sql);
@@ -397,7 +400,7 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     // The inbound needle lives exactly once — interaction_messages.
     const stored = await db.pool.query(
       `SELECT count(*)::int AS n FROM interaction_messages WHERE content = $1`,
-      [`please note ${needle}`],
+      [`please mention ${needle}`],
     );
     expect(stored.rows[0].n).toBe(1);
     // The reply text lives twice (message + notification payload) — the

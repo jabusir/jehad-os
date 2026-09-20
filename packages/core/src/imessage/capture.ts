@@ -68,7 +68,7 @@ export interface CaptureInput {
    * fabricated: without a sourceEventId the event is the real capture
    * record of this turn.
    */
-  readonly sourceEventId?: string;
+  readonly sourceEventId?: string | null;
   readonly now: Date;
 }
 
@@ -333,7 +333,7 @@ export async function considerCapture(
   const normalizedTextSha256 = sha256Hex(captureNormalize(content));
 
   // 3a. Source-event idempotency — same sourceEventId never captures twice.
-  if (input.sourceEventId !== undefined) {
+  if (input.sourceEventId != null) {
     const existing = await candidateForSourceEvent(db, input.sourceEventId);
     if (existing !== null) {
       await audit(db, "imessage.capture.deduped", {
@@ -383,8 +383,8 @@ export async function considerCapture(
   }
 
   // 4. Source event: the caller's capture.recorded event, or accept it here.
-  let sourceEventId = input.sourceEventId;
-  if (sourceEventId === undefined) {
+  let sourceEventId: string = input.sourceEventId ?? "";
+  if (sourceEventId === "") {
     const accepted = await acceptEvent(
       db,
       {
@@ -396,10 +396,12 @@ export async function considerCapture(
         domainId: CAPTURE_DOMAIN_KEY,
         sensitivity: "normal",
         payload: {
-          text,
+          // NO raw text here — the statement lives in the candidate row
+          // (single content path); events keep refs + content hash only.
           surface: CAPTURE_SURFACE,
           threadId: input.threadId ?? null,
           principalId: input.principalId,
+          normalizedTextSha256,
         },
         runId: null,
       },

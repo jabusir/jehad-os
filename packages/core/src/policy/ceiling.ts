@@ -57,6 +57,8 @@ export interface NotificationsPolicyV1 {
  */
 export interface GatewayPolicyV1 {
   readonly principals: Readonly<Record<string, GatewayPrincipalPolicy>>;
+  /** Phase F capture config (gateway.capture); absent → module default. */
+  readonly capture?: GatewayCapturePolicy;
 }
 
 export interface GatewayPrincipalPolicy {
@@ -76,6 +78,41 @@ export interface GatewayPrincipalPolicy {
 
 /** Valid Phase E read sources (fail-closed parse: unknown names throw). */
 export const READ_SOURCES = ["calendar", "commitments"] as const;
+
+/**
+ * Phase F capture policy — `gateway.capture` (ig-phase-f-contracts.md §8):
+ * `{ enabled: <bool>, principals: [name, …], max_per_hour: <int>,
+ * dedupe_window_hours: <int> }` in that key order. Strict shape; anything
+ * else throws (fail closed).
+ */
+export interface GatewayCapturePolicy {
+  readonly enabled: boolean;
+  readonly principals: readonly string[];
+  readonly maxPerHour: number;
+  readonly dedupeWindowHours: number;
+}
+
+export function parseGatewayCaptureEntry(value: string): GatewayCapturePolicy {
+  const m = value.match(
+    /^\{\s*enabled:\s*(true|false),\s*principals:\s*\[([A-Za-z0-9_,\s]*)\],\s*max_per_hour:\s*(\d+),\s*dedupe_window_hours:\s*(\d+)\s*\}$/,
+  );
+  if (m === null) {
+    throw new Error(
+      `policy: gateway.capture must be "{ enabled: <bool>, principals: [name, …], max_per_hour: <int>, dedupe_window_hours: <int> }" (got '${value}')`,
+    );
+  }
+  const maxPerHour = Number(m[3]);
+  const dedupeWindowHours = Number(m[4]);
+  if (maxPerHour <= 0 || dedupeWindowHours <= 0) {
+    throw new Error("policy: gateway.capture caps must be positive");
+  }
+  return {
+    enabled: m[1] === "true",
+    principals: [...new Set((m[2] ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0))],
+    maxPerHour,
+    dedupeWindowHours,
+  };
+}
 
 /**
  * Strict flow-mapping parse for one gateway principal entry — exactly
@@ -218,6 +255,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   let inGatewayPrincipals = false;
   const notificationEntries: Array<{ key: string; value: string }> = [];
   const gatewayPrincipals: Record<string, GatewayPrincipalPolicy> = {};
+  const gatewayCapture: { value: GatewayCapturePolicy | null } = { value: null };
 
   for (const rawLine of text.split("\n")) {
     const line = stripComment(rawLine);
@@ -263,6 +301,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
       notificationEntries.push({ key, value });
       continue;
     }
+    const gatewayCapture: { value: GatewayCapturePolicy | null } = { value: null };
     if (section === "gateway") {
       if (inGatewayPrincipals) {
         if (key === "principals") throw new Error("policy: duplicate gateway.principals key");
@@ -275,6 +314,11 @@ export function parsePolicyV1(text: string): PolicyV1 {
       if (key === "principals") {
         if (value !== "") throw new Error("policy: gateway.principals must be a mapping");
         inGatewayPrincipals = true;
+        continue;
+      }
+      if (key === "capture") {
+        if (gatewayCapture.value !== null) throw new Error("policy: duplicate gateway.capture key");
+        gatewayCapture.value = parseGatewayCaptureEntry(value);
         continue;
       }
       throw new Error(`policy: unknown gateway key '${key}'`);
@@ -299,7 +343,10 @@ export function parsePolicyV1(text: string): PolicyV1 {
     policy.notifications = parseNotificationsSection(notificationEntries);
   }
   if (sawGateway) {
-    policy.gateway = { principals: gatewayPrincipals };
+    policy.gateway = {
+      principals: gatewayPrincipals,
+      ...(gatewayCapture.value !== null ? { capture: gatewayCapture.value } : {}),
+    };
   }
   return policy;
 }

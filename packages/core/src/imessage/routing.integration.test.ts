@@ -145,9 +145,14 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage ingest routing (integration)", () 
       { onInbound: true },
     );
     expect(report.accepted).toBe(1);
-    expect(inbound).toEqual([
-      { principalId: yusraId, handle: YUSRA_HANDLE, text: "what is for dinner tonight darling" },
-    ]);
+    expect(inbound).toHaveLength(1);
+    expect(inbound[0]).toMatchObject({
+      principalId: yusraId,
+      handle: YUSRA_HANDLE,
+      text: "what is for dinner tonight darling",
+    });
+    // Phase F: the guid's events row rides along for capture provenance.
+    expect(typeof inbound[0]!.sourceEventId).toBe("string");
     expect(await auditActions()).toContain("imessage.inbound.routed");
   });
 

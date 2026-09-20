@@ -129,8 +129,9 @@ describe.skipIf(!TEST_DATABASE_URL)("iMessage capture (integration)", () => {
     expect(metadata.captureSource).toBe(CAPTURE_SOURCE);
 
     // The source event exists: capture.recorded, source imessage.capture,
-    // payload.text = the inbound text (externalId rides the idempotency
-    // key — verified in the sourceEventId test below).
+    // content-free payload (surface/thread/principal + content hash; the
+    // statement lives in the candidate; externalId rides idempotency —
+    // verified in the sourceEventId test below).
     const event = await db.pool.query(
       `SELECT e.type, e.source, e.payload, e.idempotency_key
          FROM events e WHERE e.id = $1::uuid`,
@@ -140,9 +141,7 @@ describe.skipIf(!TEST_DATABASE_URL)("iMessage capture (integration)", () => {
     expect(event.rows[0].type).toBe("capture.recorded");
     expect(event.rows[0].source).toBe(CAPTURE_SOURCE);
     expect(String(event.rows[0].idempotency_key)).toMatch(/^[0-9a-f]{64}$/);
-    expect((event.rows[0].payload as Record<string, unknown>).text).toBe(
-      "Remember that I'm looking for a Porsche 911.",
-    );
+    expect(event.rows[0].payload.text).toBeUndefined(); // content-free event (refs + hash)
 
     // memory.proposed (references only) + force-review marker + review queue.
     const proposed = await db.pool.query(
@@ -326,8 +325,11 @@ describe.skipIf(!TEST_DATABASE_URL)("iMessage capture (integration)", () => {
     const event = await db.pool.query(
       `SELECT payload::text AS p FROM events WHERE type = 'capture.recorded'`,
     );
-    expect(event.rows[0].p).toContain("⦙redacted⦙");
+    // Event payload carries NO text at all (refs + content hash only) —
+    // the masked statement lives in the candidate row.
     expect(event.rows[0].p).not.toContain("4242");
+    expect(event.rows[0].p).not.toContain("card");
+    expect(event.rows[0].p).toMatch(/normalizedTextSha256/);
   });
 
   it("intentRouter fallback: non-pattern storage phrasing routes to capture; false/throw fail safe", async () => {

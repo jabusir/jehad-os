@@ -41,6 +41,12 @@ import {
   resolveActiveThread,
   type WorkingContext,
 } from "./threads.js";
+import {
+  DEFAULT_CAPTURE_POLICY,
+  considerCapture,
+  matchCaptureIntent,
+  type CapturePolicy,
+} from "./capture.js";
 import { BRIEF_TIMEZONE } from "../briefs/timezone.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -78,6 +84,8 @@ export interface InboundConversationMessage {
   readonly principalId: string;
   readonly handle: string;
   readonly text: string;
+  /** Events-row id of the ingest event (Phase F capture provenance). */
+  readonly sourceEventId?: string | null;
 }
 
 export interface ConversationDeps {
@@ -90,6 +98,8 @@ export interface ConversationDeps {
    * Defaults to the repo-root policy.yaml `gateway.principals` mapping.
    */
   readonly principalPolicy?: (principalName: string) => GatewayPrincipalPolicy | null;
+  /** Phase F capture policy (repo-root policy.yaml gateway.capture). */
+  readonly capturePolicy?: CapturePolicy | null;
   readonly now?: () => Date;
 }
 
@@ -390,6 +400,27 @@ async function converseTurn(
       marker: "thread-reset",
       forceReset: true,
     });
+  }
+  // Phase F: capture is deterministic-first — the imperative pattern
+  // short-circuits the model entirely (no route pass, no budget spend).
+  // LLM-fallback routing rides the route pass in a later integration.
+  if (matchCaptureIntent(input.text).triggered) {
+    const policy = deps.capturePolicy ?? DEFAULT_CAPTURE_POLICY;
+    const outcome = await considerCapture(db, {
+      principalId: input.principalId,
+      principalName: String(principalName),
+      text: input.text,
+      sourceEventId: input.sourceEventId ?? null,
+      now,
+    }, { policy });
+    if (outcome.reply !== undefined) {
+      return deterministicReply(deps, input, ctx, {
+        content: outcome.reply,
+        outboundTrust: "system_generated",
+        marker: `capture-${outcome.captured ? "proposed" : outcome.reason ?? "noop"}`,
+      });
+    }
+    // No reply (shouldn't happen) — fall through to normal chat.
   }
   const usage = await conversationUsage(db, input.principalId, { now: () => now });
   if (usage.requestsLastHour >= policy.requestsPerHour) {

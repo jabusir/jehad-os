@@ -47,6 +47,7 @@ notifications:
 # `openrouter/auto-fast` is not in the repo's allowlisted model ids; the
 # cheapest fast allowlisted model is the evals-pinned openai/gpt-4o-mini.
 gateway:
+  capture: { enabled: true, principals: [josctl], max_per_hour: 5, dedupe_window_hours: 24 }
   principals:
     yusra: { model: openai/gpt-4o-mini, requests_per_hour: 20, cost_per_day: 2.0 }
     josctl: { model: openai/gpt-4o-mini, requests_per_hour: 30, cost_per_day: 5.0, reads: [calendar, commitments] }

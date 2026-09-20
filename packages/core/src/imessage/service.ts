@@ -525,7 +525,7 @@ export async function ingestBatch(
  */
 async function routeRow(
   client: ImessageTx,
-  row: { readonly content: string | null; readonly pairingAttemptHash: string | null },
+  row: { readonly guid: string; readonly content: string | null; readonly pairingAttemptHash: string | null },
   canonicalHandle: string,
   nowIso: string,
   audit: (action: string, outputs: Record<string, unknown>) => Promise<void>,
@@ -549,7 +549,18 @@ async function routeRow(
       handle: canonicalHandle,
       principalId: principal.principalId,
     });
-    inbound.push({ principalId: principal.principalId, handle: canonicalHandle, text: row.content });
+    // Phase F: the events-row id for this guid rides the message so
+    // capture provenance and replay idempotency bind to the exact event.
+    const sourceEventId = await client
+      .query(SELECT_EVENT_ID_SQL, [row.guid])
+      .then((r) => (r.rows[0]?.id === undefined ? null : String(r.rows[0].id)))
+      .catch(() => null);
+    inbound.push({
+      principalId: principal.principalId,
+      handle: canonicalHandle,
+      text: row.content,
+      sourceEventId,
+    });
     return;
   }
 
