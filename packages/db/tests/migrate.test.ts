@@ -20,7 +20,7 @@ const TABLES_001 = [
 const ALL_MIGRATIONS = [
   "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
   "004_commitments_domain", "005_commitments_temporal", "006_notifications",
-  "007_calendar", "008_feedback", "009_notification_calendar_change", "010_imessage_sensor", "011_imessage_pairing", "012_interaction_threads",
+  "007_calendar", "008_feedback", "009_notification_calendar_change", "010_imessage_sensor", "011_imessage_pairing", "012_interaction_threads", "013_review_refs",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -165,6 +165,31 @@ describe("migration files (fs only)", () => {
     );
   });
 
+  it("013 creates review_refs (Crockford charset, live-uniqueness partials, TTL default) with a down path", async () => {
+    const migrations = await listMigrations();
+    const refs = migrations.find((m) => m.name === "013_review_refs");
+    expect(refs).toBeDefined();
+    expect(refs!.sql).toMatch(/CREATE TABLE review_refs\b/);
+    for (const column of [
+      "ref", "principal_id", "item_type", "item_id", "minted_at", "resolved_at", "expires_at", "snoozed_until", "snooze_count",
+    ]) {
+      expect(refs!.sql).toMatch(new RegExp(`\\b${column}\\s`));
+    }
+    // 3-char Crockford base32 alphabet: 0-9 A-Z minus I L O U (§2).
+    expect(refs!.sql).toMatch(/CHECK \(ref ~ '\^\[0-9ABCDEFGHJKMNPQRSTVWXYZ\]\{3\}\$'\)/);
+    expect(refs!.sql).toMatch(/CHECK \(item_type IN \('candidate', 'escalation'\)\)/);
+    // ref_ttl_hours default 168 (§7).
+    expect(refs!.sql).toMatch(/DEFAULT \(now\(\) \+ interval '168 hours'\)/);
+    // Mint-once per live item + owner-scoped collision law (§2).
+    expect(refs!.sql).toMatch(
+      /CREATE UNIQUE INDEX review_refs_item_live_unique\s+ON review_refs \(item_type, item_id\)\s+WHERE resolved_at IS NULL/,
+    );
+    expect(refs!.sql).toMatch(
+      /CREATE UNIQUE INDEX review_refs_principal_ref_live_unique\s+ON review_refs \(principal_id, ref\)\s+WHERE resolved_at IS NULL/,
+    );
+    expect(refs!.downSql).toMatch(/DROP TABLE IF EXISTS review_refs\b/);
+  });
+
   it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {
     const migrations = await listMigrations();
     const guard = migrations.find((m) => m.name === "002_action_transition_guard");
@@ -225,6 +250,7 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate up/down (integration)", () => {
     expect(afterUp.has("imessage_transport_events")).toBe(true);
     expect(afterUp.has("sent_message_fingerprints")).toBe(true);
     expect(afterUp.has("imessage_sensor_state")).toBe(true);
+    expect(afterUp.has("review_refs")).toBe(true);
 
     const records = await pool.query<{ name: string }>("SELECT name FROM schema_migrations");
     expect(records.rows.map((r) => r.name)).toEqual([...ALL_MIGRATIONS]);
@@ -236,6 +262,7 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate up/down (integration)", () => {
     for (const table of [
       ...TABLES_001, "principals",
       "imessage_transport_events", "sent_message_fingerprints", "imessage_sensor_state",
+      "review_refs",
     ]) {
       expect(afterDown.has(table)).toBe(false);
     }

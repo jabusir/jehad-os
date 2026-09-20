@@ -227,5 +227,48 @@ describe("policy gateway section (multi-principal Lane P)", () => {
       costPerDay: 5,
       reads: ["calendar", "commitments"],
     });
+    // Phase F/G gateway sub-policies land in the parsed policy.
+    expect(policy.gateway?.capture).toEqual({
+      enabled: true,
+      principals: ["josctl"],
+      maxPerHour: 5,
+      dedupeWindowHours: 24,
+    });
+    expect(policy.gateway?.review).toEqual({
+      enabled: true,
+      principals: ["josctl"],
+      maxBadRefs: 3,
+      snoozeHours: 24,
+      refTtlHours: 168,
+      digestMaxCandidates: 10,
+      digestMaxEscalations: 5,
+    });
+  });
+
+  it("parses gateway.review with strictly ordered keys; deviations fail closed", () => {
+    const review =
+      "{ enabled: true, principals: [josctl], max_bad_refs: 3, snooze_hours: 24, ref_ttl_hours: 168, digest_max_candidates: 10, digest_max_escalations: 5 }";
+    const policy = parsePolicyV1(BASE + "\ngateway:\n  review: " + review + "\n  principals:\n");
+    expect(policy.gateway?.review).toEqual({
+      enabled: true,
+      principals: ["josctl"],
+      maxBadRefs: 3,
+      snoozeHours: 24,
+      refTtlHours: 168,
+      digestMaxCandidates: 10,
+      digestMaxEscalations: 5,
+    });
+    // Reordered keys, unknown keys, non-positive values, and duplicates all throw.
+    for (const bad of [
+      "{ enabled: true, max_bad_refs: 3, principals: [josctl], snooze_hours: 24, ref_ttl_hours: 168, digest_max_candidates: 10, digest_max_escalations: 5 }",
+      "{ enabled: true, principals: [josctl], max_bad_refs: 0, snooze_hours: 24, ref_ttl_hours: 168, digest_max_candidates: 10, digest_max_escalations: 5 }",
+      "{ enabled: true, principals: [josctl], max_bad_refs: 3, snooze_hours: 24 }",
+      "{ enabled: maybe, principals: [josctl], max_bad_refs: 3, snooze_hours: 24, ref_ttl_hours: 168, digest_max_candidates: 10, digest_max_escalations: 5 }",
+    ]) {
+      expect(() => parsePolicyV1(BASE + "\ngateway:\n  review: " + bad)).toThrow();
+    }
+    expect(() =>
+      parsePolicyV1(BASE + "\ngateway:\n  review: " + review + "\n  review: " + review),
+    ).toThrow(/duplicate gateway.review key/);
   });
 });

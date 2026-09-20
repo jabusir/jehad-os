@@ -59,6 +59,8 @@ export interface GatewayPolicyV1 {
   readonly principals: Readonly<Record<string, GatewayPrincipalPolicy>>;
   /** Phase F capture config (gateway.capture); absent → module default. */
   readonly capture?: GatewayCapturePolicy;
+  /** Phase G review/control config (gateway.review); absent → module default. */
+  readonly review?: GatewayReviewPolicy;
 }
 
 export interface GatewayPrincipalPolicy {
@@ -111,6 +113,49 @@ export function parseGatewayCaptureEntry(value: string): GatewayCapturePolicy {
     principals: [...new Set((m[2] ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0))],
     maxPerHour,
     dedupeWindowHours,
+  };
+}
+
+/**
+ * Phase G review/control policy — `gateway.review`
+ * (ig-phase-g-contracts.md §7): `{ enabled: <bool>, principals: [name, …],
+ * max_bad_refs: <int>, snooze_hours: <int>, ref_ttl_hours: <int>,
+ * digest_max_candidates: <int>, digest_max_escalations: <int> }` in that
+ * key order. Strict shape; anything else throws (fail closed).
+ */
+export interface GatewayReviewPolicy {
+  readonly enabled: boolean;
+  readonly principals: readonly string[];
+  readonly maxBadRefs: number;
+  readonly snoozeHours: number;
+  readonly refTtlHours: number;
+  readonly digestMaxCandidates: number;
+  readonly digestMaxEscalations: number;
+}
+
+export function parseGatewayReviewEntry(value: string): GatewayReviewPolicy {
+  const m = value.match(
+    /^\{\s*enabled:\s*(true|false),\s*principals:\s*\[([A-Za-z0-9_,\s]*)\],\s*max_bad_refs:\s*(\d+),\s*snooze_hours:\s*(\d+),\s*ref_ttl_hours:\s*(\d+),\s*digest_max_candidates:\s*(\d+),\s*digest_max_escalations:\s*(\d+)\s*\}$/,
+  );
+  if (m === null) {
+    throw new Error(
+      `policy: gateway.review must be "{ enabled: <bool>, principals: [name, …], max_bad_refs: <int>, snooze_hours: <int>, ref_ttl_hours: <int>, digest_max_candidates: <int>, digest_max_escalations: <int> }" (got '${value}')`,
+    );
+  }
+  const [maxBadRefs, snoozeHours, refTtlHours, digestMaxCandidates, digestMaxEscalations] = [
+    Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]), Number(m[7]),
+  ];
+  if (maxBadRefs <= 0 || snoozeHours <= 0 || refTtlHours <= 0 || digestMaxCandidates <= 0 || digestMaxEscalations <= 0) {
+    throw new Error("policy: gateway.review values must be positive");
+  }
+  return {
+    enabled: m[1] === "true",
+    principals: [...new Set((m[2] ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0))],
+    maxBadRefs,
+    snoozeHours,
+    refTtlHours,
+    digestMaxCandidates,
+    digestMaxEscalations,
   };
 }
 
@@ -256,6 +301,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const notificationEntries: Array<{ key: string; value: string }> = [];
   const gatewayPrincipals: Record<string, GatewayPrincipalPolicy> = {};
   const gatewayCapture: { value: GatewayCapturePolicy | null } = { value: null };
+  const gatewayReview: { value: GatewayReviewPolicy | null } = { value: null };
 
   for (const rawLine of text.split("\n")) {
     const line = stripComment(rawLine);
@@ -301,7 +347,6 @@ export function parsePolicyV1(text: string): PolicyV1 {
       notificationEntries.push({ key, value });
       continue;
     }
-    const gatewayCapture: { value: GatewayCapturePolicy | null } = { value: null };
     if (section === "gateway") {
       if (inGatewayPrincipals) {
         if (key === "principals") throw new Error("policy: duplicate gateway.principals key");
@@ -319,6 +364,11 @@ export function parsePolicyV1(text: string): PolicyV1 {
       if (key === "capture") {
         if (gatewayCapture.value !== null) throw new Error("policy: duplicate gateway.capture key");
         gatewayCapture.value = parseGatewayCaptureEntry(value);
+        continue;
+      }
+      if (key === "review") {
+        if (gatewayReview.value !== null) throw new Error("policy: duplicate gateway.review key");
+        gatewayReview.value = parseGatewayReviewEntry(value);
         continue;
       }
       throw new Error(`policy: unknown gateway key '${key}'`);
@@ -346,6 +396,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
     policy.gateway = {
       principals: gatewayPrincipals,
       ...(gatewayCapture.value !== null ? { capture: gatewayCapture.value } : {}),
+      ...(gatewayReview.value !== null ? { review: gatewayReview.value } : {}),
     };
   }
   return policy;

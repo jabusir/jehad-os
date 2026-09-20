@@ -48,6 +48,11 @@ notifications:
 # cheapest fast allowlisted model is the evals-pinned openai/gpt-4o-mini.
 gateway:
   capture: { enabled: true, principals: [josctl], max_per_hour: 5, dedupe_window_hours: 24 }
+  # review — Phase G deterministic review/control over iMessage
+  # (ig-phase-g-contracts.md §7). Control commands are exact-match, zero
+  # model calls (deterministicReply class); refs are owner-scoped 3-char
+  # Crockford codes minted per queue item at first surfacing.
+  review: { enabled: true, principals: [josctl], max_bad_refs: 3, snooze_hours: 24, ref_ttl_hours: 168, digest_max_candidates: 10, digest_max_escalations: 5 }
   principals:
     yusra: { model: openai/gpt-4o-mini, requests_per_hour: 20, cost_per_day: 2.0 }
     josctl: { model: openai/gpt-4o-mini, requests_per_hour: 30, cost_per_day: 5.0, reads: [calendar, commitments] }

@@ -192,6 +192,30 @@ const MORNING_FULL: MorningBriefData = {
     timezone: "America/Los_Angeles",
     location: "Google Meet",
   },
+  review: {
+    candidates: [
+      {
+        ref: "7K4",
+        itemType: "candidate",
+        itemId: "c-review-1",
+        summary: `josctl said: "I'm looking for a Porsche 911."`,
+        createdAt: NOW,
+        snoozeCount: 0,
+      },
+    ],
+    escalations: [
+      {
+        ref: "A2M",
+        itemType: "escalation",
+        itemId: "e-review-1",
+        summary: "approval_required (high)",
+        createdAt: NOW,
+        snoozeCount: 0,
+      },
+    ],
+    moreCandidates: 2,
+    moreEscalations: 0,
+  },
 };
 
 const MORNING_EMPTY: MorningBriefData = {
@@ -204,6 +228,7 @@ const MORNING_EMPTY: MorningBriefData = {
   escalations: { pending: 0, batched: 0, byReason: [] },
   todaySchedule: [],
   nextUpcoming: null,
+  review: null,
 };
 
 const MORNING_WITH_SCHEDULE: MorningBriefData = {
@@ -331,6 +356,11 @@ Escalations
 - 3 open (pending 2, batched 1)
 - ambiguous_requirements ×1
 - approval_required ×2
+
+Needs your call
+- [7K4] josctl said: "I'm looking for a Porsche 911."
+- [A2M] escalation approval_required (high)
+- …and 2 more
 `);
   });
 
@@ -341,6 +371,27 @@ Today
 - nothing scheduled
 
 All quiet — nothing waiting on you.
+`);
+  });
+
+  it("Phase G: the review section renders bounded items with refs and a combined overflow line", () => {
+    const bounded: MorningBriefData = {
+      ...MORNING_EMPTY,
+      review: {
+        candidates: MORNING_FULL.review!.candidates,
+        escalations: [],
+        moreCandidates: 5,
+        moreEscalations: 0,
+      },
+    };
+    expect(renderMorningBriefText(bounded)).toBe(`Morning brief — Thu, Sep 17
+
+Today
+- nothing scheduled
+
+Needs your call
+- [7K4] josctl said: "I'm looking for a Porsche 911."
+- …and 5 more
 `);
   });
 
@@ -406,6 +457,9 @@ describe("suppression predicates (§31 nothing-meaningful-changed)", () => {
     expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, escalations: { pending: 0, batched: 1, byReason: [] } })).toBe(true);
     // E3 owner call: a schedule is real attention — presence alone un-suppresses.
     expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, todaySchedule: MORNING_WITH_SCHEDULE.todaySchedule })).toBe(true);
+    // Phase G: a non-empty review queue alone un-suppresses (§4.2).
+    expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, review: MORNING_FULL.review })).toBe(true);
+    expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, review: { candidates: [], escalations: [], moreCandidates: 0, moreEscalations: 0 } })).toBe(false);
   });
 
   it("evening: calm world suppressed; each §31 signal alone makes it meaningful", () => {

@@ -145,6 +145,25 @@ function renderEscalations(data: MorningBriefData): string[] {
   ];
 }
 
+/**
+ * Phase G "Needs your call" section (ig-phase-g-contracts.md §4.2): live
+ * review refs with one-line item summaries (the candidate statement IS the
+ * review surface — ≤80 chars), bounded to the digest the data layer
+ * collected. Suppressed entirely when nothing waits (§31 no-noise rule).
+ */
+function renderReviewSection(data: MorningBriefData): string[] {
+  const review = data.review;
+  if (review === null) return [];
+  const items = review.candidates.length + review.escalations.length;
+  if (items === 0) return []; // suppression rule
+  const lines = ["Needs your call"];
+  for (const c of review.candidates) lines.push(`- [${c.ref}] ${c.summary}`);
+  for (const e of review.escalations) lines.push(`- [${e.ref}] escalation ${e.summary}`);
+  const more = review.moreCandidates + review.moreEscalations;
+  if (more > 0) lines.push(`- …and ${more} more`);
+  return lines;
+}
+
 /** Bulk import collapse: a single change kind with a large count is a
  *  backfill, not a human-readable delta (e.g. initial calendar sync). */
 const BULK_CHANGE_THRESHOLD = 20;
@@ -205,6 +224,7 @@ export function renderMorningBriefText(data: MorningBriefData): string {
   const blocked = renderBlockedStalled(data.blocked, data.stalled, new Set<string>());
   const unlock = renderUnlockBrief(data);
   const escalations = renderEscalations(data);
+  const review = renderReviewSection(data);
 
   const sections: string[][] = [
     renderTodaySchedule(data.todaySchedule, data.nextUpcoming),
@@ -213,6 +233,7 @@ export function renderMorningBriefText(data: MorningBriefData): string {
     blocked,
     unlock,
     escalations,
+    review,
   ].filter((section) => section.length > 0);
 
   const quiet = sections.length === 1 && whileAway.length === 0;

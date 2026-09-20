@@ -203,6 +203,7 @@ describe.skipIf(!TEST_DATABASE_URL)("backup → restore (integration)", () => {
       "010_imessage_sensor",
       "011_imessage_pairing",
       "012_interaction_threads",
+      "013_review_refs",
     ]);
   });
 });

@@ -31,6 +31,11 @@ import {
   localDayBounds,
   type TodayScheduleItem,
 } from "../calendar/projection.js";
+import {
+  DEFAULT_REVIEW_POLICY,
+  refsForBrief,
+  type ReviewDigest,
+} from "../imessage/review-commands.js";
 
 /** Briefs are a personal-operations surface (plan §13); artifacts land here. */
 export const BRIEF_DOMAIN_KEY = "personal";
@@ -44,6 +49,13 @@ export interface BriefOptions {
   readonly since?: Date | string;
   /** E4: also enqueue a kind=brief notification next to the artifact. */
   readonly notify?: boolean;
+  /**
+   * Phase G: the principal whose review queue feeds the "Needs your call"
+   * section (gateway.review owner — the queue is the owner's, §4.2).
+   * undefined → resolve the default review owner by name from the module
+   * default policy; explicit null disables the section.
+   */
+  readonly reviewPrincipalId?: string | null;
 }
 
 export interface EscalationReasonCount {
@@ -79,6 +91,15 @@ export interface MorningBriefData {
   readonly todaySchedule: readonly TodayScheduleItem[];
   /** Next event after today (quiet-day fallback — "next up: …"). */
   readonly nextUpcoming: TodayScheduleItem | null;
+  /**
+   * Phase G "Needs your call" section (§4.2): live review refs + one-line
+   * item summaries, bounded (10 candidates oldest-first + 5 urgency-ranked
+   * escalations). null when nothing waits (§31 suppression — the section
+   * with nothing to say says nothing). Briefs DO show the candidate
+   * statement (≤80 chars): it is the review surface, rendered by the
+   * deterministic pipeline — no LLM anywhere in briefs.
+   */
+  readonly review: ReviewDigest | null;
 }
 
 export interface EveningCloseData {
@@ -141,6 +162,23 @@ function resolveWindow(opts: BriefOptions): { now: Date; since: Date } {
   return { now, since };
 }
 
+/**
+ * Phase G: the review section's principal — the gateway.review owner.
+ * Single-tenant default: resolve the first name from the module default
+ * review policy; absent principal → no section (suppressed).
+ */
+async function resolveReviewPrincipalId(
+  db: QueryExecutor,
+  opts: BriefOptions,
+): Promise<string | null> {
+  if (opts.reviewPrincipalId === null) return null;
+  if (opts.reviewPrincipalId !== undefined) return opts.reviewPrincipalId;
+  const name = DEFAULT_REVIEW_POLICY.principals[0];
+  if (name === undefined) return null;
+  const result = await db.query(`SELECT id FROM principals WHERE name = $1 LIMIT 1`, [name]);
+  return result.rows[0] === undefined ? null : String(result.rows[0].id);
+}
+
 /** The top ranked decision that actually unblocks something (0-downstream candidates are not unlocks). */
 function pickUnlock(ranked: readonly LeverageDecision[]): LeverageDecision | null {
   return ranked.find((d) => d.transitiveDownstreamCount > 0) ?? null;
@@ -196,6 +234,24 @@ export async function collectMorningBriefData(
     eventGroups: filterCalendarDeltaToFuture(changed.eventGroups, now),
   };
 
+  // Phase G: the review section (§4.2) — suppressed entirely when the
+  // queue is empty (§31 no-noise rule).
+  const reviewPrincipalId = await resolveReviewPrincipalId(db, opts);
+  const reviewDigest =
+    reviewPrincipalId === null
+      ? null
+      : await refsForBrief(
+          db,
+          reviewPrincipalId,
+          now,
+          DEFAULT_REVIEW_POLICY.digestMaxCandidates,
+          { maxEscalations: DEFAULT_REVIEW_POLICY.digestMaxEscalations },
+        );
+  const review =
+    reviewDigest !== null && reviewDigest.candidates.length + reviewDigest.escalations.length > 0
+      ? reviewDigest
+      : null;
+
   return {
     kind: "brief",
     domainId: BRIEF_DOMAIN_KEY,
@@ -213,6 +269,7 @@ export async function collectMorningBriefData(
     escalations,
     todaySchedule,
     nextUpcoming,
+    review,
   };
 }
 
@@ -251,10 +308,12 @@ export async function collectEveningCloseData(
 /**
  * Morning renders iff ANY signal exists: overnight delta, an i_owe item
  * overdue/due-soon, anything blocked/stalled, a real unlock, open
- * escalations, or anything on today's calendar. Owner call (E3): a schedule
- * IS meaningful attention — a day with meetings is not a calm-empty day,
- * so todaySchedule presence alone un-suppresses the brief (documented in
- * infra/calendar/README.md). Empty world → suppressed (no artifact).
+ * escalations, anything on today's calendar, or a non-empty review queue
+ * (Phase G: items waiting on the owner's call ARE meaningful attention).
+ * Owner call (E3): a schedule IS meaningful attention — a day with
+ * meetings is not a calm-empty day, so todaySchedule presence alone
+ * un-suppresses the brief (documented in infra/calendar/README.md).
+ * Empty world → suppressed (no artifact).
  */
 export function isMorningBriefMeaningful(data: MorningBriefData): boolean {
   return (
@@ -271,7 +330,9 @@ export function isMorningBriefMeaningful(data: MorningBriefData): boolean {
     data.todaySchedule.length > 0 ||
     // A quiet day still deserves a heads-up about what's coming (the
     // "do I have anything tomorrow" answer, delivered before it's asked).
-    data.nextUpcoming !== null
+    data.nextUpcoming !== null ||
+    // Phase G: a non-empty review section un-suppresses (§4.2).
+    (data.review !== null && data.review.candidates.length + data.review.escalations.length > 0)
   );
 }
 

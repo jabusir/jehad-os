@@ -55,6 +55,7 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
     //    roll back exactly 004 — its down path drops the column.
     await migrateUp(pool, defaultMigrationsDir());
     expect(await migrateDown(pool, { to: "003_evidence_links" }, defaultMigrationsDir())).toEqual([
+      "013_review_refs",
       "012_interaction_threads",
       "011_imessage_pairing",
       "010_imessage_sensor",
@@ -86,6 +87,7 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
       "010_imessage_sensor",
       "011_imessage_pairing",
       "012_interaction_threads",
+      "013_review_refs",
     ]);
 
     const rows = (
@@ -112,6 +114,7 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
 
     // 5. A post-backfill down path still reverses 004 cleanly (005+ first).
     expect(await migrateDown(pool, { to: "003_evidence_links" }, defaultMigrationsDir())).toEqual([
+      "013_review_refs",
       "012_interaction_threads",
       "011_imessage_pairing",
       "010_imessage_sensor",
