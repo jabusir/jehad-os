@@ -266,15 +266,15 @@ export function formatDurationMs(durationMs: number): string {
 
 /** Contract §8 "proposed / awaiting-confirm": one message, no model call. */
 export function renderCalendarProposal(
-  confirmToken: string,
+  _confirmToken: string,
   title: string,
   startIso: string,
   endIso: string,
 ): string {
   return (
     `Calendar event proposed: "${title}" · ${formatCivilRange(startIso, endIso)} ` +
-    `(${formatDurationMs(Date.parse(endIso) - Date.parse(startIso))}) · your calendar.\n` +
-    `[${confirmToken}] Reply: confirm ${confirmToken} · cancel ${confirmToken}`
+    `(${formatDurationMs(Date.parse(endIso) - Date.parse(startIso))}) · your calendar. ` +
+    `Reply "confirm" to add it, or "cancel" to drop it.`
   );
 }
 
@@ -737,7 +737,6 @@ export async function confirmCalendarAction(
   db: SqlExecutor,
   input: ConfirmCalendarActionInput,
 ): Promise<ConfirmCalendarActionResult> {
-  const now = input.now;
   const policy = input.policy ?? DEFAULT_CALENDAR_ACTION_POLICY;
 
   // 1. Token shape + lookup by sha256(token) — exactly one intent.
@@ -751,6 +750,74 @@ export async function confirmCalendarAction(
     await audit(db, "imessage.action.rejected", { reason: "unknown-token" });
     return confirmResult("denied", CALENDAR_CONFIRM_USED_REPLY);
   }
+  return confirmIntentRow(db, row, input, policy);
+}
+
+/** Sole-live resolution for bare "confirm"/"cancel" (no code typed). */
+export type SoleLiveCalendarResolution =
+  | { readonly kind: "none" }
+  | { readonly kind: "ambiguous" }
+  | { readonly kind: "sole"; readonly row: IntentRow };
+
+export async function soleLiveCalendarIntent(
+  db: SqlExecutor,
+  input: { readonly principalId: string; readonly now: Date },
+): Promise<SoleLiveCalendarResolution> {
+  const result = await db.query(
+    `SELECT ${INTENT_COLUMNS} FROM action_intents
+      WHERE status = 'proposed'
+        AND payload->'confirm'->>'expiresAt' > $2
+        AND payload->'provenance'->>'principalId' = $1
+      ORDER BY created_at DESC`,
+    [input.principalId, input.now.toISOString()],
+  );
+  if (result.rows.length === 0) return { kind: "none" };
+  if (result.rows.length > 1) return { kind: "ambiguous" };
+  const row = result.rows[0];
+  if (row === undefined) return { kind: "none" };
+  return { kind: "sole", row: toIntentRow(row) };
+}
+
+const CALENDAR_NOTHING_PENDING_REPLY = "Nothing is waiting for confirmation right now.";
+const CALENDAR_AMBIGUOUS_REPLY = "More than one proposal is open — reply with its code, like: confirm XW1MS.";
+
+export type SoleCalendarActionResult =
+  | ({ readonly status: "none" | "ambiguous"; readonly reply: string })
+  | ConfirmCalendarActionResult;
+
+export async function confirmSoleCalendarAction(
+  db: SqlExecutor,
+  input: Omit<ConfirmCalendarActionInput, "confirmToken" | "payloadHashEcho">,
+): Promise<SoleCalendarActionResult> {
+  const policy = input.policy ?? DEFAULT_CALENDAR_ACTION_POLICY;
+  const sole = await soleLiveCalendarIntent(db, input);
+  if (sole.kind === "none") return { status: "none", reply: CALENDAR_NOTHING_PENDING_REPLY };
+  if (sole.kind === "ambiguous") return { status: "ambiguous", reply: CALENDAR_AMBIGUOUS_REPLY };
+  return confirmIntentRow(db, sole.row, { ...input, confirmToken: "", payloadHashEcho: undefined }, policy);
+}
+
+export async function cancelSoleCalendarAction(
+  db: SqlExecutor,
+  input: Omit<CancelCalendarActionInput, "confirmToken">,
+): Promise<{ readonly status: string; readonly reply: string; readonly intentId: string | null }> {
+  const sole = await soleLiveCalendarIntent(db, input);
+  if (sole.kind === "none") return { status: "none", reply: CALENDAR_NOTHING_PENDING_REPLY, intentId: null };
+  if (sole.kind === "ambiguous") return { status: "ambiguous", reply: CALENDAR_AMBIGUOUS_REPLY, intentId: null };
+  const row = sole.row;
+  const svc = new ActionService(db, nonDispatchingProvider());
+  await svc.cancelIntent({ intentId: row.intent.id, actor: actorFor(row) });
+  await audit(db, "imessage.action.cancelled", { intentId: row.intent.id }, { intentId: row.intent.id });
+  return { status: "cancelled", reply: CALENDAR_CANCELLED_REPLY, intentId: row.intent.id };
+}
+
+/** Steps 2+ of the confirm pipeline, shared by token and sole-live paths. */
+async function confirmIntentRow(
+  db: SqlExecutor,
+  row: IntentRow,
+  input: ConfirmCalendarActionInput,
+  policy: CalendarActionPolicy,
+): Promise<ConfirmCalendarActionResult> {
+  const now = input.now;
 
   // 2. Principal match — fail closed + audit (adversary #5).
   const ownerPrincipalId = row.payload.provenance?.principalId;

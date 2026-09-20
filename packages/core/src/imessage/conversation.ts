@@ -41,7 +41,12 @@ import {
   resolveActiveThread,
   type WorkingContext,
 } from "./threads.js";
-import { proposeCalendarAction, type CalendarActionPolicy } from "./calendar-actions.js";
+import {
+  cancelSoleCalendarAction,
+  confirmSoleCalendarAction,
+  proposeCalendarAction,
+  type CalendarActionPolicy,
+} from "./calendar-actions.js";
 import {
   DEFAULT_CAPTURE_POLICY,
   considerCapture,
@@ -139,6 +144,7 @@ export function buildConversationPrompt(
     `You are a helpful, concise assistant chatting over iMessage with ${principalName}.`,
     `You are running as the model "${model}" via OpenRouter on a private message gateway — when asked what model you are, answer honestly and specifically with that model id.`,
     "You have no access to any external systems, tools, calendars, files, or accounts, and you cannot perform actions — answer from this conversation alone.",
+    "Never claim you scheduled, created, sent, or changed anything — you cannot. If asked whether something was scheduled or added, say you can't do that here and that confirm codes handle it.",
     "You are text-only: you cannot see images or attachments; if one seems to be referenced, say so plainly.",
     "If asked about schedules, to-dos, or anything requiring data you do not have, say plainly that you have no data sources connected for this chat.",
     "Keep each reply under 1500 characters.",
@@ -212,6 +218,7 @@ export function buildAnswerPrompt(
     `You are a helpful, concise assistant chatting over iMessage with ${principalName}.`,
     `You are running as the model "${model}" via OpenRouter on a private message gateway — when asked what model you are, answer honestly and specifically with that model id.`,
     "You can ground answers ONLY in the retrieved data below (if any). You have no other tools, access, or memory.",
+    "Never claim you scheduled, created, sent, or changed anything — you cannot. Scheduling happens only through the confirm-code flow, not you.",
   ];
   if (results.length > 0) {
     lines.push(
@@ -451,16 +458,19 @@ async function converseTurn(
     // Parsed as a command but not handled (grammar edge) — fall through.
   }
 
-  // Phase H resolver verbs: confirm/cancel <REF> for proposed actions.
-  // Deliberately DISTINCT from G's approve (different trust rung).
-  const hVerb = /^(confirm|cancel)\s+([A-Za-z0-9]+)$/i.exec(input.text.trim());
+  // Phase H resolver verbs: "confirm"/"cancel", optionally with a code,
+  // optionally with trailing punctuation — bare verbs resolve the SOLE
+  // live proposal for this principal. Deliberately DISTINCT from G's
+  // approve (different trust rung).
+  const hVerb = /^(confirm|cancel)(?:\s+([A-Za-z0-9]+))?\s*[.!?]*$/i.exec(input.text.trim());
   if (hVerb !== null) {
-    const token = normalizeConfirmToken(hVerb[2]!);
+    const rawToken = (hVerb[2] ?? "").trim();
+    const token = rawToken === "" ? null : normalizeConfirmToken(rawToken);
     const actionPolicy =
       deps.calendarActionPolicy ??
       calendarActionsFromPolicyV1(await loadConversationPolicyFile()) ??
       DEFAULT_CALENDAR_ACTION_POLICY;
-    if (token === null) {
+    if (rawToken !== "" && token === null) {
       return deterministicReply(deps, input, ctx, {
         content: "That confirmation code doesn't look valid — nothing was changed.",
         outboundTrust: "system_generated",
@@ -480,25 +490,40 @@ async function converseTurn(
           marker: "action-confirm-no-provider",
         });
       }
-      const result = await confirmCalendarAction(db, {
-        principalId: input.principalId,
-        confirmToken: token,
-        now,
-        policy: actionPolicy,
-        provider: deps.actionProvider as NonNullable<ConfirmCalendarActionInput["provider"]>,
-      });
+      const result =
+        token !== null
+          ? await confirmCalendarAction(db, {
+              principalId: input.principalId,
+              confirmToken: token,
+              now,
+              policy: actionPolicy,
+              provider: deps.actionProvider as NonNullable<ConfirmCalendarActionInput["provider"]>,
+            })
+          : await confirmSoleCalendarAction(db, {
+              principalId: input.principalId,
+              now,
+              policy: actionPolicy,
+              provider: deps.actionProvider as NonNullable<ConfirmCalendarActionInput["provider"]>,
+            });
       return deterministicReply(deps, input, ctx, {
         content: result.reply,
         outboundTrust: "system_generated",
         marker: `action-confirm-${result.status}`,
       });
     }
-    const result = await cancelCalendarAction(db, {
-      principalId: input.principalId,
-      confirmToken: token,
-      now,
-      policy: actionPolicy,
-    });
+    const result =
+      token !== null
+        ? await cancelCalendarAction(db, {
+            principalId: input.principalId,
+            confirmToken: token,
+            now,
+            policy: actionPolicy,
+          })
+        : await cancelSoleCalendarAction(db, {
+            principalId: input.principalId,
+            now,
+            policy: actionPolicy,
+          });
     return deterministicReply(deps, input, ctx, {
       content: result.reply,
       outboundTrust: "system_generated",

@@ -186,8 +186,8 @@ function propose(overrides: {
     expect(normalizeConfirmToken(out.confirmToken)).toBe(out.confirmToken);
     expect(out.expiresAt.getTime()).toBeGreaterThan(Date.now() + 9 * 60_000);
     expect(out.render).toContain('"Dentist"');
-    expect(out.render).toContain(`confirm ${out.confirmToken}`);
-    expect(out.render).toContain(`cancel ${out.confirmToken}`);
+    expect(out.render).toContain('Reply "confirm" to add it, or "cancel" to drop it.');
+    expect(out.render).not.toContain(out.confirmToken);
 
     const rows = await db.pool.query(`SELECT * FROM action_intents`);
     expect(rows.rows).toHaveLength(1);

@@ -539,6 +539,40 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     expect(audits.rows.map((r: { action: string }) => r.action)).toEqual(["imessage.action.clarify"]);
   });
 
+  it("H-CONFIRM bare verbs: 'confirm' (no code) confirms the sole live proposal — the live failure replay", async () => {
+    await grant(jehadId);
+    queue = [
+      {
+        text: '{"reply_kind":"action","action":"calendar.create","title":"Henna","day":"tomorrow","time":"2pm","end_time":"11pm","duration_minutes":null}',
+      },
+    ];
+    await turn(jehadId, JEHAD, "add Henna tomorrow from 2pm to 11pm");
+    // Bare "confirm" (exactly what the owner typed live): no provider is
+    // configured in these deps → honest no-provider reply, NOT model prose.
+    now = new Date(now.getTime() + 30_000);
+    const outcome = await turn(jehadId, JEHAD, "confirm");
+    expect(outcome.replied).toBe(true);
+    expect(provider.requests.length).toBe(1); // still zero extra model calls
+    const reply = (
+      await db.pool.query(
+        "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
+      )
+    ).rows[0]!.c as string;
+    expect(reply).toContain("can't reach the calendar");
+  });
+
+  it("H-CONFIRM bare 'cancel' with nothing pending is honest; trailing punctuation tolerated", async () => {
+    await grant(jehadId);
+    const outcome = await turn(jehadId, JEHAD, "cancel.");
+    expect(outcome.replied).toBe(true);
+    const reply = (
+      await db.pool.query(
+        "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
+      )
+    ).rows[0]!.c as string;
+    expect(reply).toContain("Nothing is waiting");
+  });
+
   it("H-PROPOSE: action-shaped but invalid route JSON falls through to the normal chat path", async () => {
     await grant(jehadId);
     queue = [
