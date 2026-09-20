@@ -59,6 +59,8 @@ export interface GatewayPolicyV1 {
   readonly principals: Readonly<Record<string, GatewayPrincipalPolicy>>;
   /** Phase F capture config (gateway.capture); absent → module default. */
   readonly capture?: GatewayCapturePolicy;
+  /** Phase H action-lane config (gateway.actions); absent → module default. */
+  readonly actions?: GatewayActionsPolicy;
 }
 
 export interface GatewayPrincipalPolicy {
@@ -111,6 +113,49 @@ export function parseGatewayCaptureEntry(value: string): GatewayCapturePolicy {
     principals: [...new Set((m[2] ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0))],
     maxPerHour,
     dedupeWindowHours,
+  };
+}
+
+/**
+ * Phase H action-lane policy — `gateway.actions`
+ * (ig-phase-h-contracts.md §7): `{ enabled: <bool>, principals: [name, …],
+ * max_proposals_per_day: <int>, max_dispatches_per_day: <int>,
+ * confirm_ttl_minutes: <int> }` in that key order. Strict shape mirroring
+ * gateway.capture; anything else throws (fail closed). Confirmation is
+ * ALWAYS required — there is deliberately no key that could disable it.
+ */
+export interface GatewayActionsPolicy {
+  readonly enabled: boolean;
+  readonly principals: readonly string[];
+  /** Proposal flood bound (UTC day, per principal) — never disables confirm. */
+  readonly maxProposalsPerDay: number;
+  /** Confirmed-dispatch flood bound (UTC day, per principal). */
+  readonly maxDispatchesPerDay: number;
+  /** Confirm-token TTL in minutes (expiry cancels the intent). */
+  readonly confirmTtlMinutes: number;
+}
+
+export function parseGatewayActionsEntry(value: string): GatewayActionsPolicy {
+  const m = value.match(
+    /^\{\s*enabled:\s*(true|false),\s*principals:\s*\[([A-Za-z0-9_,\s]*)\],\s*max_proposals_per_day:\s*(\d+),\s*max_dispatches_per_day:\s*(\d+),\s*confirm_ttl_minutes:\s*(\d+)\s*\}$/,
+  );
+  if (m === null) {
+    throw new Error(
+      `policy: gateway.actions must be "{ enabled: <bool>, principals: [name, …], max_proposals_per_day: <int>, max_dispatches_per_day: <int>, confirm_ttl_minutes: <int> }" (got '${value}')`,
+    );
+  }
+  const maxProposalsPerDay = Number(m[3]);
+  const maxDispatchesPerDay = Number(m[4]);
+  const confirmTtlMinutes = Number(m[5]);
+  if (maxProposalsPerDay <= 0 || maxDispatchesPerDay <= 0 || confirmTtlMinutes <= 0) {
+    throw new Error("policy: gateway.actions caps must be positive");
+  }
+  return {
+    enabled: m[1] === "true",
+    principals: [...new Set((m[2] ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0))],
+    maxProposalsPerDay,
+    maxDispatchesPerDay,
+    confirmTtlMinutes,
   };
 }
 
@@ -256,6 +301,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const notificationEntries: Array<{ key: string; value: string }> = [];
   const gatewayPrincipals: Record<string, GatewayPrincipalPolicy> = {};
   const gatewayCapture: { value: GatewayCapturePolicy | null } = { value: null };
+  const gatewayActions: { value: GatewayActionsPolicy | null } = { value: null };
 
   for (const rawLine of text.split("\n")) {
     const line = stripComment(rawLine);
@@ -301,7 +347,6 @@ export function parsePolicyV1(text: string): PolicyV1 {
       notificationEntries.push({ key, value });
       continue;
     }
-    const gatewayCapture: { value: GatewayCapturePolicy | null } = { value: null };
     if (section === "gateway") {
       if (inGatewayPrincipals) {
         if (key === "principals") throw new Error("policy: duplicate gateway.principals key");
@@ -319,6 +364,11 @@ export function parsePolicyV1(text: string): PolicyV1 {
       if (key === "capture") {
         if (gatewayCapture.value !== null) throw new Error("policy: duplicate gateway.capture key");
         gatewayCapture.value = parseGatewayCaptureEntry(value);
+        continue;
+      }
+      if (key === "actions") {
+        if (gatewayActions.value !== null) throw new Error("policy: duplicate gateway.actions key");
+        gatewayActions.value = parseGatewayActionsEntry(value);
         continue;
       }
       throw new Error(`policy: unknown gateway key '${key}'`);
@@ -346,6 +396,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
     policy.gateway = {
       principals: gatewayPrincipals,
       ...(gatewayCapture.value !== null ? { capture: gatewayCapture.value } : {}),
+      ...(gatewayActions.value !== null ? { actions: gatewayActions.value } : {}),
     };
   }
   return policy;

@@ -1,4 +1,4 @@
-# infra/calendar — Google Calendar read-only sensor (E3)
+# infra/calendar — Google Calendar read-only sensor (E3) + write provider (H)
 
 Jehad OS reads your Google Calendar as a **sensor**: it observes events and
 records structured changes (`calendar.event.created | updated | cancelled`).
@@ -6,6 +6,26 @@ It NEVER creates, updates, or deletes anything in Google — Calendar stays
 authoritative for the calendar event itself. (The read-only property is
 adversarially pinned: `packages/adapters/src/source-adapters/google-calendar.test.ts`
 asserts every issued call is `GET …/calendar/v3/calendars/{id}/events`.)
+
+## Write provider + grant (Phase H — calendar_create, the one v1 action)
+
+Phase H adds exactly one write path out of the control plane:
+`createGoogleCalendarWriteProvider` (`packages/adapters/src/action-providers/google-calendar-write.ts`)
+can insert ONE tentative event on the owner's primary calendar via
+`POST …/events` — same Google credential (`envOrKeychainTokenProvider`, the
+`jehad-gcalendar` Keychain item / `GCALENDAR_ACCESS_TOKEN`), plain fetch, no
+SDK, no self-retries (the M4B attempt chain owns retries via idempotency
+keys, and every created event carries
+`extendedProperties.private.idempotencyKey` so a read-back lookup can
+resolve an ambiguous dispatch to exactly one event). It is reachable ONLY
+through the always-confirm action lane (`packages/core/src/imessage/calendar-actions.ts`):
+an owner-confirmed proposal mints a short-lived ADR-0007 capability grant
+`act:google-calendar` on `calendar:primary` (TTL ~5 minutes) that
+`ActionService.startAttempt` verifies BEFORE any attempt row or effect —
+there is no standing grant, no quota-bought silence, and no configuration
+key that could skip per-action confirmation. Deletes, modifications,
+invitees, and recurrence stay not-now for v1; undo is the owner deleting
+the event in one tap.
 
 ## Token bootstrap (owner, manual — no OAuth flow is implemented)
 
