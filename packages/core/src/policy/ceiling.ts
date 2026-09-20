@@ -33,6 +33,100 @@ export interface PolicyV1 {
   notifications?: NotificationsPolicyV1;
   /** iMessage gateway principal budgets (multi-principal Lane P); absent → deny. */
   gateway?: GatewayPolicyV1;
+  /**
+   * Sensor config (GMAIL; plan gmail-sensor-contracts §5/§10.3). Absent →
+   * module defaults with enabled:false (fail-safe: the kill switch holds
+   * until the owner ratifies the section).
+   */
+  sensors?: SensorsPolicyV1;
+}
+
+/**
+ * The `sensors:` section — per-sensor policy keyed by sensor name. Strict
+ * fail-closed parse like every other section: unknown sensor keys throw.
+ */
+export interface SensorsPolicyV1 {
+  /** `sensors.gmail` (§5 sender policy, §10.3 shape). */
+  readonly gmail?: GmailSensorPolicy;
+}
+
+/**
+ * policy.yaml `sensors.gmail` (gmail-sensor-contracts §5/§10.3): metadata
+ * ingest for ALL senders; DETERMINISTIC extraction only for senders
+ * matching `extract_senders` globs over the From address. Defaults are
+ * fail-safe: disabled, no extraction senders, owner-ratifiable caps.
+ */
+export interface GmailSensorPolicy {
+  /** Kill switch (§9.4): false halts the sensor without touching credentials. */
+  readonly enabled: boolean;
+  /**
+   * Poll cadence (cron). OWNED BY THE WORKFLOW LANE (G3) — core ignores it;
+   * null = the workflow's own default cadence applies.
+   */
+  readonly pollCron: string | null;
+  /** Bootstrap window in days (§3.4 / ESCALATE-3; default 30). */
+  readonly bootstrapDays: number;
+  /** Extraction allowlist globs over the From address (§5.1; default none). */
+  readonly extractSenders: readonly string[];
+  /** Flood/quota cap per poll (§9.3; default 50). */
+  readonly maxMessagesPerPoll: number;
+  /** Candidate-lane flood cap per UTC day (§6.6; default 20). */
+  readonly maxCandidatesPerDay: number;
+}
+
+/** §10.3 defaults — fail-safe (disabled) until the owner ratifies. */
+export const DEFAULT_GMAIL_SENSOR_POLICY: GmailSensorPolicy = {
+  enabled: false,
+  pollCron: null,
+  bootstrapDays: 30,
+  extractSenders: [],
+  maxMessagesPerPoll: 50,
+  maxCandidatesPerDay: 20,
+};
+
+/** One extraction-sender glob: exactly one `@`, structured chars, `*` wild. */
+const EXTRACT_SENDER_RE = /^[A-Za-z0-9_.%+-]*\*[A-Za-z0-9_.%+-]*@[A-Za-z0-9.*-]+|[A-Za-z0-9_.%+-]+@[A-Za-z0-9.*-]*\*[A-Za-z0-9.*-]*$/;
+
+/**
+ * `sensors.gmail` flow-mapping parse — exactly
+ * `{ enabled: <bool>, poll_cron: "<cron>", bootstrap_window_days: <int>,
+ * extract_senders: [glob, …], max_messages_per_poll: <int>,
+ * max_candidates_per_day: <int> }` in that key order (§10.3 strict shape;
+ * the gateway.capture pattern). Anything else throws (fail closed).
+ */
+export function parseSensorsGmailEntry(value: string): GmailSensorPolicy {
+  const m = value.match(
+    /^\{\s*enabled:\s*(true|false),\s*poll_cron:\s*"([^"]+)",\s*bootstrap_window_days:\s*(\d+),\s*extract_senders:\s*\[([A-Za-z0-9_@.*%+\s,-]*)\],\s*max_messages_per_poll:\s*(\d+),\s*max_candidates_per_day:\s*(\d+)\s*\}$/,
+  );
+  if (m === null) {
+    throw new Error(
+      `policy: sensors.gmail must be '{ enabled: <bool>, poll_cron: "<cron>", bootstrap_window_days: <int>, extract_senders: [glob, …], max_messages_per_poll: <int>, max_candidates_per_day: <int> }' (got '${value}')`,
+    );
+  }
+  const [bootstrapDays, maxMessagesPerPoll, maxCandidatesPerDay] = [
+    Number(m[3]), Number(m[5]), Number(m[6]),
+  ];
+  if (bootstrapDays <= 0 || maxMessagesPerPoll <= 0 || maxCandidatesPerDay <= 0) {
+    throw new Error("policy: sensors.gmail caps must be positive");
+  }
+  const senders = [...new Set(
+    (m[4] ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0),
+  )];
+  for (const pattern of senders) {
+    if (!EXTRACT_SENDER_RE.test(pattern)) {
+      throw new Error(
+        `policy: sensors.gmail extract_senders entry '${pattern}' must be a glob with exactly one '@' (e.g. billing@*, *@stripe.com, billing@acme.com)`,
+      );
+    }
+  }
+  return {
+    enabled: m[1] === "true",
+    pollCron: m[2]!,
+    bootstrapDays,
+    extractSenders: senders,
+    maxMessagesPerPoll,
+    maxCandidatesPerDay,
+  };
 }
 
 /**
@@ -338,16 +432,18 @@ function stripComment(line: string): string {
 export function parsePolicyV1(text: string): PolicyV1 {
   const ceiling: Partial<Record<ActionType, AutonomyLevel>> = {};
   let version: number | undefined;
-  let section: "autonomy_ceiling" | "notifications" | "gateway" | null = null;
+  let section: "autonomy_ceiling" | "notifications" | "gateway" | "sensors" | null = null;
   let sawCeiling = false;
   let sawNotifications = false;
   let sawGateway = false;
+  let sawSensors = false;
   let inGatewayPrincipals = false;
   const notificationEntries: Array<{ key: string; value: string }> = [];
   const gatewayPrincipals: Record<string, GatewayPrincipalPolicy> = {};
   const gatewayCapture: { value: GatewayCapturePolicy | null } = { value: null };
   const gatewayReview: { value: GatewayReviewPolicy | null } = { value: null };
   const gatewayActions: { value: GatewayActionsPolicy | null } = { value: null };
+  const sensorsGmail: { value: GmailSensorPolicy | null } = { value: null };
 
   for (const rawLine of text.split("\n")) {
     const line = stripComment(rawLine);
@@ -380,6 +476,11 @@ export function parsePolicyV1(text: string): PolicyV1 {
         if (sawGateway) throw new Error("policy: duplicate gateway key");
         sawGateway = true;
         section = "gateway";
+      } else if (key === "sensors") {
+        if (value !== "") throw new Error("policy: sensors must be a mapping");
+        if (sawSensors) throw new Error("policy: duplicate sensors key");
+        sawSensors = true;
+        section = "sensors";
       } else {
         throw new Error(`policy: unknown top-level key '${key}'`);
       }
@@ -392,6 +493,14 @@ export function parsePolicyV1(text: string): PolicyV1 {
     if (section === "notifications") {
       notificationEntries.push({ key, value });
       continue;
+    }
+    if (section === "sensors") {
+      if (key === "gmail") {
+        if (sensorsGmail.value !== null) throw new Error("policy: duplicate sensors.gmail key");
+        sensorsGmail.value = parseSensorsGmailEntry(value);
+        continue;
+      }
+      throw new Error(`policy: unknown sensors key '${key}'`);
     }
     if (section === "gateway") {
       if (inGatewayPrincipals) {
@@ -451,12 +560,23 @@ export function parsePolicyV1(text: string): PolicyV1 {
       ...(gatewayActions.value !== null ? { actions: gatewayActions.value } : {}),
     };
   }
+  if (sawSensors && sensorsGmail.value !== null) {
+    policy.sensors = { gmail: sensorsGmail.value };
+  }
   return policy;
 }
 
 /** Loads and parses a policy.yaml file from disk. Fails closed on any error. */
 export async function loadPolicyFile(path: string | URL): Promise<PolicyV1> {
   return parsePolicyV1(await readFile(path, "utf8"));
+}
+
+/**
+ * The effective sensors.gmail policy: the parsed section when present,
+ * else the fail-safe defaults (enabled:false — §9.4 kill switch holds).
+ */
+export function gmailSensorPolicyOf(policy: PolicyV1): GmailSensorPolicy {
+  return policy.sensors?.gmail ?? DEFAULT_GMAIL_SENSOR_POLICY;
 }
 
 /** The configured ceiling for an action type. Unknown types throw. */
