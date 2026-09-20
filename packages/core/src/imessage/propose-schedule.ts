@@ -107,12 +107,13 @@ function dayIsoOf(instant: Date): string {
 export interface ResolveProposedScheduleInput {
   readonly day: "today" | "tomorrow";
   readonly time: string | null;
+  readonly endTime: string | null;
   readonly durationMinutes: number | null;
 }
 
 export type ResolvedProposedSchedule =
   | { readonly ok: true; readonly startIso: string; readonly endIso: string; readonly dateIso: string }
-  | { readonly ok: false; readonly reason: "time-missing" | "time-unparsable" };
+  | { readonly ok: false; readonly reason: "time-missing" | "time-unparsable" | "end-unparsable" | "range-invalid" };
 
 /**
  * Resolve the propose flow's day + wall-clock string to absolute ISO instants
@@ -138,7 +139,25 @@ export function resolveProposedSchedule(
   if (!isBare && input.day === "today" && start.getTime() <= now.getTime()) {
     start = new Date(start.getTime() + 24 * 60 * 60 * 1000);
   }
-  const durationMinutes = input.durationMinutes ?? PROPOSE_DEFAULT_DURATION_MINUTES;
+  let durationMinutes = input.durationMinutes ?? PROPOSE_DEFAULT_DURATION_MINUTES;
+  if (input.endTime != null) {
+    const parsedEnd = parseWallClock(input.endTime);
+    if (parsedEnd === null) return { ok: false, reason: "end-unparsable" };
+    let endInstant = wallTimeToInstant(
+      anchor.year,
+      anchor.month,
+      anchor.day,
+      parsedEnd.hour,
+      parsedEnd.minute,
+    );
+    if (endInstant.getTime() <= start.getTime()) {
+      // Overnight range ("9pm to 2am") — roll the end past midnight.
+      endInstant = new Date(endInstant.getTime() + 24 * 60 * 60 * 1000);
+    }
+    const derived = Math.round((endInstant.getTime() - start.getTime()) / 60_000);
+    if (derived < 15 || derived > 720) return { ok: false, reason: "range-invalid" };
+    durationMinutes = derived;
+  }
   const end = new Date(start.getTime() + durationMinutes * 60_000);
   return {
     ok: true,

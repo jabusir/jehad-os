@@ -19,6 +19,7 @@ export interface ActionRouteRequest {
   readonly title: string;
   readonly day: "today" | "tomorrow";
   readonly time: string | null;
+  readonly endTime: string | null;
   readonly durationMinutes: number | null;
 }
 
@@ -31,7 +32,7 @@ const CAP_TIME_CHARS = 8;
 const TITLE_MIN = 1;
 const TITLE_MAX = 120;
 const DURATION_MIN = 15;
-const DURATION_MAX = 240;
+const DURATION_MAX = 720;
 
 /**
  * First JSON object in the text — fenced, bare, or prose-wrapped;
@@ -99,6 +100,14 @@ export function parseActionRouteJson(text: string): ActionRouteRequest | null {
     if (!TIME_PATTERN.test(rawTime)) return null;
     time = rawTime;
   }
+  const rawEndTime = obj["end_time"] ?? null;
+  let endTime: string | null = null;
+  if (rawEndTime !== null) {
+    if (typeof rawEndTime !== "string") return null;
+    if (rawEndTime.length > CAP_TIME_CHARS) return null;
+    if (!TIME_PATTERN.test(rawEndTime)) return null;
+    endTime = rawEndTime;
+  }
   const rawDuration = obj["duration_minutes"];
   let durationMinutes: number | null = null;
   if (rawDuration !== null) {
@@ -110,7 +119,7 @@ export function parseActionRouteJson(text: string): ActionRouteRequest | null {
   if (typeof obj["title"] !== "string") return null;
   const title = sanitizeTitle(obj["title"]);
   if (title.length < TITLE_MIN || title.length > TITLE_MAX) return null;
-  return { action: "calendar.create", title, day, time, durationMinutes };
+  return { action: "calendar.create", title, day, time, endTime, durationMinutes };
 }
 
 /**
@@ -121,17 +130,19 @@ export function parseActionRouteJson(text: string): ActionRouteRequest | null {
 export function buildActionRoutingInstructions(): string {
   return [
     "Scheduling actions: in addition to the lookups above, if the user imperatively asks you to add an event to their calendar, respond with ONLY this JSON object on a single line, no prose, no markdown:",
-    '{"reply_kind":"action","action":"calendar.create","title":"<event name>","day":"today"|"tomorrow","time":"<wall-clock string>"|null,"duration_minutes":<minutes integer>|null}',
+    '{"reply_kind":"action","action":"calendar.create","title":"<event name>","day":"today"|"tomorrow","time":"<wall-clock string>"|null,"end_time":"<wall-clock string>"|null,"duration_minutes":<minutes integer>|null}',
     "Field rules:",
     '- day: "today" or "tomorrow" only. An unsaid day means today. If the user names any other day ("tuesday", "next week"), do NOT emit the action — fall back to {"tool":"none"}.',
     '- title: the event name WITHOUT the day/time words, at most 120 characters ("schedule Dentist tomorrow at 7pm" → title "Dentist").',
     '- time: the wall-clock string exactly as written ("7pm", "19:00"), or null if no time was stated. Never invent a time.',
     '- duration_minutes: an integer, only when explicitly stated ("for 90 minutes" → 90); otherwise null.',
+    '- end_time: the wall-clock END time when the user gives a range ("from 2pm to 11pm" → time "2pm", end_time "11pm", duration_minutes null). Prefer end_time over duration_minutes when both are inferable; never invent one.',
     'Emit the action ONLY for imperative scheduling requests: "add X to my calendar", "schedule X tomorrow at 7pm", "put X on my calendar".',
     "Emit exactly ONE JSON object in total — either the lookup shape or the action shape, never both, never two.",
     'NEVER emit the action for questions ("do I have anything tomorrow?"), hypotheticals ("maybe I should schedule X"), negations ("don\'t schedule X"), or events beyond tomorrow (later this week, next week).',
     "Examples:",
-    '"put Dentist on my calendar tomorrow at 7pm for 90 minutes" → {"reply_kind":"action","action":"calendar.create","title":"Dentist","day":"tomorrow","time":"7pm","duration_minutes":90}',
+    '"put Dentist on my calendar tomorrow at 7pm for 90 minutes" → {"reply_kind":"action","action":"calendar.create","title":"Dentist","day":"tomorrow","time":"7pm","end_time":null,"duration_minutes":90}',
+    '"add Henna tomorrow from 2pm to 11pm" → {"reply_kind":"action","action":"calendar.create","title":"Henna","day":"tomorrow","time":"2pm","end_time":"11pm","duration_minutes":null}',
     '"do I have anything on my calendar tomorrow?" → NOT an action → {"tool":"calendar.day","day":"tomorrow"}',
   ].join("\n");
 }

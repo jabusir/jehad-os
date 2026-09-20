@@ -68,19 +68,19 @@ describe("resolveProposedSchedule (server-side, DST-safe)", () => {
   const NOW_10AM = new Date("2026-09-19T10:00:00-07:00");
 
   it("time null → time-missing (no default-time proposals)", () => {
-    expect(resolveProposedSchedule({ day: "today", time: null, durationMinutes: 60 }, NOW_10AM)).toEqual({
+    expect(resolveProposedSchedule({ day: "today", time: null, endTime: null, durationMinutes: 60 }, NOW_10AM)).toEqual({
       ok: false,
       reason: "time-missing",
     });
     expect(
-      resolveProposedSchedule({ day: "tomorrow", time: null, durationMinutes: null }, NOW_10AM),
+      resolveProposedSchedule({ day: "tomorrow", time: null, endTime: null, durationMinutes: null }, NOW_10AM),
     ).toEqual({ ok: false, reason: "time-missing" });
   });
 
   it("unparsable time → time-unparsable", () => {
     for (const time of ["banana", "25:00", "7:60", ""]) {
       expect(
-        resolveProposedSchedule({ day: "today", time, durationMinutes: 60 }, NOW_10AM),
+        resolveProposedSchedule({ day: "today", time, endTime: null, durationMinutes: 60 }, NOW_10AM),
         time,
       ).toEqual({ ok: false, reason: "time-unparsable" });
     }
@@ -126,7 +126,7 @@ describe("resolveProposedSchedule (server-side, DST-safe)", () => {
   });
 
   it("bare '7' at 10am → today 19:00 (next occurrence, pm sooner)", () => {
-    const r = resolveProposedSchedule({ day: "today", time: "7", durationMinutes: 60 }, NOW_10AM);
+    const r = resolveProposedSchedule({ day: "today", time: "7", endTime: null, durationMinutes: 60 }, NOW_10AM);
     expect(r).toEqual({
       ok: true,
       startIso: "2026-09-20T02:00:00.000Z",
@@ -137,7 +137,7 @@ describe("resolveProposedSchedule (server-side, DST-safe)", () => {
 
   it("bare '7' at 8pm → tomorrow 07:00 (both of today's occurrences past)", () => {
     const now = new Date("2026-09-19T20:00:00-07:00");
-    const r = resolveProposedSchedule({ day: "today", time: "7", durationMinutes: 60 }, now);
+    const r = resolveProposedSchedule({ day: "today", time: "7", endTime: null, durationMinutes: 60 }, now);
     expect(r).toEqual({
       ok: true,
       startIso: "2026-09-20T14:00:00.000Z",
@@ -148,7 +148,7 @@ describe("resolveProposedSchedule (server-side, DST-safe)", () => {
 
   it("bare '7' at 6am → today 07:00 (am occurrence sooner)", () => {
     const now = new Date("2026-09-19T06:00:00-07:00");
-    const r = resolveProposedSchedule({ day: "today", time: "7", durationMinutes: 60 }, now);
+    const r = resolveProposedSchedule({ day: "today", time: "7", endTime: null, durationMinutes: 60 }, now);
     expect(r).toEqual({
       ok: true,
       startIso: "2026-09-19T14:00:00.000Z",
@@ -158,7 +158,7 @@ describe("resolveProposedSchedule (server-side, DST-safe)", () => {
   });
 
   it("bare '3' at 10am → today 15:00 (rule generalizes past 7-11)", () => {
-    const r = resolveProposedSchedule({ day: "today", time: "3", durationMinutes: 60 }, NOW_10AM);
+    const r = resolveProposedSchedule({ day: "today", time: "3", endTime: null, durationMinutes: 60 }, NOW_10AM);
     expect(r).toEqual({
       ok: true,
       startIso: "2026-09-19T22:00:00.000Z",
@@ -169,7 +169,7 @@ describe("resolveProposedSchedule (server-side, DST-safe)", () => {
 
   it("bare '7' exactly at 19:00:00 → tomorrow 07:00 (strictly-future boundary)", () => {
     const now = new Date("2026-09-19T19:00:00-07:00");
-    const r = resolveProposedSchedule({ day: "today", time: "7", durationMinutes: 60 }, now);
+    const r = resolveProposedSchedule({ day: "today", time: "7", endTime: null, durationMinutes: 60 }, now);
     expect(r).toEqual({
       ok: true,
       startIso: "2026-09-20T14:00:00.000Z",
@@ -272,7 +272,7 @@ describe("resolveProposedSchedule (server-side, DST-safe)", () => {
   it("pinned PAST wall time on today rolls to tomorrow's same wall time (11pm 'at 7pm' case)", () => {
     // 23:00 PDT on 2026-09-19 (a Saturday). "at 7pm" today is past.
     const late = new Date("2026-09-19T23:00:00.000-07:00");
-    const r = resolveProposedSchedule({ day: "today", time: "7pm", durationMinutes: null }, late);
+    const r = resolveProposedSchedule({ day: "today", time: "7pm", endTime: null, durationMinutes: null }, late);
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.startIso).toBe("2026-09-21T02:00:00.000Z"); // tomorrow 7:00 PM PDT
@@ -282,7 +282,44 @@ describe("resolveProposedSchedule (server-side, DST-safe)", () => {
 
   it("pinned FUTURE wall time on today does NOT roll", () => {
     const morning = new Date("2026-09-19T09:00:00.000-07:00");
-    const r = resolveProposedSchedule({ day: "today", time: "7pm", durationMinutes: null }, morning);
+    const r = resolveProposedSchedule({ day: "today", time: "7pm", endTime: null, durationMinutes: null }, morning);
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.startIso).toBe("2026-09-20T02:00:00.000Z"); // today 7 PM PDT
+  });
+
+  it("explicit end time derives duration (the Henna case: 2pm–11pm = 540m)", () => {
+    const nowAnchor = new Date("2026-09-19T10:00:00-07:00");
+    const r = resolveProposedSchedule(
+      { day: "tomorrow", time: "2pm", endTime: "11pm", durationMinutes: null },
+      nowAnchor,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(new Date(r.endIso).getTime() - new Date(r.startIso).getTime()).toBe(540 * 60_000);
+    }
+  });
+
+  it("overnight range rolls the end past midnight (9pm–2am = 300m)", () => {
+    const nowAnchor = new Date("2026-09-19T10:00:00-07:00");
+    const r = resolveProposedSchedule(
+      { day: "tomorrow", time: "9pm", endTime: "2am", durationMinutes: null },
+      nowAnchor,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(new Date(r.endIso).getTime() - new Date(r.startIso).getTime()).toBe(5 * 60 * 60_000);
+    }
+  });
+
+  it("range bounds: <15m and >12h are range-invalid; end unparsable is end-unparsable", () => {
+    const nowAnchor = new Date("2026-09-19T10:00:00-07:00");
+    expect(
+      resolveProposedSchedule({ day: "tomorrow", time: "2pm", endTime: "2:10pm", durationMinutes: null }, nowAnchor),
+    ).toEqual({ ok: false, reason: "range-invalid" });
+    expect(
+      resolveProposedSchedule({ day: "tomorrow", time: "8am", endTime: "9pm", durationMinutes: null }, nowAnchor),
+    ).toEqual({ ok: false, reason: "range-invalid" });
+    expect(
+      resolveProposedSchedule({ day: "tomorrow", time: "2pm", endTime: "banana", durationMinutes: null }, nowAnchor),
+    ).toEqual({ ok: false, reason: "end-unparsable" });
   });

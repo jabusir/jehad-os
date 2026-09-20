@@ -75,7 +75,7 @@ export const CONVERSE_RESOURCE = "imessage";
 /** model_calls.surface tag for gateway conversation turns. */
 export const CONVERSATION_SURFACE = "imessage";
 export const CONVERSATION_PROMPT_VERSION = "imessage-converse-v2";
-export const ROUTE_PROMPT_VERSION = "imessage-converse-v2-route";
+export const ROUTE_PROMPT_VERSION = "imessage-converse-v3-route";
 
 /** The edge render cap (infra/edge §4), applied to reply content at creation. */
 export const REPLY_CHAR_LIMIT = 1500;
@@ -677,6 +677,7 @@ async function converseTurn(
           {
             day: actionRequest.day,
             time: actionRequest.time,
+            endTime: actionRequest.endTime,
             durationMinutes: actionRequest.durationMinutes,
           },
           now,
@@ -685,7 +686,9 @@ async function converseTurn(
           const clarify =
             schedule.reason === "time-missing"
               ? `No time given — tell me day and time, like: schedule ${actionRequest.title} tomorrow at 7pm.`
-              : `I couldn't read that time — reply like: schedule ${actionRequest.title} ${actionRequest.day} at 7pm or 19:00.`;
+              : schedule.reason === "range-invalid"
+                ? `That time range doesn't work — events can be 15 minutes to 12 hours. Try: schedule ${actionRequest.title} ${actionRequest.day} from 2pm to 11pm.`
+                : `I couldn't read that time — reply like: schedule ${actionRequest.title} ${actionRequest.day} at 7pm or 19:00.`;
           await audit(db, actor, "imessage.action.clarify", {
             principalId: input.principalId,
             handle,

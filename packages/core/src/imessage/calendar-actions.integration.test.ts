@@ -219,7 +219,7 @@ function propose(overrides: {
       { over: { startIso: new Date(Date.now() - HOUR).toISOString() }, phrase: "start must be in the future" },
       { over: { startIso: new Date(Date.now() + 30 * 24 * HOUR).toISOString() }, phrase: "within the next 14 days" },
       { over: { startIso: at(0), endIso: at(5) }, phrase: "at least 15 minutes" },
-      { over: { startIso: at(0), endIso: at(300) }, phrase: "at most 4 hours" },
+      { over: { startIso: at(0), endIso: at(725) }, phrase: "at most 12 hours" },
       { over: { startIso: at(0), endIso: new Date(base + 30.5 * 60_000).toISOString() }, phrase: "whole minutes" },
       { over: { startIso: "whenever", endIso: at(60) }, phrase: "valid date-time" },
     ];

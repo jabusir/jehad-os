@@ -59,7 +59,7 @@ export const CALENDAR_GRANT_TTL_MS = 5 * 60_000;
 /** Contract §4 payload bounds — server-side, non-negotiable. */
 export const CALENDAR_TITLE_MAX_CHARS = 120;
 export const CALENDAR_DURATION_MIN_MS = 15 * 60_000;
-export const CALENDAR_DURATION_MAX_MS = 4 * 60 * 60_000;
+export const CALENDAR_DURATION_MAX_MS = 12 * 60 * 60_000;
 export const CALENDAR_START_MAX_AHEAD_MS = 14 * 24 * 60 * 60_000;
 
 const CALENDAR_ACTOR = "system:imessage-gateway";
@@ -186,7 +186,7 @@ const VIOLATION_PHRASES: Readonly<Record<CalendarPayloadViolation, string>> = {
   "start-not-future": "the start must be in the future",
   "start-too-far": "the start must be within the next 14 days",
   "duration-too-short": "the duration must be at least 15 minutes",
-  "duration-too-long": "the duration must be at most 4 hours",
+  "duration-too-long": "the duration must be at most 12 hours",
   "duration-not-whole-minutes": "the duration must be whole minutes",
 };
 
