@@ -7,3 +7,4 @@ export * from "./threads.js";
 export * from "./capture.js";
 export * from "./review-commands.js";
 export * from "./calendar-actions.js";
+export * from "./propose-schedule.js";
