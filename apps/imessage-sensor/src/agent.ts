@@ -30,6 +30,9 @@
 //
 // Five health dims (plan §9): process / database / decoder / cursor /
 // shadow — computed from facts each cycle, transitions logged + reported.
+// The decoder dim reports only from cycles that ATTEMPTED ≥1 decode: an
+// idle cycle (no attributedBody rows) reports healthy rather than carrying
+// a stale degraded from a past failure (see runSensorCycle).
 
 import { existsSync } from "node:fs";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -411,14 +414,23 @@ export async function runSensorCycle(
       );
       ctx.decoderStopped = false;
     }
-    ctx.health = {
-      ...ctx.health,
-      decoder: ctx.decoderStopped
-        ? "failed"
+    // Decoder health is only reportable from cycles that ATTEMPTED ≥1
+    // decode. An idle cycle (no attributedBody rows to decode) carries no
+    // decoder evidence, so reporting a stale 'degraded' from a past
+    // failure would show degraded forever on a quiet chat.db. Idle cycles
+    // report 'healthy' — honest per-cycle semantics ("nothing is failing
+    // now") — while the consecutive-failure RUN itself is preserved
+    // across cycles for drift detection (a later failure still degrades,
+    // and the threshold stop still latches). A drift STOP ('failed')
+    // stays latched until an observed recovery decode clears it.
+    const decoderDim: HealthDim = ctx.decoderStopped
+      ? "failed"
+      : poll.decodeAttempted === 0
+        ? "healthy"
         : ctx.consecutiveDecodeFailures > 0
           ? "degraded"
-          : "healthy",
-    };
+          : "healthy";
+    ctx.health = { ...ctx.health, decoder: decoderDim };
     if (!healthEquals(before, ctx.health)) details.health_transition = { from: before, to: ctx.health };
 
     const databaseDim: HealthDim = ctx.schemaDrift ? "degraded" : "healthy";

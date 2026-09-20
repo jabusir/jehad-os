@@ -14,6 +14,7 @@ import { createNotification } from "../notifications/service.js";
 import {
   DEFAULT_NOTIFICATIONS_CONFIG,
 } from "../notifications/config.js";
+import { issueGrant } from "../policy/grants.js";
 import {
   ImessageInputError,
   ingestBatch,
@@ -50,6 +51,7 @@ function event(
 describe.skipIf(!TEST_DATABASE_URL)("imessage sensor service (integration)", () => {
   let db: IsolatedDb;
   let userPrincipalId: string;
+  let sensorGrantId: string;
 
   beforeAll(async () => {
     db = await createIsolatedTestDb(TEST_DATABASE_URL!, "igsensor");
@@ -60,6 +62,18 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage sensor service (integration)", () 
       [`owner-${randomUUID().slice(0, 8)}`],
     );
     userPrincipalId = String(user.rows[0].id);
+    // A REAL grant — audit_log.grant_id has an FK to capability_grants, so
+    // the health-audit attribution test must reference one.
+    const domain = await db.pool.query("SELECT id FROM domains WHERE key = 'personal'");
+    const grant = await issueGrant(db.pool, {
+      principalId: userPrincipalId,
+      runId: null,
+      capability: "imessage:ingest",
+      resource: "imessage",
+      domainId: String(domain.rows[0].id),
+      ttlMs: 60 * 60_000,
+    });
+    sensorGrantId = grant.grant.id;
   });
 
   afterAll(async () => {
@@ -231,6 +245,74 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage sensor service (integration)", () 
     ]);
   });
 
+  it("fingerprint selection is deterministic: newest delivered_at wins; exact ties resolve to ONE row", async () => {
+    // Two candidates, same hash, same recipient, delivered 1ms apart (both
+    // inside the window). PINNED RULE: the NEWEST delivered_at wins — the
+    // delivery closest to the observation is the most likely cause.
+    const older = await seedFingerprint({
+      renderedTextSha256: HASH_A,
+      deliveredAt: new Date(T0.getTime() - 5 * 60_000).toISOString(),
+    });
+    const newer = await seedFingerprint({
+      renderedTextSha256: HASH_A,
+      deliveredAt: new Date(T0.getTime() - 5 * 60_000 + 1).toISOString(),
+    });
+    expect(newer.fingerprintId).not.toBe(older.fingerprintId);
+
+    // Repeated invocations (fresh own-row each time) all pick the SAME,
+    // newest candidate — the rule is stable, not first-come.
+    for (let i = 0; i < 3; i += 1) {
+      const report = await ingestBatch(
+        db.pool,
+        [event({
+          guid: `det-${i}`,
+          rowid: 30 + i,
+          is_from_me: true,
+          decoded_status: "own-ok",
+          normalized_text_sha256: HASH_A,
+        })],
+        { rowid: 30 + i },
+      );
+      expect(report.fingerprint_matches).toEqual([
+        { guid: `det-${i}`, fingerprint_id: newer.fingerprintId },
+      ]);
+    }
+    // Backfill follows the same rule: the winner keeps the FIRST
+    // correlation's guid; the loser is never touched.
+    const backfills = await db.pool.query(
+      "SELECT imessage_guid FROM sent_message_fingerprints WHERE id = ANY($1::uuid[]) ORDER BY delivered_at",
+      [[older.fingerprintId, newer.fingerprintId]],
+    );
+    expect(backfills.rows[0].imessage_guid).toBeNull(); // older — untouched
+    expect(backfills.rows[1].imessage_guid).toBe("det-0"); // newest — first correlation wins
+
+    // Exact-tie totality: identical delivered_at (to the microsecond) must
+    // still resolve to a single row across repeated correlations — the id
+    // tiebreak makes the order total. Asserting the SET is a singleton
+    // proves determinism without restating the ORDER BY.
+    const tieDelivered = new Date(T0.getTime() - 3 * 60_000).toISOString();
+    const tieA = await seedFingerprint({ renderedTextSha256: HASH_B, deliveredAt: tieDelivered });
+    const tieB = await seedFingerprint({ renderedTextSha256: HASH_B, deliveredAt: tieDelivered });
+    expect(tieA.fingerprintId).not.toBe(tieB.fingerprintId);
+    const picked = new Set<string>();
+    for (let i = 0; i < 3; i += 1) {
+      const report = await ingestBatch(
+        db.pool,
+        [event({
+          guid: `tie-${i}`,
+          rowid: 40 + i,
+          is_from_me: true,
+          decoded_status: "own-ok",
+          normalized_text_sha256: HASH_B,
+        })],
+        { rowid: 40 + i },
+      );
+      expect(report.fingerprint_matches).toHaveLength(1);
+      picked.add(report.fingerprint_matches[0]!.fingerprint_id);
+    }
+    expect(picked.size).toBe(1); // never flaps between the tied candidates
+  });
+
   it("PRIVACY: no content column exists; non-own hashes are dropped before storage", async () => {
     const columns = await db.pool.query(
       `SELECT column_name FROM information_schema.columns
@@ -310,13 +392,14 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage sensor service (integration)", () 
       VALUES (true, 777, now())
       ON CONFLICT (singleton) DO UPDATE SET cursor_rowid = 777
     `);
+    const grantId = sensorGrantId;
     await recordHealth(db.pool, {
       health_process: "degraded",
       health_database: "healthy",
       health_decoder: "failed",
       health_cursor: "healthy",
       health_shadow: "healthy",
-    }, { actor: "harness:imessage-sensor", now: () => T0 });
+    }, { actor: "harness:imessage-sensor", grantId, now: () => T0 });
 
     const rows = (await db.pool.query("SELECT * FROM imessage_sensor_state")).rows;
     expect(rows.length).toBe(1);
@@ -326,10 +409,12 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage sensor service (integration)", () 
     expect(Number(state.cursor_rowid)).toBe(777); // cursor untouched by health
 
     const audits = await db.pool.query(
-      `SELECT outputs_ref::jsonb AS o FROM audit_log
+      `SELECT grant_id, outputs_ref::jsonb AS o FROM audit_log
        WHERE action = 'imessage.sensor.health' ORDER BY created_at`,
     );
     expect(audits.rows.length).toBe(2);
+    expect(audits.rows[0].grant_id).toBeNull(); // grant omitted → null (additive default)
+    expect(audits.rows[1].grant_id).toBe(grantId); // carried like ingest's attribution
     expect(audits.rows[0].o).toMatchObject({
       health_process: "healthy",
       health_shadow: "healthy",

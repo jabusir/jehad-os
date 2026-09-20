@@ -19,6 +19,10 @@
 // delivered_at sits inside the 10 minutes BEFORE observed_at is correlated
 // (fingerprint_id set + fingerprint.imessage_guid backfilled). Recipient
 // matching joins later (Phase B pairing); hash + window only for now.
+// When MULTIPLE fingerprints match, the NEWEST delivered_at wins (the
+// delivery closest to the observation is the most likely cause); exact
+// delivered_at ties break on id so the order is TOTAL and the pick is
+// deterministic across repeated correlations (see FIND_FINGERPRINT_SQL).
 
 import { recordAudit, type SqlExecutor } from "../actions/audit.js";
 import { attemptPairingInTx, canonicalizeHandle, principalForHandle } from "./pairing.js";
@@ -119,6 +123,12 @@ export interface ImessageHealthInput {
 export interface ImessageServiceOptions {
   readonly actor?: string;
   readonly now?: () => Date;
+  /**
+   * Harness capability grant that authorized the call — recorded on the
+   * health audit entry (additive, default null; mirrors the ingest route's
+   * grant attribution). Only recordHealth reads it today.
+   */
+  readonly grantId?: string | null;
   /**
    * Conversation sink for paired-handle inbound (multi-principal Lane P):
    * invoked AFTER the ingest transaction commits, once per message that
@@ -300,7 +310,11 @@ const FIND_FINGERPRINT_SQL = `
   WHERE rendered_text_sha256 = $1
     AND delivered_at <= $2::timestamptz
     AND delivered_at >= $3::timestamptz
-  ORDER BY delivered_at DESC
+  -- SELECTION RULE (pinned): newest delivered_at in the window wins;
+  -- exact delivered_at ties break on id so the order is TOTAL — repeated
+  -- correlations of the same hash always pick the same row, regardless
+  -- of plan/vacuum timing.
+  ORDER BY delivered_at DESC, id DESC
   LIMIT 1
 `;
 
@@ -580,7 +594,8 @@ const HEALTH_UPSERT_SQL = `
  * (the cursor fields are never touched — 0 is the not-yet-cursoring
  * sentinel on a health-first insert) + one audit entry per report with the
  * dims and any details. Details live ONLY in the audit trail; state keeps
- * just the five dims.
+ * just the five dims. The audit row carries the harness grant id when the
+ * caller passes one (opts.grantId, as the health route does).
  */
 export async function recordHealth(
   db: SqlExecutor,
@@ -611,6 +626,7 @@ export async function recordHealth(
     actor: opts.actor ?? "harness:imessage-sensor",
     action: "imessage.sensor.health",
     reversible: true,
+    grantId: opts.grantId ?? null,
     outputsRef: JSON.stringify({
       health_process: health.health_process,
       health_database: health.health_database,
