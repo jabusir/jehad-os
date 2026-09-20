@@ -340,6 +340,81 @@ describe("policy gateway.actions (Phase H action lane)", () => {
   });
 });
 
+describe("policy gateway.passes (Lane R1 model routing)", () => {
+  const BASE = [
+    "version: 1",
+    "autonomy_ceiling:",
+    "  read: autonomous",
+    "  propose: autonomous",
+    "  write_canonical: gated",
+    "  external_side_effect: approval_required",
+    "  money_and_contracts: prohibited",
+  ].join("\n");
+
+  it("parses the full three-key override set", () => {
+    const policy = parsePolicyV1(
+      BASE +
+        "\ngateway:\n  passes: { route: { model: m-r }, answer: { model: m-a }, route_fallback: { model: m-f } }\n",
+    );
+    expect(policy.gateway?.passes).toEqual({
+      route: { model: "m-r" },
+      answer: { model: "m-a" },
+      route_fallback: { model: "m-f" },
+    });
+  });
+
+  it("passes: {} is valid — no overrides", () => {
+    const policy = parsePolicyV1(BASE + "\ngateway:\n  passes: {}\n");
+    expect(policy.gateway?.passes).toEqual({});
+  });
+
+  it("partial override subsets parse (route only; answer+route_fallback)", () => {
+    expect(
+      parsePolicyV1(BASE + "\ngateway:\n  passes: { route: { model: m-r } }\n").gateway?.passes,
+    ).toEqual({ route: { model: "m-r" } });
+    expect(
+      parsePolicyV1(
+        BASE + "\ngateway:\n  passes: { answer: { model: m-a }, route_fallback: { model: m-f } }\n",
+      ).gateway?.passes,
+    ).toEqual({ answer: { model: "m-a" }, route_fallback: { model: "m-f" } });
+  });
+
+  it("absent passes → gateway.passes === null (no overrides)", () => {
+    const policy = parsePolicyV1(BASE + "\ngateway:\n  principals:\n");
+    expect(policy.gateway).toBeDefined();
+    expect(policy.gateway?.passes).toBeNull();
+  });
+
+  it("malformed passes fail closed (unknown key, non-string model, order, duplicates, shape)", () => {
+    const cases = [
+      "  passes: { route: { model: m-r }, turbo: { model: m-t } }",
+      "  passes: { route: { model: 123 } }",
+      "  passes: { route: { model: true } }",
+      "  passes: { route: { model: } }",
+      "  passes: { answer: { model: m-a }, route: { model: m-r } }",
+      "  passes: { route: { model: m-r }, route: { model: m-r2 } }",
+      "  passes: { route: m-r }",
+      "  passes: just a string",
+      "  passes: { route: { model: m-r }, }",
+      "  passes:",
+    ];
+    for (const entry of cases) {
+      expect(() => parsePolicyV1(`${BASE}\ngateway:\n${entry}\n`), entry).toThrow();
+    }
+    expect(() =>
+      parsePolicyV1(`${BASE}\ngateway:\n  passes: {}\n  passes: {}\n`),
+    ).toThrow(/duplicate gateway.passes/);
+  });
+
+  it("the repo-root policy.yaml still parses with gateway.passes === null", async () => {
+    const policy = await loadPolicyFile(
+      new URL("../../../../policy.yaml", import.meta.url),
+    );
+    expect(policy.gateway).toBeDefined();
+    expect(policy.gateway?.passes).toBeNull();
+  });
+});
+
 describe("policy sensors.gmail (GMAIL §5/§10.3)", () => {
   const ENTRY =
     "  gmail: { enabled: true, poll_cron: \"*/5 * * * *\", bootstrap_window_days: 30, extract_senders: [billing@*, statements@*, *@stripe.com], max_messages_per_poll: 50, max_candidates_per_day: 20 }";

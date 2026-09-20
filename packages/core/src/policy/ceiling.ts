@@ -157,6 +157,80 @@ export interface GatewayPolicyV1 {
   readonly review?: GatewayReviewPolicy;
   /** Phase H action-lane config (gateway.actions); absent → module default. */
   readonly actions?: GatewayActionsPolicy;
+  /** Lane R1 pass-model overrides (gateway.passes); absent → null (no overrides). */
+  readonly passes: GatewayPassesPolicy | null;
+}
+
+/**
+ * Model-routing pass overrides — `gateway.passes` (Lane R1): optional
+ * per-pass model ids that override the principal's model for the route
+ * and answer passes. `{}` = no overrides; an absent section parses to
+ * null (identical semantics — every pass rides the principal model).
+ * Strict like every gateway key: only route/answer/route_fallback, in
+ * that order, each `{ model: <id> }`; anything else throws (fail closed).
+ */
+export interface GatewayPassesPolicy {
+  readonly route?: { readonly model: string };
+  readonly answer?: { readonly model: string };
+  readonly route_fallback?: { readonly model: string };
+}
+
+/** The only keys `gateway.passes` may carry, in the only legal order. */
+const PASS_KEYS = ["route", "answer", "route_fallback"] as const;
+type PassKey = (typeof PASS_KEYS)[number];
+
+/** Model id charset (the gateway.principals model convention). */
+const PASS_MODEL_RE = /^[A-Za-z0-9._/-]+$/;
+
+export function parseGatewayPassesEntry(value: string): GatewayPassesPolicy {
+  if (!value.startsWith("{") || !value.endsWith("}")) {
+    throw new Error(
+      `policy: gateway.passes must be "{ [route: { model: <id> }][, answer: { model: <id> }][, route_fallback: { model: <id> }] }" (got '${value}')`,
+    );
+  }
+  const inner = value.slice(1, -1).trim();
+  const models: Partial<Record<PassKey, string>> = {};
+  let lastOrder = -1;
+  if (inner !== "") {
+    for (const part of inner.split(",")) {
+      const m = part.trim().match(
+        /^(route|answer|route_fallback):\s*\{\s*model:\s*([A-Za-z0-9._/-]+)\s*\}$/,
+      );
+      if (m === null) {
+        throw new Error(
+          `policy: gateway.passes entries must be 'route|answer|route_fallback: { model: <id> }' in that key order (got '${part.trim()}')`,
+        );
+      }
+      const id = m[2]!;
+      if (
+        !PASS_MODEL_RE.test(id) ||
+        !/[A-Za-z]/.test(id) ||
+        id === "true" || id === "false" || id === "null"
+      ) {
+        throw new Error(
+          `policy: gateway.passes model must be a non-empty string model id (got '${id}')`,
+        );
+      }
+      const key = m[1] as PassKey;
+      if (models[key] !== undefined) {
+        throw new Error(`policy: duplicate gateway.passes.${key} key`);
+      }
+      if (PASS_KEYS.indexOf(key) <= lastOrder) {
+        throw new Error(
+          "policy: gateway.passes keys must appear in order route, answer, route_fallback",
+        );
+      }
+      lastOrder = PASS_KEYS.indexOf(key);
+      models[key] = id;
+    }
+  }
+  return {
+    ...(models.route !== undefined ? { route: { model: models.route } } : {}),
+    ...(models.answer !== undefined ? { answer: { model: models.answer } } : {}),
+    ...(models.route_fallback !== undefined
+      ? { route_fallback: { model: models.route_fallback } }
+      : {}),
+  };
 }
 
 export interface GatewayPrincipalPolicy {
@@ -444,6 +518,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const gatewayCapture: { value: GatewayCapturePolicy | null } = { value: null };
   const gatewayReview: { value: GatewayReviewPolicy | null } = { value: null };
   const gatewayActions: { value: GatewayActionsPolicy | null } = { value: null };
+  const gatewayPasses: { value: GatewayPassesPolicy | null } = { value: null };
   const sensorsGmail: { value: GmailSensorPolicy | null } = { value: null };
 
   for (const rawLine of text.split("\n")) {
@@ -532,6 +607,11 @@ export function parsePolicyV1(text: string): PolicyV1 {
         gatewayActions.value = parseGatewayActionsEntry(value);
         continue;
       }
+      if (key === "passes") {
+        if (gatewayPasses.value !== null) throw new Error("policy: duplicate gateway.passes key");
+        gatewayPasses.value = parseGatewayPassesEntry(value);
+        continue;
+      }
       throw new Error(`policy: unknown gateway key '${key}'`);
     }
     if (!isActionType(key)) throw new Error(`policy: unknown action type '${key}'`);
@@ -559,6 +639,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
       ...(gatewayCapture.value !== null ? { capture: gatewayCapture.value } : {}),
       ...(gatewayReview.value !== null ? { review: gatewayReview.value } : {}),
       ...(gatewayActions.value !== null ? { actions: gatewayActions.value } : {}),
+      passes: gatewayPasses.value,
     };
   }
   if (sawSensors && sensorsGmail.value !== null) {
