@@ -16,7 +16,7 @@ import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../te
 
 const mocks = vi.hoisted(() => ({
   syncGmail: vi.fn(),
-  gmailTokenProvider: vi.fn(),
+  gmailEnvOrKeychainTokenProvider: vi.fn(),
   createGmailAdapter: vi.fn(() => fakeAdapter()),
   issueGrant: vi.fn(),
   verifyGrant: vi.fn(),
@@ -53,7 +53,7 @@ vi.mock("@jehad/adapters", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@jehad/adapters")>();
   return {
     ...actual,
-    gmailTokenProvider: mocks.gmailTokenProvider,
+    gmailEnvOrKeychainTokenProvider: mocks.gmailEnvOrKeychainTokenProvider,
     createGmailAdapter: mocks.createGmailAdapter,
   };
 });
@@ -141,7 +141,7 @@ function fakeGrantDb() {
 
 beforeEach(() => {
   mocks.syncGmail.mockReset();
-  mocks.gmailTokenProvider.mockReset();
+  mocks.gmailEnvOrKeychainTokenProvider.mockReset();
   mocks.createGmailAdapter.mockReset().mockImplementation(() => fakeAdapter());
   // mockClear (not reset): keeps the real-service delegation set in the
   // vi.mock factory, clears cross-test call counts.
@@ -177,7 +177,7 @@ describe("gmail-sync workflow definition", () => {
 
 describe("gmail-sync no-token clean skip (plan §3.7)", () => {
   it("skips with exit-0 outcome and a clean tick log, no grant, no sync", async () => {
-    mocks.gmailTokenProvider.mockRejectedValue(new Error("gmail: no access token"));
+    mocks.gmailEnvOrKeychainTokenProvider.mockRejectedValue(new Error("gmail: no access token"));
     const logs = captureLogs();
 
     const steps: string[] = [];

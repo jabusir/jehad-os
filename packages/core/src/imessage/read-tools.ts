@@ -98,6 +98,21 @@ export function parseRouteJson(text: string): ReadToolCall | null {
   return null; // "none", unknown tools, garbage — all fail safe
 }
 
+/** True for the router's intentional no-lookup declaration — NOT a parse
+ *  failure, so it must never trigger fallback escalation. */
+export function isRouteNoneJson(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return false;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (typeof parsed !== "object" || parsed === null) return false;
+    const obj = parsed as Record<string, unknown>;
+    return Object.keys(obj).length === 1 && obj["tool"] === "none";
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The gmail.recent instruction line for the route pass (Phase GMAIL §8).
  * buildRoutingPrompt is orchestrator-owned; the orchestrator splices this

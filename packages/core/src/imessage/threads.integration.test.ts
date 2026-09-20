@@ -542,6 +542,30 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     expect(payload.attendees).toEqual(["sam@example.com", "lea@example.com"]);
   });
 
+  it("MODEL ROUTING: route pass uses the passes.route model; answer keeps the principal model", async () => {
+    await grant(jehadId);
+    queue = [{ text: '{"tool":"none"}' }, { text: "routed fine" }];
+    await turn(jehadId, JEHAD, "hello there");
+    const models = provider.requests.map((r: { model: string }) => r.model);
+    expect(models[0]).toBe("openai/gpt-4.1-mini"); // repo policy passes.route
+    expect(models[1]).toBe("fake/model-x"); // principal policy default
+  });
+
+  it("MODEL ROUTING: unparseable route output escalates ONCE to the fallback model, then proceeds", async () => {
+    await grant(jehadId);
+    queue = [
+      { text: "I refuse to answer in JSON, sorry!" },
+      { text: '{"tool":"none"}' },
+      { text: "recovered" },
+    ];
+    await turn(jehadId, JEHAD, "what is on my calendar today");
+    expect(provider.requests.length).toBe(3); // route + fallback retry + answer
+    const models = provider.requests.map((r: { model: string }) => r.model);
+    expect(models[0]).toBe("openai/gpt-4.1-mini");
+    expect(models[1]).toBe("google/gemini-3.8-flash");
+    expect(models[2]).toBe("fake/model-x");
+  });
+
   it("H-PROPOSE: no time given → deterministic clarification, nothing proposed", async () => {
     await grant(jehadId);
     queue = [
@@ -601,11 +625,12 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     await grant(jehadId);
     queue = [
       { text: '{"reply_kind":"action","action":"calendar.create","title":"","day":"tomorrow","time":"7pm"}' }, // empty title → parse null
+      { text: '{"tool":"none"}' }, // escalation retry (fallback model) also unparsable-as-action
       { text: "ok chat" },
     ];
     const outcome = await turn(jehadId, JEHAD, "schedule (garbled) at 7pm");
     expect(outcome.replied).toBe(true);
-    expect(provider.requests.length).toBe(2); // route + answer (no read for tool:none)
+    expect(provider.requests.length).toBe(3); // route + fallback retry + answer
     expect(
       (
         await db.pool.query(

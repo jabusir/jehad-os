@@ -47,6 +47,9 @@ notifications:
 # `openrouter/auto-fast` is not in the repo's allowlisted model ids; the
 # cheapest fast allowlisted model is the evals-pinned openai/gpt-4o-mini.
 gateway:
+  # per-pass model routing (eval 2026-09: route gpt-4.1-mini 96.7%/658ms,
+  # answer gpt-4o-mini 12/12, fallback gemini-3.8-flash best-on-adversarial)
+  passes: { route: { model: openai/gpt-4.1-mini }, route_fallback: { model: google/gemini-3.8-flash } }
   capture: { enabled: true, principals: [josctl], max_per_hour: 5, dedupe_window_hours: 24 }
   # review — Phase G deterministic review/control over iMessage
   # (ig-phase-g-contracts.md §7). Control commands are exact-match, zero
@@ -70,4 +73,4 @@ gateway:
 # switch (§9.4): the sync grant fails closed and the sensor halts without
 # touching the Google credential. Absent section = same fail-safe defaults.
 sensors:
-  gmail: { enabled: false, poll_cron: "*/5 * * *", bootstrap_window_days: 30, extract_senders: [billing@*, statements@*, *@stripe.com], max_messages_per_poll: 50, max_candidates_per_day: 20 }
+  gmail: { enabled: true, poll_cron: "*/5 * * *", bootstrap_window_days: 30, extract_senders: [billing@*, statements@*, *@stripe.com], max_messages_per_poll: 50, max_candidates_per_day: 20 }

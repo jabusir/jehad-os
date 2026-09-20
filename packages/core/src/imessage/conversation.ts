@@ -29,9 +29,11 @@ import {
 } from "../policy/ceiling.js";
 import { createNotification } from "../notifications/service.js";
 import { canonicalizeHandle } from "./pairing.js";
+import { resolvePassModels, shouldEscalateRoute } from "./model-selection.js";
 import {
   executeReadTool,
   gmailRoutingLine,
+  isRouteNoneJson,
   parseRouteJson,
   readToolSource,
   type ReadToolResult,
@@ -677,14 +679,19 @@ async function converseTurn(
   let costUsd: number;
   try {
     const grounded = policy.reads.length > 0;
-    const dispatch = (prompt: string, promptVersion: string) =>
+    const gatewayFile = await loadConversationPolicyFile();
+    const passModels = resolvePassModels({
+      principalModel: policy.model,
+      passes: gatewayFile?.gateway?.passes ?? null,
+    });
+    const dispatch = (prompt: string, promptVersion: string, model: string = passModels.answer) =>
       callModel(
         { db, provider: deps.provider, registry: deps.registry },
         {
           domainId: CONVERSE_DOMAIN_KEY,
           sensitivity: "normal",
           provider: deps.provider.id,
-          model: policy.model,
+          model,
           prompt,
           runId,
           promptVersion,
@@ -705,7 +712,26 @@ async function converseTurn(
     } else {
       // Route pass → policy gate → deterministic read → answer pass
       // (ig-phase-e-contracts.md §2). Both calls ledger under this run.
-      const route = await dispatch(buildRoutingPrompt(input.text), ROUTE_PROMPT_VERSION);
+      let route = await dispatch(
+        buildRoutingPrompt(input.text),
+        ROUTE_PROMPT_VERSION,
+        passModels.route,
+      );
+      if (
+        parseRouteJson(route.result.text) === null &&
+        parseActionRouteJson(route.result.text) === null &&
+        !isRouteNoneJson(route.result.text) &&
+        shouldEscalateRoute(route.result.text, true) &&
+        passModels.routeFallback !== null
+      ) {
+        // Parse-failure escalation: exactly ONE retry on the fallback
+        // model; both calls ledger + budget normally.
+        route = await dispatch(
+          buildRoutingPrompt(input.text),
+          ROUTE_PROMPT_VERSION,
+          passModels.routeFallback,
+        );
+      }
       const actionRequest = parseActionRouteJson(route.result.text);
       if (actionRequest !== null) {
         const actionPolicy =

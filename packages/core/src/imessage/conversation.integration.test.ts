@@ -665,13 +665,19 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation phase E (integration)
     expect(parseRouteJson('{"tool":"calendar.write","day":"today"}')).toBeNull();
   });
 
-  it("route fallback: prose route reply → answer without data, no tool audit", async () => {
+  it("route fallback: prose route reply → escalation retry, then answer without data, no tool audit", async () => {
     await grantConverse(jehadId);
-    queue = [{ text: "Sure, happy to help!" }, { text: "chatty answer" }];
+    queue = [
+      { text: "Sure, happy to help!" },
+      { text: '{"tool":"none"}' },
+      { text: "chatty answer" },
+    ];
     const outcome = await handleInbound(deps, { principalId: jehadId, handle: JEHAD_HANDLE, text: "tell me a joke" });
     expect(outcome.replied).toBe(true);
-    expect(provider.requests).toHaveLength(2);
-    expect(provider.requests[1]!.prompt).toContain("No data lookup was performed");
+    // route (parse fail) → ONE fallback-model retry → answer = 3 calls.
+    expect(provider.requests).toHaveLength(3);
+    expect(provider.requests[1]!.model).toBe("google/gemini-3.8-flash");
+    expect(provider.requests[2]!.prompt).toContain("No data lookup was performed");
     expect(await auditActions()).not.toContain("imessage.converse.tool_used");
   });
 

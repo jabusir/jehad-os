@@ -406,12 +406,15 @@ describe("policy gateway.passes (Lane R1 model routing)", () => {
     ).toThrow(/duplicate gateway.passes/);
   });
 
-  it("the repo-root policy.yaml still parses with gateway.passes === null", async () => {
+  it("the repo-root policy.yaml parses with the live per-pass routing pinned", async () => {
     const policy = await loadPolicyFile(
       new URL("../../../../policy.yaml", import.meta.url),
     );
     expect(policy.gateway).toBeDefined();
-    expect(policy.gateway?.passes).toBeNull();
+    expect(policy.gateway?.passes).toEqual({
+      route: { model: "openai/gpt-4.1-mini" },
+      route_fallback: { model: "google/gemini-3.8-flash" },
+    });
   });
 });
 
@@ -479,7 +482,7 @@ describe("policy sensors.gmail (GMAIL §5/§10.3)", () => {
 
     const fromDisk = await loadPolicyFile(new URL("../../../../policy.yaml", import.meta.url));
     expect(fromDisk.sensors?.gmail).toBeDefined();
-    expect(fromDisk.sensors?.gmail?.enabled).toBe(false); // fail-safe until ratified
+    expect(fromDisk.sensors?.gmail?.enabled).toBe(true); // owner ratified + consented 2026-09-20
     expect(gmailSensorPolicyOf(fromDisk).maxCandidatesPerDay).toBe(20);
   });
 });
