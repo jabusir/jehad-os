@@ -90,6 +90,13 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
         name === "jehad"
           ? { model: "fake/model-x", requestsPerHour: 100, costPerDay: 5, reads: ["calendar", "commitments"] }
           : { model: "fake/model-x", requestsPerHour: 100, costPerDay: 5, reads: [] },
+      calendarActionPolicy: {
+        enabled: true,
+        principals: ["jehad"],
+        maxProposalsPerDay: 10,
+        maxDispatchesPerDay: 5,
+        confirmTtlMinutes: 10,
+      },
       now: () => now,
     };
   });
@@ -101,9 +108,9 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
   afterEach(async () => {
     await db.pool.query(`
       DELETE FROM interaction_messages; DELETE FROM interaction_threads;
+      DELETE FROM audit_log; DELETE FROM review_refs; DELETE FROM action_intents;
       DELETE FROM model_calls; DELETE FROM runs; DELETE FROM notifications;
       DELETE FROM capability_grants WHERE capability = 'imessage:converse';
-      DELETE FROM audit_log;
     `);
     provider.requests.length = 0;
     queue = [];
@@ -484,6 +491,70 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     const denied = await handleInbound(mixed, { principalId: yusraId, handle: YUSRA, text: "hi again" });
     expect(denied.replied).toBe(false);
     expect(denied.reason).toBe("over-requests-hour");
+  });
+
+  it("H-PROPOSE: imperative scheduling becomes a deterministic proposal — one model call, no answer pass", async () => {
+    await grant(jehadId);
+    queue = [
+      {
+        text: '{"reply_kind":"action","action":"calendar.create","title":"Dentist","day":"tomorrow","time":"7pm","duration_minutes":90}',
+      },
+    ];
+    const outcome = await turn(jehadId, JEHAD, "put Dentist on my calendar tomorrow at 7pm for 90 minutes");
+    expect(outcome.replied).toBe(true);
+    // Route pass ONLY — the proposal itself is deterministic.
+    expect(provider.requests.length).toBe(1);
+    expect(provider.requests[0]!.prompt).toContain("calendar.create");
+    const reply = (
+      await db.pool.query(
+        "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
+      )
+    ).rows[0]!.c as string;
+    expect(reply).toContain("Dentist");
+    expect(reply.toLowerCase()).toContain("confirm");
+    const auditRow = await db.pool.query(
+      `SELECT action FROM audit_log WHERE action = 'imessage.action.proposed'`,
+    );
+    expect(auditRow.rows).toHaveLength(1);
+  });
+
+  it("H-PROPOSE: no time given → deterministic clarification, nothing proposed", async () => {
+    await grant(jehadId);
+    queue = [
+      {
+        text: '{"reply_kind":"action","action":"calendar.create","title":"Dentist","day":"tomorrow","time":null,"duration_minutes":null}',
+      },
+    ];
+    const outcome = await turn(jehadId, JEHAD, "schedule Dentist tomorrow");
+    expect(outcome.replied).toBe(true);
+    expect(provider.requests.length).toBe(1);
+    expect(
+      (
+        await db.pool.query(
+          "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
+        )
+      ).rows[0]!.c,
+    ).toContain("No time given");
+    const audits = await db.pool.query(`SELECT action FROM audit_log WHERE action LIKE 'imessage.action%'`);
+    expect(audits.rows.map((r: { action: string }) => r.action)).toEqual(["imessage.action.clarify"]);
+  });
+
+  it("H-PROPOSE: action-shaped but invalid route JSON falls through to the normal chat path", async () => {
+    await grant(jehadId);
+    queue = [
+      { text: '{"reply_kind":"action","action":"calendar.create","title":"","day":"tomorrow","time":"7pm"}' }, // empty title → parse null
+      { text: "ok chat" },
+    ];
+    const outcome = await turn(jehadId, JEHAD, "schedule (garbled) at 7pm");
+    expect(outcome.replied).toBe(true);
+    expect(provider.requests.length).toBe(2); // route + answer (no read for tool:none)
+    expect(
+      (
+        await db.pool.query(
+          "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
+        )
+      ).rows[0]!.c,
+    ).toContain("ok chat");
   });
 
   it("TURN ORDER: control commands never reach the model; malformed control falls through bounded (verifier C3)", async () => {

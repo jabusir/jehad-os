@@ -41,7 +41,7 @@ import {
   resolveActiveThread,
   type WorkingContext,
 } from "./threads.js";
-import type { CalendarActionPolicy } from "./calendar-actions.js";
+import { proposeCalendarAction, type CalendarActionPolicy } from "./calendar-actions.js";
 import {
   DEFAULT_CAPTURE_POLICY,
   considerCapture,
@@ -62,6 +62,8 @@ import {
   normalizeConfirmToken,
   type ConfirmCalendarActionInput,
 } from "./calendar-actions.js";
+import { buildActionRoutingInstructions, parseActionRouteJson } from "./action-route.js";
+import { resolveProposedSchedule } from "./propose-schedule.js";
 import { BRIEF_TIMEZONE } from "../briefs/timezone.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -188,6 +190,8 @@ export function buildRoutingPrompt(text: string): string {
     '{"tool":"commitments.waiting"} — asks what they owe / need to do / is due / pending obligations / anything needing them',
     '{"tool":"none"} — anything that needs no data lookup',
     "Rules: choose none unless the message clearly asks for one of these lookups. Never invent tools or fields. If the message is chitchat, a question about yourself, or answerable from the message alone, choose none.",
+    "",
+    buildActionRoutingInstructions(),
     "",
     `User message: ${text}`,
   ].join("\n");
@@ -663,6 +667,51 @@ async function converseTurn(
       // Route pass → policy gate → deterministic read → answer pass
       // (ig-phase-e-contracts.md §2). Both calls ledger under this run.
       const route = await dispatch(buildRoutingPrompt(input.text), ROUTE_PROMPT_VERSION);
+      const actionRequest = parseActionRouteJson(route.result.text);
+      if (actionRequest !== null) {
+        const actionPolicy =
+          deps.calendarActionPolicy ??
+          calendarActionsFromPolicyV1(await loadConversationPolicyFile()) ??
+          DEFAULT_CALENDAR_ACTION_POLICY;
+        const schedule = resolveProposedSchedule(
+          {
+            day: actionRequest.day,
+            time: actionRequest.time,
+            durationMinutes: actionRequest.durationMinutes,
+          },
+          now,
+        );
+        if (!schedule.ok) {
+          const clarify =
+            schedule.reason === "time-missing"
+              ? `No time given — tell me day and time, like: schedule ${actionRequest.title} tomorrow at 7pm.`
+              : `I couldn't read that time — reply like: schedule ${actionRequest.title} ${actionRequest.day} at 7pm or 19:00.`;
+          await audit(db, actor, "imessage.action.clarify", {
+            principalId: input.principalId,
+            handle,
+            reason: schedule.reason,
+          });
+          return deterministicReply(deps, input, ctx, {
+            content: clarify,
+            outboundTrust: "system_generated",
+            marker: "action-propose-clarify",
+          });
+        }
+        const proposal = await proposeCalendarAction(db, {
+          principalId: input.principalId,
+          principalName: String(principalName),
+          title: actionRequest.title,
+          startIso: schedule.startIso,
+          endIso: schedule.endIso,
+          now,
+          policy: actionPolicy,
+        });
+        return deterministicReply(deps, input, ctx, {
+          content: proposal.status === "proposed" ? proposal.render : proposal.reply,
+          outboundTrust: "system_generated",
+          marker: `action-propose-${proposal.status}`,
+        });
+      }
       const parsed = parseRouteJson(route.result.text);
       const results: ReadToolResult[] = [];
       let lookupNote: LookupNote = null;
