@@ -112,6 +112,8 @@ export interface CaptureOutcome {
   readonly reason?: CaptureDeclineReason;
   /** Deterministic reply line for the orchestrator to append to the turn. */
   readonly reply?: string;
+  /** The candidate's id when captured (Phase G: mint the review ref). */
+  readonly candidateId?: string;
 }
 
 /**
@@ -502,5 +504,5 @@ export async function considerCapture(
     threadId: input.threadId ?? null,
     trigger,
   });
-  return { captured: true, reply: CAPTURE_ACK_REPLY };
+  return { captured: true, reply: CAPTURE_ACK_REPLY, candidateId };
 }

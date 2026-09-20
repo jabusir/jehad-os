@@ -41,12 +41,26 @@ import {
   resolveActiveThread,
   type WorkingContext,
 } from "./threads.js";
+import type { CalendarActionPolicy } from "./calendar-actions.js";
 import {
   DEFAULT_CAPTURE_POLICY,
   considerCapture,
   matchCaptureIntent,
   type CapturePolicy,
 } from "./capture.js";
+import {
+  handleReviewCommand,
+  mintReviewRef,
+  parseReviewCommand,
+} from "./review-commands.js";
+import {
+  DEFAULT_CALENDAR_ACTION_POLICY,
+  calendarActionsFromPolicyV1,
+  cancelCalendarAction,
+  confirmCalendarAction,
+  normalizeConfirmToken,
+  type ConfirmCalendarActionInput,
+} from "./calendar-actions.js";
 import { BRIEF_TIMEZONE } from "../briefs/timezone.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -100,6 +114,10 @@ export interface ConversationDeps {
   readonly principalPolicy?: (principalName: string) => GatewayPrincipalPolicy | null;
   /** Phase F capture policy (repo-root policy.yaml gateway.capture). */
   readonly capturePolicy?: CapturePolicy | null;
+  /** Phase H write provider (calendar); absent → confirms fail honestly. */
+  readonly actionProvider?: unknown;
+  /** Phase H action policy override (tests); defaults to policy.yaml. */
+  readonly calendarActionPolicy?: CalendarActionPolicy | null;
   readonly now?: () => Date;
 }
 
@@ -393,6 +411,88 @@ async function converseTurn(
       marker: "attachment-only",
     });
   }
+  // Phase G: review/control commands are exact-match and win over
+  // everything conversational (gateway §3.1). Zero model calls.
+  if (parseReviewCommand(input.text) !== null) {
+    const reviewOutcome = await handleReviewCommand(db, {
+      principalId: input.principalId,
+      principalName: String(principalName),
+      text: input.text,
+      now,
+    });
+    if (reviewOutcome.handled) {
+      if (reviewOutcome.reply === undefined) {
+        // Bad-ref lockout: audited silent drop (no notification).
+        await audit(db, actor, "imessage.review.silent", {
+          principalId: input.principalId,
+          handle,
+        });
+        return { replied: false };
+      }
+      return deterministicReply(deps, input, ctx, {
+        content: reviewOutcome.reply,
+        outboundTrust: "system_generated",
+        marker: "review-command",
+      });
+    }
+    // Parsed as a command but not handled (grammar edge) — fall through.
+  }
+
+  // Phase H resolver verbs: confirm/cancel <REF> for proposed actions.
+  // Deliberately DISTINCT from G's approve (different trust rung).
+  const hVerb = /^(confirm|cancel)\s+([A-Za-z0-9]+)$/i.exec(input.text.trim());
+  if (hVerb !== null) {
+    const token = normalizeConfirmToken(hVerb[2]!);
+    const actionPolicy =
+      deps.calendarActionPolicy ??
+      calendarActionsFromPolicyV1(await loadConversationPolicyFile()) ??
+      DEFAULT_CALENDAR_ACTION_POLICY;
+    if (token === null) {
+      return deterministicReply(deps, input, ctx, {
+        content: "That confirmation code doesn't look valid — nothing was changed.",
+        outboundTrust: "system_generated",
+        marker: "action-confirm-invalid-token",
+      });
+    }
+    if (hVerb[1]!.toLowerCase() === "confirm") {
+      if (deps.actionProvider === undefined) {
+        await audit(db, actor, "imessage.action.rejected", {
+          principalId: input.principalId,
+          handle,
+          reason: "no-provider-configured",
+        });
+        return deterministicReply(deps, input, ctx, {
+          content: "I can't reach the calendar right now — nothing was created. The proposal stays open until its code expires.",
+          outboundTrust: "system_generated",
+          marker: "action-confirm-no-provider",
+        });
+      }
+      const result = await confirmCalendarAction(db, {
+        principalId: input.principalId,
+        confirmToken: token,
+        now,
+        policy: actionPolicy,
+        provider: deps.actionProvider as NonNullable<ConfirmCalendarActionInput["provider"]>,
+      });
+      return deterministicReply(deps, input, ctx, {
+        content: result.reply,
+        outboundTrust: "system_generated",
+        marker: `action-confirm-${result.status}`,
+      });
+    }
+    const result = await cancelCalendarAction(db, {
+      principalId: input.principalId,
+      confirmToken: token,
+      now,
+      policy: actionPolicy,
+    });
+    return deterministicReply(deps, input, ctx, {
+      content: result.reply,
+      outboundTrust: "system_generated",
+      marker: `action-cancel-${result.status}`,
+    });
+  }
+
   if (RESET_COMMANDS.has(input.text.trim().toLowerCase())) {
     return deterministicReply(deps, input, ctx, {
       content: THREAD_RESET_REPLY,
@@ -414,8 +514,18 @@ async function converseTurn(
       now,
     }, { policy });
     if (outcome.reply !== undefined) {
+      let reply = outcome.reply;
+      if (outcome.captured && outcome.candidateId !== undefined) {
+        const ref = await mintReviewRef(db, {
+          itemType: "candidate",
+          itemId: outcome.candidateId,
+          principalId: input.principalId,
+          now,
+        }).catch(() => null);
+        if (ref !== null) reply = `${reply} [${ref}] — reply "approve ${ref}" or "reject ${ref}".`;
+      }
       return deterministicReply(deps, input, ctx, {
-        content: outcome.reply,
+        content: reply,
         outboundTrust: "system_generated",
         marker: `capture-${outcome.captured ? "proposed" : outcome.reason ?? "noop"}`,
       });
@@ -795,6 +905,23 @@ let policyRead: Promise<(principalName: string) => GatewayPrincipalPolicy | null
  * The conversation budget source: repo-root policy.yaml
  * `gateway.principals` (an explicit `file` always re-reads fresh).
  */
+/** TTL-cached full policy (gateway.actions projection; same 60s
+ *  discipline as the principal cache below). */
+let gatewayFileCache: { at: number; policy: PolicyV1 | null } | null = null;
+async function loadConversationPolicyFile(): Promise<PolicyV1 | null> {
+  if (gatewayFileCache !== null && Date.now() - gatewayFileCache.at < POLICY_TTL_MS) {
+    return gatewayFileCache.policy;
+  }
+  try {
+    const policy = parsePolicyV1(await readFile(defaultPolicyYamlPath(), "utf8"));
+    gatewayFileCache = { at: Date.now(), policy };
+    return policy;
+  } catch {
+    if (gatewayFileCache !== null) return gatewayFileCache.policy;
+    return null;
+  }
+}
+
 export async function loadConversationPrincipalPolicy(
   file?: string,
 ): Promise<(principalName: string) => GatewayPrincipalPolicy | null> {

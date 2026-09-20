@@ -272,3 +272,61 @@ describe("policy gateway section (multi-principal Lane P)", () => {
     ).toThrow(/duplicate gateway.review key/);
   });
 });
+
+describe("policy gateway.actions (Phase H action lane)", () => {
+  const BASE = [
+    "version: 1",
+    "autonomy_ceiling:",
+    "  read: autonomous",
+    "  propose: autonomous",
+    "  write_canonical: gated",
+    "  external_side_effect: approval_required",
+    "  money_and_contracts: prohibited",
+  ].join("\n");
+  const ENTRY =
+    "  actions: { enabled: true, principals: [josctl], max_proposals_per_day: 10, max_dispatches_per_day: 5, confirm_ttl_minutes: 10 }";
+
+  it("parses the strict ordered flow mapping onto GatewayActionsPolicy", () => {
+    const policy = parsePolicyV1(`${BASE}\ngateway:\n${ENTRY}\n`);
+    expect(policy.gateway?.actions).toEqual({
+      enabled: true,
+      principals: ["josctl"],
+      maxProposalsPerDay: 10,
+      maxDispatchesPerDay: 5,
+      confirmTtlMinutes: 10,
+    });
+  });
+
+  it("disabled lane parses and stays explicit (fail closed downstream)", () => {
+    const policy = parsePolicyV1(
+      BASE + "\ngateway:\n  actions: { enabled: false, principals: [josctl], max_proposals_per_day: 10, max_dispatches_per_day: 5, confirm_ttl_minutes: 10 }\n",
+    );
+    expect(policy.gateway?.actions?.enabled).toBe(false);
+  });
+
+  it("empty principals list parses to nobody-enabled (fail closed, not an error)", () => {
+    const policy = parsePolicyV1(
+      BASE + "\ngateway:\n  actions: { enabled: true, principals: [], max_proposals_per_day: 10, max_dispatches_per_day: 5, confirm_ttl_minutes: 10 }\n",
+    );
+    expect(policy.gateway?.actions?.principals).toEqual([]);
+  });
+
+  it("malformed actions entries fail closed (shape, order, positivity, duplicates)", () => {
+    const cases = [
+      "  actions: { enabled: true, principals: [josctl] }",
+      "  actions: { principals: [josctl], enabled: true, max_proposals_per_day: 10, max_dispatches_per_day: 5, confirm_ttl_minutes: 10 }",
+      "  actions: { enabled: maybe, principals: [josctl], max_proposals_per_day: 10, max_dispatches_per_day: 5, confirm_ttl_minutes: 10 }",
+      "  actions: { enabled: true, principals: [josctl], max_proposals_per_day: 0, max_dispatches_per_day: 5, confirm_ttl_minutes: 10 }",
+      "  actions: { enabled: true, principals: [josctl], max_proposals_per_day: 10, max_dispatches_per_day: 0, confirm_ttl_minutes: 10 }",
+      "  actions: { enabled: true, principals: [josctl], max_proposals_per_day: 10, max_dispatches_per_day: 5, confirm_ttl_minutes: 0 }",
+      "  actions: { enabled: true, principals: [josctl], max_proposals_per_day: 10, max_dispatches_per_day: 5, quiet_mode: true }",
+      "  actions: just a string",
+    ];
+    for (const entry of cases) {
+      expect(() => parsePolicyV1(`${BASE}\ngateway:\n${entry}\n`), entry).toThrow();
+    }
+    expect(() =>
+      parsePolicyV1(`${BASE}\ngateway:\n${ENTRY}\n${ENTRY}\n`),
+    ).toThrow(/duplicate gateway.actions/);
+  });
+});

@@ -61,6 +61,8 @@ export interface GatewayPolicyV1 {
   readonly capture?: GatewayCapturePolicy;
   /** Phase G review/control config (gateway.review); absent → module default. */
   readonly review?: GatewayReviewPolicy;
+  /** Phase H action-lane config (gateway.actions); absent → module default. */
+  readonly actions?: GatewayActionsPolicy;
 }
 
 export interface GatewayPrincipalPolicy {
@@ -156,6 +158,49 @@ export function parseGatewayReviewEntry(value: string): GatewayReviewPolicy {
     refTtlHours,
     digestMaxCandidates,
     digestMaxEscalations,
+  };
+}
+
+/**
+ * Phase H action-lane policy — `gateway.actions`
+ * (ig-phase-h-contracts.md §7): `{ enabled: <bool>, principals: [name, …],
+ * max_proposals_per_day: <int>, max_dispatches_per_day: <int>,
+ * confirm_ttl_minutes: <int> }` in that key order. Strict shape mirroring
+ * gateway.capture; anything else throws (fail closed). Confirmation is
+ * ALWAYS required — there is deliberately no key that could disable it.
+ */
+export interface GatewayActionsPolicy {
+  readonly enabled: boolean;
+  readonly principals: readonly string[];
+  /** Proposal flood bound (UTC day, per principal) — never disables confirm. */
+  readonly maxProposalsPerDay: number;
+  /** Confirmed-dispatch flood bound (UTC day, per principal). */
+  readonly maxDispatchesPerDay: number;
+  /** Confirm-token TTL in minutes (expiry cancels the intent). */
+  readonly confirmTtlMinutes: number;
+}
+
+export function parseGatewayActionsEntry(value: string): GatewayActionsPolicy {
+  const m = value.match(
+    /^\{\s*enabled:\s*(true|false),\s*principals:\s*\[([A-Za-z0-9_,\s]*)\],\s*max_proposals_per_day:\s*(\d+),\s*max_dispatches_per_day:\s*(\d+),\s*confirm_ttl_minutes:\s*(\d+)\s*\}$/,
+  );
+  if (m === null) {
+    throw new Error(
+      `policy: gateway.actions must be "{ enabled: <bool>, principals: [name, …], max_proposals_per_day: <int>, max_dispatches_per_day: <int>, confirm_ttl_minutes: <int> }" (got '${value}')`,
+    );
+  }
+  const maxProposalsPerDay = Number(m[3]);
+  const maxDispatchesPerDay = Number(m[4]);
+  const confirmTtlMinutes = Number(m[5]);
+  if (maxProposalsPerDay <= 0 || maxDispatchesPerDay <= 0 || confirmTtlMinutes <= 0) {
+    throw new Error("policy: gateway.actions caps must be positive");
+  }
+  return {
+    enabled: m[1] === "true",
+    principals: [...new Set((m[2] ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0))],
+    maxProposalsPerDay,
+    maxDispatchesPerDay,
+    confirmTtlMinutes,
   };
 }
 
@@ -302,6 +347,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const gatewayPrincipals: Record<string, GatewayPrincipalPolicy> = {};
   const gatewayCapture: { value: GatewayCapturePolicy | null } = { value: null };
   const gatewayReview: { value: GatewayReviewPolicy | null } = { value: null };
+  const gatewayActions: { value: GatewayActionsPolicy | null } = { value: null };
 
   for (const rawLine of text.split("\n")) {
     const line = stripComment(rawLine);
@@ -371,6 +417,11 @@ export function parsePolicyV1(text: string): PolicyV1 {
         gatewayReview.value = parseGatewayReviewEntry(value);
         continue;
       }
+      if (key === "actions") {
+        if (gatewayActions.value !== null) throw new Error("policy: duplicate gateway.actions key");
+        gatewayActions.value = parseGatewayActionsEntry(value);
+        continue;
+      }
       throw new Error(`policy: unknown gateway key '${key}'`);
     }
     if (!isActionType(key)) throw new Error(`policy: unknown action type '${key}'`);
@@ -397,6 +448,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
       principals: gatewayPrincipals,
       ...(gatewayCapture.value !== null ? { capture: gatewayCapture.value } : {}),
       ...(gatewayReview.value !== null ? { review: gatewayReview.value } : {}),
+      ...(gatewayActions.value !== null ? { actions: gatewayActions.value } : {}),
     };
   }
   return policy;

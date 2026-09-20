@@ -53,6 +53,12 @@ gateway:
   # model calls (deterministicReply class); refs are owner-scoped 3-char
   # Crockford codes minted per queue item at first surfacing.
   review: { enabled: true, principals: [josctl], max_bad_refs: 3, snooze_hours: 24, ref_ttl_hours: 168, digest_max_candidates: 10, digest_max_escalations: 5 }
+  # actions — Phase H consequential-action lane (calendar_create v1). Always-
+  # confirm model: there is deliberately NO key that could disable per-action
+  # owner confirmation (ig-phase-h-contracts.md §2/§7). Quotas are per-principal
+  # UTC-day flood bounds over proposals and confirmed dispatches; they never
+  # buy silence. Defaults are ESCALATE-4 (owner tunes).
+  actions: { enabled: true, principals: [josctl], max_proposals_per_day: 10, max_dispatches_per_day: 5, confirm_ttl_minutes: 10 }
   principals:
     yusra: { model: openai/gpt-4o-mini, requests_per_hour: 20, cost_per_day: 2.0 }
     josctl: { model: openai/gpt-4o-mini, requests_per_hour: 30, cost_per_day: 5.0, reads: [calendar, commitments] }

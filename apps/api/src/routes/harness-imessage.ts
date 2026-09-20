@@ -40,6 +40,10 @@ import {
   type ImessageTransportEventInput,
 } from "@jehad/core";
 import { requireHarnessGrant } from "./harness.js";
+import {
+  createGoogleCalendarWriteProvider,
+  envOrKeychainTokenProvider,
+} from "@jehad/adapters";
 
 export interface ImessageHarnessRoutesOptions {
   /** Structural pg.Pool: query + connect() (ingest runs a transaction). */
@@ -97,6 +101,10 @@ export function registerImessageHarnessRoutes(
           provider: createOpenRouterProvider(),
           registry,
           principalPolicy,
+          actionProvider: createGoogleCalendarWriteProvider({
+            tokenProvider: envOrKeychainTokenProvider,
+            calendarId: process.env.GCALENDAR_ID ?? "primary",
+          }),
         }));
       }
       try {
