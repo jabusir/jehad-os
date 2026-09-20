@@ -33,13 +33,26 @@ async function syncWithPool(): Promise<CalendarSyncResult> {
   });
   try {
     if (token === null || token.length === 0) {
+      console.log(JSON.stringify({ workflow: "calendar-sync", skipped: "no-token" }));
       return { skipped: "no-token" };
     }
     const source = createGoogleCalendarSource({ tokenProvider: async () => token, calendarId });
     // E4-S: the scheduled sensor enqueues calendar-change notifications for
     // disruptive near-term changes (48h filter + policy auto-approve gate).
     const report = await syncCalendar(pool, source, { notify: true });
-    return { changes: report.changes.length, fullResync: report.fullResync };
+    const outcome = { changes: report.changes.length, fullResync: report.fullResync };
+    console.log(JSON.stringify({ workflow: "calendar-sync", ...outcome }));
+    return outcome;
+  } catch (err) {
+    // The token itself never enters logs — name/status only.
+    console.log(
+      JSON.stringify({
+        workflow: "calendar-sync",
+        error: err instanceof Error ? err.name : "unknown",
+        status: typeof (err as { status?: number }).status === "number" ? (err as { status: number }).status : undefined,
+      }),
+    );
+    throw err;
   } finally {
     await pool.end();
   }
