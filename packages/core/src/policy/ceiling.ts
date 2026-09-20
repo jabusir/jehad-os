@@ -66,23 +66,33 @@ export interface GatewayPrincipalPolicy {
   readonly requestsPerHour: number;
   /** Max conversation model spend per UTC day, USD (principal × surface). */
   readonly costPerDay: number;
+  /**
+   * Phase E grounded reads — data sources this principal's conversation
+   * may query (ig-phase-e-contracts.md §3). Absent → no tools (fail
+   * closed). Only ever grantable to the world-model owner.
+   */
+  readonly reads: readonly string[];
 }
+
+/** Valid Phase E read sources (fail-closed parse: unknown names throw). */
+export const READ_SOURCES = ["calendar", "commitments"] as const;
 
 /**
  * Strict flow-mapping parse for one gateway principal entry — exactly
- * `{ model: <id>, requests_per_hour: <int>, cost_per_day: <number> }` in
- * that key order (the contracts' fixed shape). Anything else throws.
+ * `{ model: <id>, requests_per_hour: <int>, cost_per_day: <number> }`,
+ * optionally followed by `, reads: [source, …]` (ig-phase-e-contracts.md
+ * §3), in that key order. Anything else throws.
  */
 export function parseGatewayPrincipalEntry(
   name: string,
   value: string,
 ): GatewayPrincipalPolicy {
   const match = value.match(
-    /^\{\s*model:\s*([A-Za-z0-9._/-]+),\s*requests_per_hour:\s*(\d+),\s*cost_per_day:\s*(\d+(?:\.\d+)?)\s*\}$/,
+    /^\{\s*model:\s*([A-Za-z0-9._/-]+),\s*requests_per_hour:\s*(\d+),\s*cost_per_day:\s*(\d+(?:\.\d+)?)(?:,\s*reads:\s*\[([A-Za-z0-9_,\s]*)\])?\s*\}$/,
   );
   if (match === null) {
     throw new Error(
-      `policy: gateway.principals.${name} must be "{ model: <id>, requests_per_hour: <int>, cost_per_day: <number> }" (got '${value}')`,
+      `policy: gateway.principals.${name} must be "{ model: <id>, requests_per_hour: <int>, cost_per_day: <number>[, reads: [source, …]] }" (got '${value}')`,
     );
   }
   const requestsPerHour = Number(match[2]);
@@ -90,7 +100,18 @@ export function parseGatewayPrincipalEntry(
   if (requestsPerHour <= 0 || costPerDay <= 0) {
     throw new Error(`policy: gateway.principals.${name} caps must be positive`);
   }
-  return { model: match[1]!, requestsPerHour, costPerDay };
+  const reads = (match[4] ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  for (const source of reads) {
+    if (!(READ_SOURCES as readonly string[]).includes(source)) {
+      throw new Error(
+        `policy: gateway.principals.${name} reads: unknown source '${source}' (valid: ${READ_SOURCES.join(", ")})`,
+      );
+    }
+  }
+  return { model: match[1]!, requestsPerHour, costPerDay, reads: [...new Set(reads)] };
 }
 
 const URGENCY_VALUES = ["low", "medium", "high", "critical", "blocker"] as const;

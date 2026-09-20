@@ -199,7 +199,7 @@ describe.skipIf(!TEST_DATABASE_URL)("multi-principal hardening (integration)", (
           requireRedaction: false,
         },
       ]),
-      principalPolicy: () => ({ model: "fake/model-x", requestsPerHour: 2, costPerDay: 5 }),
+      principalPolicy: () => ({ model: "fake/model-x", requestsPerHour: 2, costPerDay: 5, reads: [] }),
     };
     const turns = await Promise.all(
       Array.from({ length: 6 }, (_, i) =>

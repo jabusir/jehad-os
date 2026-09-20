@@ -236,13 +236,22 @@ export function localDayBounds(now: Date, timeZone: string): { dayStart: Date; d
   };
   // Fixed point: utc = wall - offset(utc). Two passes converge for any
   // real timezone (offsets are within ±14h; DST boundaries included).
-  let utc = wallMidnightUtc;
-  for (let i = 0; i < 4; i++) {
-    const next = wallMidnightUtc - offsetMinutesAt(utc) * 60_000;
-    if (next === utc) break;
-    utc = next;
-  }
-  return { dayStart: new Date(utc), dayEnd: new Date(utc + 24 * 60 * 60 * 1000) };
+  const toUtc = (wallUtc: number): number => {
+    let utc = wallUtc;
+    for (let i = 0; i < 4; i++) {
+      const next = wallUtc - offsetMinutesAt(utc) * 60_000;
+      if (next === utc) break;
+      utc = next;
+    }
+    return utc;
+  };
+  const dayStart = toUtc(wallMidnightUtc);
+  // Next civil day's wall midnight (wall hours tick uniformly: +24h wall
+  // always lands on the next 00:00), converted with its own fixed point —
+  // a naive +24h in absolute time would be wrong on DST transition days
+  // (fall-back days are 25h long, spring-forward days 23h).
+  const dayEnd = toUtc(wallMidnightUtc + 24 * 60 * 60 * 1000);
+  return { dayStart: new Date(dayStart), dayEnd: new Date(dayEnd) };
 }
 
 /** The next upcoming event strictly after the local day (for quiet days). */
@@ -250,25 +259,56 @@ export async function getNextUpcomingEvent(
   db: QueryExecutor,
   opts: { readonly dayEnd: Date },
 ): Promise<TodayScheduleItem | null> {
+  return (await getUpcomingEvents(db, { dayEnd: opts.dayEnd, limit: 1 }))[0] ?? null;
+}
+
+/**
+ * Next non-cancelled events after a day end (Phase E `calendar.next`).
+ * Same ordering as getNextUpcomingEvent; caller caps the row count.
+ */
+export async function getUpcomingEvents(
+  db: QueryExecutor,
+  opts: { readonly dayEnd: Date; readonly limit: number },
+): Promise<readonly TodayScheduleItem[]> {
   const result = await db.query(
     `SELECT google_event_id, summary, start_time, end_time, timezone, location
        FROM calendar_events
       WHERE status <> 'cancelled'
         AND start_time > $1::timestamptz
       ORDER BY start_time ASC, google_event_id ASC
-      LIMIT 1`,
-    [opts.dayEnd.toISOString()],
+      LIMIT $2::int`,
+    [opts.dayEnd.toISOString(), opts.limit],
   );
-  const row = result.rows[0];
-  if (row === undefined) return null;
-  return {
+  return result.rows.map((row) => ({
     googleEventId: String(row.google_event_id),
     summary: typeof row.summary === "string" ? row.summary : "",
     startTime: isoOrNull(row.start_time) ?? "",
     endTime: isoOrNull(row.end_time),
     timezone: row.timezone === null || row.timezone === undefined ? null : String(row.timezone),
     location: row.location === null || row.location === undefined ? null : String(row.location),
-  };
+  }));
+}
+
+/**
+ * Events in an explicit [dayStart, dayEnd) window (Phase E `calendar.day`;
+ * bounds come from localDayBounds so DST resolves server-side).
+ */
+export async function getCalendarDaySchedule(
+  db: QueryExecutor,
+  opts: { readonly dayStart: Date; readonly dayEnd: Date },
+): Promise<readonly TodayScheduleItem[]> {
+  const result = await db.query(TODAY_SCHEDULE_SQL, [
+    opts.dayStart.toISOString(),
+    opts.dayEnd.toISOString(),
+  ]);
+  return result.rows.map((row) => ({
+    googleEventId: String(row.google_event_id),
+    summary: typeof row.summary === "string" ? row.summary : "",
+    startTime: isoOrNull(row.start_time) ?? "",
+    endTime: isoOrNull(row.end_time),
+    timezone: row.timezone === null || row.timezone === undefined ? null : String(row.timezone),
+    location: row.location === null || row.location === undefined ? null : String(row.location),
+  }));
 }
 
 /**

@@ -162,7 +162,7 @@ describe("policy gateway section (multi-principal Lane P)", () => {
         "    yusra: { model: openai/gpt-4o-mini, requests_per_hour: 20, cost_per_day: 2.0 }",
     );
     expect(policy.gateway?.principals).toEqual({
-      yusra: { model: "openai/gpt-4o-mini", requestsPerHour: 20, costPerDay: 2 },
+      yusra: { model: "openai/gpt-4o-mini", requestsPerHour: 20, costPerDay: 2, reads: [] },
     });
   });
 
@@ -219,6 +219,13 @@ describe("policy gateway section (multi-principal Lane P)", () => {
       model: "openai/gpt-4o-mini",
       requestsPerHour: 20,
       costPerDay: 2,
+      reads: [],
+    });
+    expect(policy.gateway?.principals.josctl).toEqual({
+      model: "openai/gpt-4o-mini",
+      requestsPerHour: 30,
+      costPerDay: 5,
+      reads: ["calendar", "commitments"],
     });
   });
 });

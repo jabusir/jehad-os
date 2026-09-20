@@ -24,7 +24,9 @@ export interface CalendarSyncResult {
 }
 
 async function syncWithPool(): Promise<CalendarSyncResult> {
-  const token = process.env.GCALENDAR_ACCESS_TOKEN ?? null;
+  // envOrKeychainTokenProvider: GCALENDAR_ACCESS_TOKEN first, else the
+  // hourly refresher's Keychain item (the LaunchAgent sets no env).
+  const token = await envOrKeychainTokenProvider();
   const calendarId = process.env.GCALENDAR_ID ?? "primary";
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL ?? "postgres://localhost:5432/jehad",
