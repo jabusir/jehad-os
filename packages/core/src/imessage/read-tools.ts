@@ -87,18 +87,45 @@ function truncate(text: string, max: number): string {
   return text.length <= max ? text : text.slice(0, max - 1) + "…";
 }
 
+/**
+ * Times are PRE-RENDERED server-side in BRIEF_TIMEZONE (deterministic
+ * temporal resolution — the model never does date/timezone math; the
+ * owner directive caught a live 16:00Z → "4:00 PM" misrender on
+ * 2026-09-19). Raw ISO instants never reach the prompt.
+ */
+function hhmm(instant: Date): string {
+  const formatted = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "numeric",
+    timeZone: BRIEF_TIMEZONE,
+  }).format(instant);
+  return formatted.replace(":00 ", " ");
+}
+
 function dayItem(event: {
   readonly summary: string;
   readonly startTime: string;
   readonly endTime: string | null;
   readonly location: string | null;
-}): { readonly start: string; readonly end: string | null; readonly title: string; readonly location: string | null } {
+}): { readonly when: string; readonly title: string; readonly location: string | null } {
+  const start = new Date(event.startTime);
+  const end = event.endTime === null ? null : new Date(event.endTime);
+  const when = end === null ? hhmm(start) : `${hhmm(start)}–${hhmm(end)}`;
   return {
-    start: event.startTime,
-    end: event.endTime,
+    when,
     title: truncate(event.summary, CAP_EVENT_SUMMARY),
     location: event.location === null ? null : truncate(event.location, CAP_LOCATION),
   };
+}
+
+function dueDay(dueAt: string | null): string | null {
+  if (dueAt === null) return null;
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone: BRIEF_TIMEZONE,
+  }).format(new Date(dueAt));
 }
 
 /** Resolve a calendar.day call to explicit civil-day bounds, DST-safe
@@ -167,7 +194,7 @@ export async function executeReadTool(
       const item = (c: (typeof waiting)[number]) => ({
         description: truncate(c.description, CAP_DESCRIPTION),
         counterparty: truncate(c.counterpartyText, CAP_LOCATION),
-        due: c.dueAt,
+        due: dueDay(c.dueAt),
       });
       const otherOpen = waiting.length - overdue.length - dueSoon.length;
       return {

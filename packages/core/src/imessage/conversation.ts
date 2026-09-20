@@ -144,7 +144,7 @@ export function buildAnswerPrompt(
     }
     lines.push("END DATA");
     lines.push(
-      "Coverage honesty: report what each queried source shows, and never imply you checked sources you did not. Prefer \"You have N calendar items tomorrow.\" plus \"I don't currently see any tracked commitments due then.\" over anything that sounds comprehensive. Dates and times come from the data exactly as given (timezone noted in it) — never recalculate them.",
+      "Coverage honesty: report what each queried source shows, and never imply you checked sources you did not. Prefer \"You have N calendar items tomorrow.\" plus \"I don't currently see any tracked commitments due then.\" over anything that sounds comprehensive. Times in the data are already rendered in the owner's timezone — quote them exactly as given; never convert, recalculate, or reformat them.",
     );
   } else {
     lines.push(
