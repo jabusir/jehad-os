@@ -1,12 +1,15 @@
 /**
  * Worker-registered workflows: infrastructure smoke (M3) + the scheduled
- * brief workflows (M6B: morning brief 07:00 UTC, evening close 21:00 UTC).
+ * brief workflows (M6B: morning brief 07:00 UTC, evening close 21:00 UTC),
+ * calendar sync (E3, every 15 min), gmail sync (Phase GMAIL, every 5 min),
+ * and thread retention (Phase D, hourly).
  */
 
 import {
   defineWorkflow,
   briefWorkflows,
   calendarSyncWorkflow,
+  gmailSyncWorkflow,
   threadRetentionWorkflow,
 } from "@jehad/workflow";
 
@@ -22,5 +25,6 @@ export const workflows = [
   smokeWorkflow,
   ...briefWorkflows,
   calendarSyncWorkflow,
+  gmailSyncWorkflow,
   threadRetentionWorkflow,
 ];

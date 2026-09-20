@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createWorkflowWorkerServer } from "@jehad/workflow";
+import { createWorkflowWorkerServer, gmailSyncWorkflow } from "@jehad/workflow";
 import { main } from "./index.js";
 import { workflows } from "./workflows.js";
 
@@ -16,5 +16,14 @@ describe("@jehad/worker", () => {
     const server = createWorkflowWorkerServer({ workflows });
     expect(typeof server.listen).toBe("function");
     server.close();
+  });
+
+  it("registers gmail-sync exactly once (idempotent registration)", () => {
+    expect(workflows).toContain(gmailSyncWorkflow);
+    const gmail = workflows.filter((workflow) => workflow.name === "gmail-sync");
+    expect(gmail).toHaveLength(1);
+    expect(gmail[0]).toMatchObject({ kind: "cron", cron: "*/5 * * * *" });
+    const names = workflows.map((workflow) => workflow.name);
+    expect(new Set(names).size).toBe(names.length);
   });
 });

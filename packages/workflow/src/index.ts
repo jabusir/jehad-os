@@ -41,6 +41,16 @@ export {
 
 export { calendarSyncWorkflow, type CalendarSyncResult } from "./calendar-workflows.js";
 export {
+  gmailSyncWorkflow,
+  GMAIL_INGEST_CAPABILITY,
+  GMAIL_INGEST_RESOURCE,
+  GMAIL_SYNC_ACTOR,
+  GMAIL_SYNC_DOMAIN_KEY,
+  GMAIL_SYNC_GRANT_TTL_MS,
+  runGmailSyncTick,
+  type GmailSyncResult,
+} from "./gmail-workflows.js";
+export {
   threadRetentionWorkflow,
   type ThreadRetentionResult,
 } from "./thread-workflows.js";
