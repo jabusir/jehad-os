@@ -64,8 +64,7 @@ import {
   GMAIL_SYNC_ACTOR,
   GMAIL_SYNC_GRANT_TTL_MS,
   gmailSyncWorkflow,
-  runGmailSyncTick,
-} from "./gmail-workflows.js";
+  runGmailSyncTick, gmailWorkflowPort } from "./gmail-workflows.js";
 import { createWorkflowWorkerServer } from "./index.js";
 import { assertWorkflowToken } from "./names.js";
 
@@ -326,5 +325,47 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail-sync tick (integration: real grant ta
 
     const live = await db.pool.query("SELECT id FROM capability_grants WHERE revoked_at IS NULL");
     expect(live.rows).toHaveLength(0);
+  });
+});
+
+describe("gmailWorkflowPort seam (verifier D3/C1)", () => {
+  const adapter = () => ({
+    id: "adapter:gmail",
+    historyList: vi.fn(),
+    bootstrapList: vi.fn(),
+    getMessage: vi.fn(),
+    profileHistoryId: vi.fn(),
+  });
+
+  it("translates adapter 404-historyId-expiry into the core-recognized error name", async () => {
+    const a = adapter();
+    const { GmailApiError: RealError } = await import("@jehad/adapters");
+    a.historyList.mockRejectedValue(new RealError(404, "historyIdNotFound", "gone"));
+    const port = gmailWorkflowPort(a as never);
+    await expect(port.listHistory({ startHistoryId: 5 })).rejects.toMatchObject({
+      name: "GmailHistoryExpiredError",
+    });
+  });
+
+  it("passes non-expiry adapter errors through untouched", async () => {
+    const a = adapter();
+    a.historyList.mockRejectedValue(Object.assign(new Error("boom"), { name: "GmailApiError", status: 500 }));
+    const port = gmailWorkflowPort(a as never);
+    await expect(port.listHistory({ startHistoryId: 5 })).rejects.toMatchObject({ status: 500, name: "GmailApiError" });
+  });
+
+  it("fails loudly when bootstrap carries no historyId (never persists a zero cursor)", async () => {
+    const a = adapter();
+    a.bootstrapList.mockResolvedValue({ messageIds: [], newestHistoryId: null, nextPageToken: null });
+    const port = gmailWorkflowPort(a as never);
+    await expect(port.listBootstrapMessages({ newerThanDays: 30 })).rejects.toThrow(/no historyId/);
+  });
+
+  it("coerces message fields for the core port (internalDate number→string, threadId null→empty)", async () => {
+    const a = adapter();
+    a.getMessage.mockResolvedValue({ id: "m1", threadId: null, labelIds: ["INBOX"], internalDate: 1695000000000, sizeEstimate: null, from: "x@y.com", fromDomain: "y.com", subject: null, textPlain: null });
+    const port = gmailWorkflowPort(a as never);
+    const m = await port.getMessage({ id: "m1" });
+    expect(m).toMatchObject({ id: "m1", threadId: "", internalDate: "1695000000000", sizeEstimate: null });
   });
 });

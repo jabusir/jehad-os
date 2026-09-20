@@ -31,6 +31,7 @@ import { createNotification } from "../notifications/service.js";
 import { canonicalizeHandle } from "./pairing.js";
 import {
   executeReadTool,
+  gmailRoutingLine,
   parseRouteJson,
   readToolSource,
   type ReadToolResult,
@@ -195,6 +196,7 @@ export function buildRoutingPrompt(text: string): string {
     '{"tool":"calendar.day","day":"tomorrow"} — asks what is on their calendar/schedule tomorrow',
     '{"tool":"calendar.next"} — asks what is coming up next / soonest upcoming event(s)',
     '{"tool":"commitments.waiting"} — asks what they owe / need to do / is due / pending obligations / anything needing them',
+    gmailRoutingLine(),
     '{"tool":"none"} — anything that needs no data lookup',
     "Rules: choose none unless the message clearly asks for one of these lookups. Never invent tools or fields. If the message is chitchat, a question about yourself, or answerable from the message alone, choose none.",
     "",

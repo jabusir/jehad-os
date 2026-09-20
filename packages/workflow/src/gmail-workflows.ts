@@ -124,16 +124,21 @@ export async function runGmailSyncTick(db: SqlExecutor, token: string): Promise<
 
 /** Map the G1 adapter onto the G2 sync port, translating the adapter's
  *  404-historyId-expiry error into the core-recognized error name. */
-function gmailWorkflowPort(adapter: GmailAdapter): GmailSyncPort {
+export function gmailWorkflowPort(adapter: GmailAdapter): GmailSyncPort {
   return {
     id: adapter.id,
     hasToken: async () => true,
     listBootstrapMessages: async (opts) => {
       const page = await adapter.bootstrapList(opts.newerThanDays, opts);
+      if (page.newestHistoryId === null) {
+        // A zero cursor would 404-loop into endless re-bootstrap — fail
+        // the tick loudly instead (verifier D3).
+        throw new Error("gmail bootstrap: response carried no historyId");
+      }
       return {
         messages: page.messageIds,
         nextPageToken: page.nextPageToken,
-        historyId: page.newestHistoryId ?? 0,
+        historyId: page.newestHistoryId,
       };
     },
     listHistory: async (opts) => {
@@ -175,7 +180,13 @@ async function loadGmailSensorPolicy() {
   try {
     const { readFile } = await import("node:fs/promises");
     const { resolve } = await import("node:path");
-    const file = process.env.POLICY_YAML_PATH ?? resolve(process.cwd(), "../../policy.yaml");
+    const { fileURLToPath } = await import("node:url");
+    // Module-relative like every other policy loader (cwd-independent —
+    // the LaunchAgent worker runs from /).
+    const moduleDefault = resolve(
+      fileURLToPath(new URL("../../../../policy.yaml", import.meta.url)),
+    );
+    const file = process.env.POLICY_YAML_PATH ?? moduleDefault;
     const policy = parsePolicyV1(await readFile(file, "utf8"));
     return gmailSensorPolicyOf(policy);
   } catch {
