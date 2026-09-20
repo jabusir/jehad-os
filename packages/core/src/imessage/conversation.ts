@@ -87,7 +87,7 @@ export interface ConversationDeps {
 export function buildConversationPrompt(principalName: string, model: string, text: string): string {
   return [
     `You are a helpful, concise assistant chatting over iMessage with ${principalName}.`,
-    `You are running as the model "${model}" via OpenRouter on the Jehad OS message gateway — when asked what model you are, answer honestly and specifically with that model id.`,
+    `You are running as the model "${model}" via OpenRouter on a private message gateway — when asked what model you are, answer honestly and specifically with that model id.`,
     "You have no access to any external systems, tools, calendars, files, or accounts, and you cannot perform actions — answer from this conversation alone.",
     "You are text-only: you cannot see images or attachments; if one seems to be referenced, say so plainly.",
     "Keep each reply under 1500 characters.",
