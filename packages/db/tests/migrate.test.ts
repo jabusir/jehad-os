@@ -20,7 +20,7 @@ const TABLES_001 = [
 const ALL_MIGRATIONS = [
   "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
   "004_commitments_domain", "005_commitments_temporal", "006_notifications",
-  "007_calendar", "008_feedback", "009_notification_calendar_change", "010_imessage_sensor", "011_imessage_pairing", "012_interaction_threads", "013_review_refs",
+  "007_calendar", "008_feedback", "009_notification_calendar_change", "010_imessage_sensor", "011_imessage_pairing", "012_interaction_threads", "013_review_refs", "014_confirm_token_unique",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -278,4 +278,16 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate up/down (integration)", () => {
     );
     expect(await migrateDown(pool, {}, defaultMigrationsDir())).toEqual([]);
   });
+
+  it("014 makes LIVE confirm-token hashes unique (partial) and lookups newest-first", async () => {
+    const migrations = await listMigrations();
+    const m = migrations.find((x) => x.name === "014_confirm_token_unique");
+    expect(m).toBeDefined();
+    expect(m!.sql).toMatch(
+      /CREATE UNIQUE INDEX action_intents_confirm_token_live_uidx[\s\S]*WHERE status = 'proposed'/,
+    );
+    expect(m!.sql).toMatch(/CREATE INDEX action_intents_confirm_token_idx/);
+    expect(m!.downSql).toMatch(/DROP INDEX IF EXISTS action_intents_confirm_token_live_uidx/);
+  });
+
 });

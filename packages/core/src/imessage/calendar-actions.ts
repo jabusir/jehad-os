@@ -200,7 +200,7 @@ export function validateCalendarPayload(
   now: Date,
 ): readonly CalendarPayloadViolation[] {
   const violations: CalendarPayloadViolation[] = [];
-  const title = input.title.trim();
+  const title = redactContent(input.title.replaceAll(/[\p{C}\p{Cf}]/gu, "")).trim();
   if (title.length === 0) violations.push("title-missing");
   else if (title.length > CALENDAR_TITLE_MAX_CHARS) violations.push("title-too-long");
 
@@ -464,6 +464,7 @@ async function intentByTokenHash(db: SqlExecutor, tokenHash: string): Promise<In
   const result = await db.query(
     `SELECT ${INTENT_COLUMNS} FROM action_intents
       WHERE payload->'confirm'->>'tokenHash' = $1
+      ORDER BY created_at DESC
       LIMIT 1`,
     [tokenHash],
   );
@@ -577,7 +578,7 @@ export async function proposeCalendarAction(
   const runId = run.rows[0]?.id;
   if (runId === undefined) throw new Error("proposeCalendarAction: runs insert returned no row");
 
-  const title = input.title.trim();
+  const title = redactContent(input.title.replaceAll(/[\p{C}\p{Cf}]/gu, "")).trim();
   const svc = new ActionService(db, nonDispatchingProvider());
   const intent = await svc.createIntent({
     runId: String(runId),
@@ -604,7 +605,12 @@ export async function proposeCalendarAction(
 
   // 5. Confirm token: single-use, Crockford-base32, G-ref-shaped; only the
   //    sha256 is stored (payload.confirm), bound to the frozen payload hash.
-  const confirmToken = mintConfirmToken();
+  let confirmToken = mintConfirmToken();
+  for (let redraw = 0; redraw < 3; redraw += 1) {
+    const clash = await intentByTokenHash(db, sha256Hex(confirmToken));
+    if (clash === null || clash.intent.status !== "proposed") break;
+    confirmToken = mintConfirmToken();
+  }
   const payloadHash = actionPayloadHash(intent.id, {
     title,
     startIso: input.startIso,
@@ -754,7 +760,9 @@ export async function confirmCalendarAction(
       intentId: row.intent.id,
       requestingPrincipalId: input.principalId,
     }, { intentId: row.intent.id });
-    return confirmResult("denied", CALENDAR_ACTION_DENIED_REPLY, { intentId: row.intent.id });
+    // Adversary A3: same reply as unknown-token — a wrong-principal
+    // probe must not reveal that a live owner proposal exists.
+    return confirmResult("denied", CALENDAR_CONFIRM_USED_REPLY, { intentId: row.intent.id });
   }
 
   // 3. Unresolved: anything past `proposed` is a replay / terminal state.

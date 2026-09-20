@@ -345,7 +345,9 @@ function propose(overrides: {
 
     const wrong = await confirm(prop.confirmToken, { principalId: yusraId });
     expect(wrong.status).toBe("denied");
-    expect(wrong.reply).toBe(CALENDAR_ACTION_DENIED_REPLY);
+    // Adversary A3: indistinguishable from unknown-token — a wrong-principal
+    // probe must not reveal that a live owner proposal exists.
+    expect(wrong.reply).toBe(CALENDAR_CONFIRM_USED_REPLY);
     const rejected = await auditRows("imessage.action.rejected");
     expect(String(rejected[0]!.outputs_ref)).toContain("wrong-principal");
     // No content beyond ids/counts in the denial audit.

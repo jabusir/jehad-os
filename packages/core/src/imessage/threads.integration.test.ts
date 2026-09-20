@@ -108,7 +108,7 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
   afterEach(async () => {
     await db.pool.query(`
       DELETE FROM interaction_messages; DELETE FROM interaction_threads;
-      DELETE FROM audit_log; DELETE FROM review_refs; DELETE FROM action_intents;
+      DELETE FROM audit_log; DELETE FROM review_refs; DELETE FROM action_attempts; DELETE FROM action_intents;
       DELETE FROM model_calls; DELETE FROM runs; DELETE FROM notifications;
       DELETE FROM capability_grants WHERE capability = 'imessage:converse';
     `);

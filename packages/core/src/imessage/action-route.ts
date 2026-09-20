@@ -69,7 +69,10 @@ function firstJsonObject(text: string): Record<string, unknown> | null {
 function sanitizeTitle(raw: string): string {
   // eslint-disable-next-line no-control-regex -- stripping control chars is the point
   const noControls = raw.replace(/[\u0000-\u001f\u007f]/g, "");
-  const collapsed = noControls.replace(/\s+/g, " ").trim();
+  // Adversary A2: Cf format chars (RTL override U+202E etc.) visually
+  // reorder the render — strip the whole category.
+  const noFormat = noControls.replace(/\p{Cf}/gu, "");
+  const collapsed = noFormat.replace(/\s+/g, " ").trim();
   return redactContent(collapsed);
 }
 
@@ -125,6 +128,7 @@ export function buildActionRoutingInstructions(): string {
     '- time: the wall-clock string exactly as written ("7pm", "19:00"), or null if no time was stated. Never invent a time.',
     '- duration_minutes: an integer, only when explicitly stated ("for 90 minutes" → 90); otherwise null.',
     'Emit the action ONLY for imperative scheduling requests: "add X to my calendar", "schedule X tomorrow at 7pm", "put X on my calendar".',
+    "Emit exactly ONE JSON object in total — either the lookup shape or the action shape, never both, never two.",
     'NEVER emit the action for questions ("do I have anything tomorrow?"), hypotheticals ("maybe I should schedule X"), negations ("don\'t schedule X"), or events beyond tomorrow (later this week, next week).',
     "Examples:",
     '"put Dentist on my calendar tomorrow at 7pm for 90 minutes" → {"reply_kind":"action","action":"calendar.create","title":"Dentist","day":"tomorrow","time":"7pm","duration_minutes":90}',

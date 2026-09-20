@@ -268,3 +268,21 @@ describe("resolveProposedSchedule (server-side, DST-safe)", () => {
     expect(PROPOSE_DEFAULT_DURATION_MINUTES).toBe(60);
   });
 });
+
+  it("pinned PAST wall time on today rolls to tomorrow's same wall time (11pm 'at 7pm' case)", () => {
+    // 23:00 PDT on 2026-09-19 (a Saturday). "at 7pm" today is past.
+    const late = new Date("2026-09-19T23:00:00.000-07:00");
+    const r = resolveProposedSchedule({ day: "today", time: "7pm", durationMinutes: null }, late);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.startIso).toBe("2026-09-21T02:00:00.000Z"); // tomorrow 7:00 PM PDT
+      expect(r.dateIso).toBe("2026-09-20");
+    }
+  });
+
+  it("pinned FUTURE wall time on today does NOT roll", () => {
+    const morning = new Date("2026-09-19T09:00:00.000-07:00");
+    const r = resolveProposedSchedule({ day: "today", time: "7pm", durationMinutes: null }, morning);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.startIso).toBe("2026-09-20T02:00:00.000Z"); // today 7 PM PDT
+  });

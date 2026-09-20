@@ -703,6 +703,7 @@ async function converseTurn(
           title: actionRequest.title,
           startIso: schedule.startIso,
           endIso: schedule.endIso,
+          threadId: thread.id,
           now,
           policy: actionPolicy,
         });

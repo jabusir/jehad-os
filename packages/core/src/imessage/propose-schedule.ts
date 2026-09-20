@@ -127,10 +127,17 @@ export function resolveProposedSchedule(
   const parsed = parseWallClock(input.time);
   if (parsed === null) return { ok: false, reason: "time-unparsable" };
   const anchor = civilDateOf(resolveDayBounds(input.day, now).dateIso);
-  const start =
-    bareHourOf(input.time.trim()) === null
-      ? wallTimeToInstant(anchor.year, anchor.month, anchor.day, parsed.hour, parsed.minute)
-      : nextBareHourOccurrence(anchor, parsed.hour, now);
+  const isBare = bareHourOf(input.time.trim()) !== null;
+  let start = isBare
+    ? nextBareHourOccurrence(anchor, parsed.hour, now)
+    : wallTimeToInstant(anchor.year, anchor.month, anchor.day, parsed.hour, parsed.minute);
+  // Verifier fix (11pm asymmetry): a PINNED wall time on "today" that is
+  // already past rolls to tomorrow's same wall time — bare hours roll by
+  // construction. DST note: +24h on the INSTANT keeps elapsed duration
+  // exact; the render shows the civil time honestly either way.
+  if (!isBare && input.day === "today" && start.getTime() <= now.getTime()) {
+    start = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+  }
   const durationMinutes = input.durationMinutes ?? PROPOSE_DEFAULT_DURATION_MINUTES;
   const end = new Date(start.getTime() + durationMinutes * 60_000);
   return {
