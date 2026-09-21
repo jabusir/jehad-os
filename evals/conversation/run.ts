@@ -1,3 +1,4 @@
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadScenarioFile } from "./scenarios.js";
@@ -7,6 +8,8 @@ import type { ConversationEvalRun, ScenarioResult } from "./runner.js";
 const CAPABILITY_EXPORT_PATTERNS: Readonly<Record<string, RegExp>> = {
   "day.state": /day[\s_.-]?state/i,
   staleness: /staleness|freshness|last[_-]?synced/i,
+  "memory.recall": /memory[\s_.-]?recall|recallMemory/i,
+  "system.state": /system[\s_.-]?state|collectSystemState/i,
 };
 
 export async function probeCoreCapabilities(capabilities: readonly string[]): Promise<Record<string, boolean>> {
@@ -54,13 +57,18 @@ async function main(): Promise<number> {
     console.error("eval:conversation: TEST_DATABASE_URL is required (hermetic test database)");
     return 1;
   }
-  const scenariosFile = path.resolve(fileURLToPath(new URL("./scenarios.yaml", import.meta.url)));
-  const file = loadScenarioFile(scenariosFile);
-  const requires = [...new Set(file.scenarios.flatMap((scenario) => [...scenario.requires]))];
+  const scenariosDir = path.dirname(fileURLToPath(new URL("./scenarios.yaml", import.meta.url)));
+  const scenarioFiles = (await readdir(scenariosDir))
+    .filter((name) => name.endsWith(".yaml"))
+    .sort();
+  const scenarios = scenarioFiles.flatMap((name) =>
+    loadScenarioFile(path.join(scenariosDir, name)).scenarios,
+  );
+  const requires = [...new Set(scenarios.flatMap((scenario) => [...scenario.requires]))];
   const probes = await probeCoreCapabilities(requires);
   const run = await runConversationEval({
     databaseUrl,
-    scenarios: file.scenarios,
+    scenarios,
     capabilityProbes: probes,
     dbTag: "conv_eval_cli",
   });

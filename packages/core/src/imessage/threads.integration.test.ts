@@ -614,7 +614,7 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     await turn(jehadId, JEHAD, "hello there");
     const models = provider.requests.map((r: { model: string }) => r.model);
     expect(models[0]).toBe("openai/gpt-4.1-mini"); // repo policy passes.route
-    expect(models[1]).toBe("fake/model-x"); // principal policy default
+    expect(models[1]).toBe("openai/gpt-4o-mini"); // W3 tier resolution: short no-tool chat → FAST
   });
 
   it("MODEL ROUTING: unparseable route output escalates ONCE to the fallback model, then proceeds", async () => {
@@ -629,7 +629,7 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     const models = provider.requests.map((r: { model: string }) => r.model);
     expect(models[0]).toBe("openai/gpt-4.1-mini");
     expect(models[1]).toBe("google/gemini-3.8-flash");
-    expect(models[2]).toBe("fake/model-x");
+    expect(models[2]).toBe("anthropic/claude-sonnet-4.5"); // W3 tier resolution: STANDARD (question markers)
   });
 
   it("H-PROPOSE: no time given → deterministic clarification, nothing proposed", async () => {

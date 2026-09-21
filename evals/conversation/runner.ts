@@ -66,7 +66,7 @@ const PRINCIPAL_POLICY: GatewayPrincipalPolicy = {
   model: "fake/model-x",
   requestsPerHour: 1000,
   costPerDay: 100,
-  reads: ["calendar", "commitments", "gmail", "state"],
+  reads: ["calendar", "commitments", "gmail", "state", "memory", "system"],
 };
 
 const CLEANUP_SQL = `

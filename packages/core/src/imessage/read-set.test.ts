@@ -63,13 +63,13 @@ describe("parseRouteReadSet (strict)", () => {
   it("rejects empty arrays, >3, duplicates, unknown names, and non-string entries", () => {
     const bad = [
       '{"tools":[]}',
-      '{"tools":["calendar.next","commitments.waiting","gmail.recent","day.state"]}',
+      '{"tools":["calendar.next","commitments.waiting","gmail.recent","day.state","memory.recall"]}',
       '{"tools":["calendar.next","calendar.next"]}',
       '{"tools":["calendar.day"]}',
       '{"tools":["none"]}',
       '{"tools":["calendar.write"]}',
-      '{"tools":["memory.recall"]}',
-      '{"tools":["system.state"]}',
+      '{"tools":["memory.recallx"]}',
+      '{"tools":["system.statex"]}',
       '{"tools":["CALENDAR.NEXT"]}',
       '{"tools":"calendar.next"}',
       '{"tools":[1,2]}',
@@ -116,7 +116,11 @@ describe("parseRouteReadSet (strict)", () => {
       "commitments.waiting",
       "gmail.recent",
       "day.state",
+      "memory.recall",
+      "system.state",
     ]);
+    expect(readToolSource("memory.recall")).toBe("memory");
+    expect(readToolSource("system.state")).toBe("system");
   });
 
   it("exports the orchestrator-spliced routing lines", () => {
@@ -124,7 +128,7 @@ describe("parseRouteReadSet (strict)", () => {
       '{"tool":"day.state"} — asks what is going on / for an overview of today and where things stand overall',
     );
     expect(multiReadRoutingLine()).toBe(
-      '{"tools":["calendar.next","commitments.waiting","gmail.recent","day.state"]} — a composite question that clearly needs 2 or 3 of the lookups at once; 1 to 3 names, no repeats, names only (calendar.day keeps its single-tool shape)',
+      '{"tools":["calendar.next","commitments.waiting","gmail.recent","day.state","memory.recall","system.state"]} — a composite question that clearly needs 2 or 3 of the lookups at once; 1 to 3 names, no repeats, names only (calendar.day keeps its single-tool shape)',
     );
   });
 });

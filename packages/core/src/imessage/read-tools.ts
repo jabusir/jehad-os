@@ -25,15 +25,27 @@ import {
   renderDayStateText,
 } from "../queries/day-state.js";
 import { freshnessLines } from "../queries/staleness.js";
+import {
+  MEMORY_RECALL_COVERAGE,
+  recallMemory,
+  renderMemoryRecallBlock,
+} from "../queries/memory-recall.js";
+import {
+  collectSystemState,
+  renderSystemStateText,
+  SYSTEM_STATE_COVERAGE,
+} from "../queries/system-state.js";
 
 export type ReadToolCall =
   | { readonly tool: "calendar.day"; readonly day: "today" | "tomorrow" }
   | { readonly tool: "calendar.next" }
   | { readonly tool: "commitments.waiting" }
   | { readonly tool: "gmail.recent" }
-  | { readonly tool: "day.state" };
+  | { readonly tool: "day.state" }
+  | { readonly tool: "memory.recall" }
+  | { readonly tool: "system.state" };
 
-export type ReadSource = "calendar" | "commitments" | "gmail" | "state";
+export type ReadSource = "calendar" | "commitments" | "gmail" | "state" | "memory" | "system";
 
 export interface ReadToolResult {
   readonly tool: string;
@@ -74,6 +86,8 @@ export function readToolSource(tool: ReadToolCall["tool"]): ReadSource {
   if (tool === "commitments.waiting") return "commitments";
   if (tool === "gmail.recent") return "gmail";
   if (tool === "day.state") return "state";
+  if (tool === "memory.recall") return "memory";
+  if (tool === "system.state") return "system";
   return "calendar";
 }
 
@@ -100,7 +114,14 @@ export function parseRouteJson(text: string): ReadToolCall | null {
     if (obj["day"] !== "today" && obj["day"] !== "tomorrow") return null;
     return { tool: "calendar.day", day: obj["day"] };
   }
-  if (obj["tool"] === "calendar.next" || obj["tool"] === "commitments.waiting" || obj["tool"] === "gmail.recent" || obj["tool"] === "day.state") {
+  if (
+    obj["tool"] === "calendar.next" ||
+    obj["tool"] === "commitments.waiting" ||
+    obj["tool"] === "gmail.recent" ||
+    obj["tool"] === "day.state" ||
+    obj["tool"] === "memory.recall" ||
+    obj["tool"] === "system.state"
+  ) {
     if (keys.length !== 1) return null;
     return { tool: obj["tool"] } as ReadToolCall;
   }
@@ -137,6 +158,8 @@ export const READ_SET_TOOLS = [
   "commitments.waiting",
   "gmail.recent",
   "day.state",
+  "memory.recall",
+  "system.state",
 ] as const;
 
 export type ReadSetTool = (typeof READ_SET_TOOLS)[number];
@@ -240,8 +263,16 @@ export function dayStateRoutingLine(): string {
   return '{"tool":"day.state"} — asks what is going on / for an overview of today and where things stand overall';
 }
 
+export function memoryRecallRoutingLine(): string {
+  return '{"tool":"memory.recall"} — asks about something previously decided, committed, noted, or remembered ("what did I decide about X", "did I say anything about X")';
+}
+
+export function systemStateRoutingLine(): string {
+  return '{"tool":"system.state"} — asks what the system can see/do, its sources, version, cost, coverage, or limitations ("what can you see", "what are you")';
+}
+
 export function multiReadRoutingLine(): string {
-  return '{"tools":["calendar.next","commitments.waiting","gmail.recent","day.state"]} — a composite question that clearly needs 2 or 3 of the lookups at once; 1 to 3 names, no repeats, names only (calendar.day keeps its single-tool shape)';
+  return '{"tools":["calendar.next","commitments.waiting","gmail.recent","day.state","memory.recall","system.state"]} — a composite question that clearly needs 2 or 3 of the lookups at once; 1 to 3 names, no repeats, names only (calendar.day keeps its single-tool shape)';
 }
 
 function truncate(text: string, max: number): string {
@@ -354,7 +385,13 @@ function dayIso(d: Date): string {
 export async function executeReadTool(
   db: SqlExecutor,
   call: ReadToolCall,
-  opts: { readonly now?: () => Date; readonly principalId?: string } = {},
+  opts: {
+    readonly now?: () => Date;
+    readonly principalId?: string;
+    readonly queryText?: string;
+    readonly policyReads?: readonly string[];
+    readonly actionsEnabled?: boolean | null;
+  } = {},
 ): Promise<ReadToolResult> {
   const now = opts.now?.() ?? new Date();
   const query = db as unknown as QueryExecutor;
@@ -475,6 +512,47 @@ export async function executeReadTool(
           date: dayIso(localDayBounds(now, BRIEF_TIMEZONE).dayStart),
           stale: freshnessLines(state.freshness.filter((f) => f.source === "calendar")),
           text: truncate(renderDayStateText(state), CAP_DAY_STATE_TEXT),
+        },
+      };
+    }
+    case "memory.recall": {
+      if (opts.principalId === undefined) {
+        throw new Error("memory.recall requires principalId (recall is principal-scoped)");
+      }
+      if (opts.queryText === undefined) {
+        throw new Error("memory.recall requires queryText (relevance matches the user's message)");
+      }
+      const items = await recallMemory(query, {
+        principalId: opts.principalId,
+        queryText: opts.queryText,
+        now: () => now,
+      });
+      return {
+        tool: call.tool,
+        source: "memory",
+        coverage: MEMORY_RECALL_COVERAGE,
+        data: {
+          recalled: items.length,
+          lines: renderMemoryRecallBlock(items),
+        },
+      };
+    }
+    case "system.state": {
+      if (opts.principalId === undefined) {
+        throw new Error("system.state requires principalId (introspection is principal-scoped)");
+      }
+      const state = await collectSystemState(query, {
+        principalId: opts.principalId,
+        now: () => now,
+        policyReads: opts.policyReads,
+        actionsEnabled: opts.actionsEnabled ?? null,
+      });
+      return {
+        tool: call.tool,
+        source: "system",
+        coverage: SYSTEM_STATE_COVERAGE,
+        data: {
+          text: truncate(renderSystemStateText(state), CAP_DAY_STATE_TEXT),
         },
       };
     }

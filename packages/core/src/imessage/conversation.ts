@@ -18,8 +18,16 @@
 // Message CONTENT is never persisted — no table here stores it.
 
 import type { ModelProvider } from "@jehad/adapters";
-import type { ModelEgressPolicyRegistry } from "../egress/index.js";
-import { callModel, type ModelCallDb } from "../model/call-model.js";
+import {
+  EgressDenialError,
+  EgressPolicyError,
+  type ModelEgressPolicyRegistry,
+} from "../egress/index.js";
+import {
+  callModel,
+  ModelBudgetExceededError,
+  type ModelCallDb,
+} from "../model/call-model.js";
 import { recordAudit, type SqlExecutor } from "../actions/audit.js";
 import {
   DEFAULT_GATEWAY_CONTEXT_POLICY,
@@ -43,10 +51,20 @@ import {
   renderCalibrationAck,
   renderMissedAck,
 } from "./calibration-verbs.js";
-import { resolvePassModels, shouldEscalateRoute } from "./model-selection.js";
+import {
+  answerFallbackModel,
+  answerModelForTier,
+  classifyAnswerDepth,
+  hasSynthesisMarkers,
+  resolvePassModels,
+  shouldEscalateRoute,
+} from "./model-selection.js";
+import { deepBudgetState, deepPromptVersion } from "./deep-budget.js";
 import {
   dayStateRoutingLine,
   executeReadTool,
+  memoryRecallRoutingLine,
+  systemStateRoutingLine,
   gmailRoutingLine,
   isRouteNoneJson,
   multiReadRoutingLine,
@@ -228,6 +246,8 @@ export function buildRoutingPrompt(
   ];
   if (opts.extendedTools === true) {
     toolLines.push(dayStateRoutingLine());
+    toolLines.push(memoryRecallRoutingLine());
+    toolLines.push(systemStateRoutingLine());
   }
   toolLines.push('{"tool":"none"} — anything that needs no data lookup');
   const rules = [
@@ -372,6 +392,52 @@ const ATTACHMENT_ONLY_REPLY =
 /** Explicit thread reset (§11) — deterministic, no model call. */
 const RESET_COMMANDS = new Set(["/new", "/reset"]);
 const RETRACT_RE = /\b(?:i\s+)?(?:have\s+)?changed\s+my\s+mind\b|\bnever\s?mind\b|\bscratch\s+that\b/i;
+const QUESTION_MARKERS_RE =
+  /\?|\b(?:what|why|how|who|when|where|which|should|could|would|can|did|does|is|are|any)\b/i;
+
+/** W3: deterministic tier selection + DEEP budget guard for the answer
+ * pass. Policy chooses models; the classifier only emits a tier enum. */
+async function resolveAnswerDispatch(
+  db: SqlExecutor,
+  input: { text: string },
+  now: Date,
+  features: { tools: readonly string[]; dataBlocks: number },
+  passes: NonNullable<PolicyV1["gateway"]>["passes"] | null,
+  principalModel: string,
+  actor: string,
+  principalId: string,
+): Promise<{ tier: "fast" | "standard" | "deep"; model: string; promptVersionDeep: boolean }> {
+  let tier = classifyAnswerDepth({
+    tools: features.tools,
+    textLength: input.text.length,
+    questionMarkers: QUESTION_MARKERS_RE.test(input.text),
+    dataBlocks: features.dataBlocks,
+    synthesisMarkers: hasSynthesisMarkers(input.text),
+  });
+  if (tier === "deep") {
+    const budget = await deepBudgetState(db, { now: new Date() });
+    if (!budget.allowDeep) {
+      await audit(db, actor, "imessage.converse.deep_capped", {
+        principalId,
+        reason: budget.reason,
+      });
+      tier = "standard";
+    }
+  }
+  return {
+    tier,
+    model: answerModelForTier(passes, principalModel, tier),
+    promptVersionDeep: tier === "deep",
+  };
+}
+
+function isDeterministicCallFailure(err: unknown): boolean {
+  return (
+    err instanceof ModelBudgetExceededError ||
+    err instanceof EgressDenialError ||
+    err instanceof EgressPolicyError
+  );
+}
 const THREAD_RESET_REPLY = "Fresh thread started — I've cleared our recent context.";
 
 export function isTextOnlyAttachment(text: string): boolean {
@@ -1025,7 +1091,16 @@ async function converseTurn(
             // parser admits legacy single shapes (calendar.day carries a
             // day param) that runReadSet's bare-name contract excludes.
             const blockResults = await Promise.all(
-              allowed.map((call) => executeReadTool(db, call, { now: () => now, principalId: input.principalId })),
+              allowed.map((call) =>
+                  executeReadTool(db, call, {
+                    now: () => now,
+                    principalId: input.principalId,
+                    queryText: input.text,
+                    policyReads: policy.reads,
+                    actionsEnabled:
+                      calendarActionsFromPolicyV1(gatewayFile)?.enabled === true ? true : null,
+                  }),
+                ),
             );
             blocks = blockResults.map((r) => {
               const serialized = JSON.stringify(r.data);
@@ -1062,20 +1137,44 @@ async function converseTurn(
           blocks !== null && blocks.length > 0
             ? freshnessLines(await sourceFreshness(db, input.principalId, { now: () => now }))
             : undefined;
-        const answer = await dispatch(
-          buildAnswerPrompt(
-            String(principalName),
-            policy.model,
-            input.text,
-            results,
-            lookupNote,
-            history,
-            blocks !== null && blocks.length > 0
-              ? { blocks, caveats, perBlockTokenBudget: contextPolicy.perBlockTokenBudget }
-              : undefined,
-          ),
-          CONVERSATION_PROMPT_VERSION,
+        const tiered = await resolveAnswerDispatch(
+          db,
+          input,
+          now,
+          { tools: allowed.map((c) => c.tool), dataBlocks: blocks?.length ?? 0 },
+          gatewayFile?.gateway?.passes ?? null,
+          policy.model,
+          actor,
+          input.principalId,
         );
+        const answerPrompt = buildAnswerPrompt(
+          String(principalName),
+          policy.model,
+          input.text,
+          results,
+          lookupNote,
+          history,
+          blocks !== null && blocks.length > 0
+            ? { blocks, caveats, perBlockTokenBudget: contextPolicy.perBlockTokenBudget }
+            : undefined,
+        );
+        const answerPromptVersion = tiered.promptVersionDeep
+          ? deepPromptVersion(CONVERSATION_PROMPT_VERSION)
+          : CONVERSATION_PROMPT_VERSION;
+        let answer;
+        try {
+          answer = await dispatch(answerPrompt, answerPromptVersion, tiered.model);
+        } catch (err) {
+          const fallbackModel = answerFallbackModel(gatewayFile?.gateway?.passes ?? null);
+          if (fallbackModel === null || isDeterministicCallFailure(err)) throw err;
+          await audit(db, actor, "imessage.converse.answer_fallback", {
+            principalId: input.principalId,
+            handle,
+            tier: tiered.tier,
+            error: err instanceof Error ? err.name : "unknown",
+          });
+          answer = await dispatch(answerPrompt, answerPromptVersion, fallbackModel);
+        }
         replyText = capReplyText(answer.result.text);
         costUsd = Math.round((route.costUsd + answer.costUsd) * 1e6) / 1e6;
         readTurnArtifacts = {
@@ -1124,10 +1223,41 @@ async function converseTurn(
             });
           }
         }
-        const answer = await dispatch(
-          buildAnswerPrompt(String(principalName), policy.model, input.text, results, lookupNote, history),
-          CONVERSATION_PROMPT_VERSION,
+        const legacyTiered = await resolveAnswerDispatch(
+          db,
+          input,
+          now,
+          { tools: parsed !== null ? [parsed.tool] : [], dataBlocks: results.length > 0 ? 1 : 0 },
+          gatewayFile?.gateway?.passes ?? null,
+          policy.model,
+          actor,
+          input.principalId,
         );
+        const legacyPrompt = buildAnswerPrompt(
+          String(principalName),
+          policy.model,
+          input.text,
+          results,
+          lookupNote,
+          history,
+        );
+        const legacyPromptVersion = legacyTiered.promptVersionDeep
+          ? deepPromptVersion(CONVERSATION_PROMPT_VERSION)
+          : CONVERSATION_PROMPT_VERSION;
+        let answer;
+        try {
+          answer = await dispatch(legacyPrompt, legacyPromptVersion, legacyTiered.model);
+        } catch (err) {
+          const fallbackModel = answerFallbackModel(gatewayFile?.gateway?.passes ?? null);
+          if (fallbackModel === null || isDeterministicCallFailure(err)) throw err;
+          await audit(db, actor, "imessage.converse.answer_fallback", {
+            principalId: input.principalId,
+            handle,
+            tier: legacyTiered.tier,
+            error: err instanceof Error ? err.name : "unknown",
+          });
+          answer = await dispatch(legacyPrompt, legacyPromptVersion, fallbackModel);
+        }
         replyText = capReplyText(answer.result.text);
         costUsd = Math.round((route.costUsd + answer.costUsd) * 1e6) / 1e6;
         readTurnArtifacts = {

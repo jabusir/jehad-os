@@ -53,8 +53,6 @@ export type {
   SourceFreshness,
   SourceFreshnessOptions,
 } from "./staleness.js";
-export { freshnessLines, sourceFreshness, STALE_AFTER_HOURS } from "./staleness.js";
-
 export type {
   CommitmentRecallItem,
   DecisionRecallItem,
