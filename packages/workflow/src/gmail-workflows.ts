@@ -30,6 +30,7 @@ import {
   createGmailAdapter,
   gmailEnvOrKeychainTokenProvider,
   isHistoryExpired as adapterHistoryExpired,
+  isRateLimited,
   type GmailAdapter,
 } from "@jehad/adapters";
 import { defineScheduledWorkflow, type ScheduledWorkflowDefinition } from "./definition.js";
@@ -118,6 +119,12 @@ export async function runGmailSyncTick(db: SqlExecutor, token: string): Promise<
         status: typeof (err as { status?: number }).status === "number" ? (err as { status: number }).status : undefined,
       }),
     );
+    // Quota: fail SOFT — the next cron tick (5min) is the retry. A thrown
+    // error would make inngest retry with backoff and re-burn the quota
+    // (retry-storm) before the minute-window even resets.
+    if (isRateLimited(err)) {
+      return { status: "quota-wait" as const };
+    }
     throw err;
   }
 }
