@@ -103,6 +103,16 @@ export interface GmailMessage {
  * (Lane G1). Read-only by construction — there is no send path to pin
  * because no send path exists in the interface.
  */
+/** Structural quota classifier (core never imports the adapter package):
+ *  429, or 403 with a rate/quota reason code. */
+function isRateLimitedError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { status?: unknown; code?: unknown };
+  if (typeof e.status !== "number") return false;
+  if (e.status === 429) return true;
+  return e.status === 403 && /rateLimit|quota|userRateLimit|dailyLimit|sendAsQuota/i.test(String(e.code ?? ""));
+}
+
 export interface GmailSyncPort {
   readonly id: string;
   /** False when no credential is available → clean skip (§3.7). */
@@ -424,6 +434,11 @@ export async function syncGmail(
     try {
       message = normalizeGmailMessage(await adapter.getMessage({ id: ref.id }));
     } catch (err) {
+      if (isRateLimitedError(err)) {
+        // Quota: abort the tick WITHOUT advancing the cursor — skip-and-
+        // advance would silently drop these messages forever.
+        throw err;
+      }
       tally.failed += 1;
       await audit(db, "gmail.sync.message-skipped", {
         messageId: ref.id,

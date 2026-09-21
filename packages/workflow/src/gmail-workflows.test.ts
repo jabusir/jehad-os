@@ -357,8 +357,12 @@ describe("gmailWorkflowPort seam (verifier D3/C1)", () => {
   it("fails loudly when bootstrap carries no historyId (never persists a zero cursor)", async () => {
     const a = adapter();
     a.bootstrapList.mockResolvedValue({ messageIds: [], newestHistoryId: null, nextPageToken: null });
+    a.profileHistoryId.mockResolvedValue({ historyId: null });
     const port = gmailWorkflowPort(a as never);
-    await expect(port.listBootstrapMessages({ newerThanDays: 30 })).rejects.toThrow(/no historyId/);
+    await expect(port.listBootstrapMessages({ newerThanDays: 30 })).rejects.toThrow(/no resolvable historyId/);
+    // profile fallback happy path
+    a.profileHistoryId.mockResolvedValue({ historyId: 12345 });
+    await expect(port.listBootstrapMessages({ newerThanDays: 30 })).resolves.toMatchObject({ historyId: 12345 });
   });
 
   it("coerces message fields for the core port (internalDate number→string, threadId null→empty)", async () => {

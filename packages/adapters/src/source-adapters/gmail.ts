@@ -46,6 +46,18 @@ export class GmailApiError extends Error {
  * (HTTP 404, code "historyIdNotFound"; §3.5) — the caller must clear the
  * cursor and re-run the bootstrap (externalId idempotency dedupes).
  */
+/** True when the error is a quota/rate limit (HTTP 429, or 403 with a
+ *  rate/quota reason) — callers must ABORT the tick without advancing
+ *  the cursor; the next tick retries with fresh quota. */
+export function isRateLimited(err: unknown): boolean {
+  return (
+    err instanceof GmailApiError &&
+    (err.status === 429 ||
+      (err.status === 403 &&
+        /rateLimit|quota|userRateLimit|dailyLimit|sendAsQuota/i.test(err.code ?? "")))
+  );
+}
+
 export function isHistoryExpired(err: unknown): boolean {
   return err instanceof GmailApiError && err.status === 404 && err.code === "historyIdNotFound";
 }

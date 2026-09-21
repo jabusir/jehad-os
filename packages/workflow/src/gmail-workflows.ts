@@ -125,6 +125,7 @@ export async function runGmailSyncTick(db: SqlExecutor, token: string): Promise<
 /** Map the G1 adapter onto the G2 sync port, translating the adapter's
  *  404-historyId-expiry error into the core-recognized error name. */
 export function gmailWorkflowPort(adapter: GmailAdapter): GmailSyncPort {
+  let fetchCount = 0;
   return {
     id: adapter.id,
     hasToken: async () => true,
@@ -166,6 +167,11 @@ export function gmailWorkflowPort(adapter: GmailAdapter): GmailSyncPort {
       };
     },
     getMessage: async (opts) => {
+      // Quota pacing (Gmail: 250 units/min/user; messages.get=5): a
+      // 1.2s breath every 4th fetch keeps a 50-msg tick ≈ 15s spread
+      // and comfortably under the per-minute budget.
+      fetchCount += 1;
+      if (fetchCount % 4 === 0) await new Promise((r) => setTimeout(r, 1200));
       const m = await adapter.getMessage(opts.id);
       return {
         id: m.id,
