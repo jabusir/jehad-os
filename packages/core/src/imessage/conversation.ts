@@ -901,6 +901,7 @@ async function converseTurn(
           });
           base = JOSCTL_PROFILE_DEFINITION;
         }
+        let persisted = false;
         if (delta !== null && typeof delta === "object") {
           await nextProfileVersion(db, {
             principalId: input.principalId,
@@ -908,12 +909,15 @@ async function converseTurn(
             definition: applyDefinitionDelta(base, delta),
             via: "self",
           });
+          persisted = true;
         }
         await retractThreadStance(db, { threadId: threadNow.id, principalId: input.principalId });
         return deterministicReply(deps, input, ctx, {
-          content: "Kept — permanent now (versioned; change it again anytime).",
+          content: persisted
+            ? "Kept — permanent now (versioned; change it again anytime)."
+            : "That one didn't save cleanly — say the change again and I'll redo it properly.",
           outboundTrust: "system_generated",
-          marker: "profile-persist",
+          marker: persisted ? "profile-persist" : "profile-persist-failed",
         });
       }
     }
@@ -922,14 +926,17 @@ async function converseTurn(
   // W5: occurrence verbs — explicit user declaration is the ONLY thing
   // that graduates occurrence state (owner-ratified). Sole eligible
   // recent event applies; multiple clarify; zero falls through.
-  if (/\b(?:it|that) (?:happened|didn'?t happen|did not happen)\b/i.test(input.text)) {
+  if (
+    policy.reads.includes("calendar") &&
+    /\b(?:it|that) (?:happened|didn'?t happen|did not happen)\b/i.test(input.text)
+  ) {
     const happened = !/didn'?t|did not/i.test(input.text);
     const recent = await db.query(
-      `SELECT id, title, end_time FROM calendar_events
+      `SELECT id, summary, end_time FROM calendar_events
         WHERE occurrence = 'scheduled_past_unverified'
           AND end_time < $1::timestamptz
           AND end_time > $2::timestamptz
-        ORDER BY end_time DESC LIMIT 3`,
+        ORDER BY end_time DESC LIMIT 5`,
       [now.toISOString(), new Date(now.getTime() - 48 * 60 * 60_000).toISOString()],
     );
     if (recent.rows.length === 1) {
@@ -940,7 +947,7 @@ async function converseTurn(
         principalId: input.principalId,
         now,
       });
-      const title = String(event.title);
+      const title = String(event.summary);
       return deterministicReply(deps, input, ctx, {
         content: happened
           ? `Marked: ${title} — happened (confirmed by you).`
@@ -957,7 +964,7 @@ async function converseTurn(
         minute: "2-digit",
       });
       const list = recent.rows
-        .map((r) => `- ${String(r.title)} (${fmt.format(new Date(String(r.end_time)))})`)
+        .map((r) => `- ${String(r.summary)} (${fmt.format(new Date(String(r.end_time)))})`)
         .join("\n");
       return deterministicReply(deps, input, ctx, {
         content: `Which one?\n${list}`,
