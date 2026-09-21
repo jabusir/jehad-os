@@ -1,6 +1,6 @@
 # Jarvis V1 — Intelligence Plan
 
-Status: **accepted (rev 2)** — owner verdict 2026-09-21, seven revisions incorporated
+Status: **accepted (rev 3)** — owner verdict 2026-09-21 (rev 2 + live-transcript revision)
 Date: 2026-09-21
 Grounding: audits of HEAD `c65ec8a` (post-calibration wave), 1,511 tests green, migrations 000–016
 
@@ -13,6 +13,14 @@ Grounding: audits of HEAD `c65ec8a` (post-calibration wave), 1,511 tests green, 
 - **R6** Verb mutation semantics: "changed my mind" is thread-local unless explicitly targeting canonical state; bare `done/renegotiated/missed` mutate only via sole-eligible-item or explicit `[ref]` (§7 W1/W5).
 - **R7** Recall metric: recall@5 target alongside precision; must-return-none scenarios (§7 W2, §13, §16).
 - **Pin** Gmail sensor documented **personal-domain only**; employer mailboxes belong to the future Work Edge (§5, §15).
+
+**Revision 3 changelog** (live transcript review 2026-09-21, 12:36–12:41 PT):
+- **R8 Turn Interpretation layer** (subsumes R-findings 1/3 + mid-conversation calibration): every authenticated turn may yield 0..N typed PROPOSALS (task_batch, configuration_directive, system_feedback, memory_candidate) — it proposes, never mutates; canonical writes ride existing deterministic confirm verbs. W6 redefined around it.
+- **R9 Live self-model**: `system.self_brief` — runtime-derived capability/configuration block injected into every answer; capability questions answered from it, never from prompt memory.
+- **R10 Persistence-truth invariant** (§5-15): never claim noted/saved/remembering/tracking unless a durable mutation succeeded — prompt rule AND eval.
+- **R11 Persona = behavior policy, not just voice**: ProfileDefinition gains behavior flags (detect tasks, propose capture, convert directives, surface deadlines, prefer next action, no passive shrugging).
+- **R12 The 2026-09-21 transcript becomes a golden conversational eval** — the exact conversation replays after the changes with assertions (8 tasks, 3 deadlines, no persistence hallucination, coverage-honest gmail, staged persona directive).
+- Gmail depth stays a separate sensor decision; near-term fix is immediate coverage-limit language.
 
 ---
 
@@ -181,6 +189,8 @@ Non-negotiable (each gains or keeps an adversarial test pin):
 12. Bounded context always (per-pass and per-block token budgets enforced in code, not by hope).
 13. **Thread-local by default (R6)**: conversational corrections ("changed my mind") mutate thread state; canonical mutations ride existing proposal/confirm or review flows only.
 14. **Bare verbs resolve or refuse (R6)**: `done/renegotiated/missed`-style transitions mutate only when exactly one eligible item exists; zero → honest none; multiple → require an item ref (`[7K4]`-style) or clarify. Never guess.
+15. **Persistence truth (R10)**: the system never claims "noted / saved / I'll remember / tracking / added / updated" unless the corresponding durable mutation SUCCEEDED this turn. No write → "I see it in our conversation, but I'm not tracking it yet." Enforced by prompt rule AND eval assertions, not prose alone.
+16. **Proposals never mutate (R8)**: the Turn Interpreter emits typed proposals only; every canonical write from a proposal passes through an explicit deterministic confirm verb with audit — the same contract as calendar actions.
 
 ---
 
@@ -245,12 +255,20 @@ Sequencing rationale: W1 creates the context seam everything else plugs into; W2
 - **Acceptance**: "one thing" scenario corpus picks the blocking-overdue item ≥85%; renders never present `scheduled_past_unverified` as happened, nor calendar churn as verified fact about the day (label pins); commitment-verb resolver behavior pinned (sole→apply, none→honest, many→ref/clarify); plan-divergence block only when churn exists (suppression pin).
 - **Security**: occurrence sweep is read-then-label (no external calls); commitment transitions principal-scoped + audited; adversarial: forged "done" from unpaired sender impossible (existing pairing gate).
 
-### W6 — Initiative & Follow-Through
-- **Goal**: bounded proactive intelligence; no spam.
-- **Scope**: (a) reconcile-unknown workflow (15min) wrapping existing `reconcileCalendarAction`; (b) follow-up loops: succeeded actions tied to a future moment → next-morning one-line check-in question whose **answer graduates occurrence state** (W5 corroboration path); (c) nudge suggestions: overdue + may_follow_up + aging → brief line with pre-drafted message as a *proposal* (existing propose machinery, never auto-send); (d) interruption policy in policy.yaml `attention:` — quiet hours (default 22:00–07:00 PT), max unsolicited touches/day (default 3, briefs+calibration excluded), urgent-only midday window (escalation ≥ high, existing threshold); (e) attention decisions logged with reasons (why surfaced / why silent) — auditable restraint.
-- **Dependencies**: W5 (priority feeds selection; occurrence graduation target).
-- **Acceptance**: follow-up arrives for actionable outcomes and **not** for terminal successes (suppression tests); follow-up replies graduate occurrence per W5 rules; interruption cap enforced under burst simulation; "why didn't you bother me about X" answerable from attention log; calibration noise metric does not regress (weekly).
-- **Security**: no new outbound channels; nudges ride existing proposal confirm flow; adversarial: nudge drafting cannot send without confirm token (existing).
+### W6 — Turn-to-State Proposals + Live Self-Model + Truthful UX (rev 3)
+- **Goal**: turns are interpreted as observations, not just requests. The system infers durable state, proposes it, and confirms — plus it knows itself at runtime and never claims persistence it didn't perform.
+- **Scope (three lanes)**:
+  - **(a) Proposal bridge**: Turn Interpreter pass (route-class model, strict JSON proposal schema: task_batch{items[{title,due}]}, configuration_directive{target_principal,target,change}, system_feedback{category,subject,detail}, memory_candidate{summary}; unknown/absent → no proposals, fail-safe). Runs concurrently with read execution. Proposals render as an offer block in the reply (deterministic suffix, persona-behavior-gated). Pending proposal rides thread metadata; deterministic confirm verbs mutate: "track them" → commitments (due dates parsed by the existing deterministic temporal normalizer; user_declared provenance; audit), "approve" → self-profile version OR staged other-principal profile with honest activation instructions (policy stays owner-edited), "log it" → feedback row (migration 020 widens the feedback vocabulary). ProfileDefinition gains `behaviors` flags consumed by the wiring.
+  - **(b) Live self-model**: `queries/system-self-brief.ts` — runtime-derived (policy reads/personas/capture/actions config, sensor connectivity incl. gmail metadata-only, profile self-modifiability, retention facts), rendered compact and injected into EVERY answer prompt as provenance-labeled DATA; answer rules: capability/config questions answered ONLY from the brief.
+  - **(c) Truthful UX**: persistence-truth prompt rule + eval assertions (reply_not_contains on noted/saved/remembering/tracking when db_pins show zero writes); coverage-limit-first language for metadata-bound sources ("pertinence" gets the limit + sender patterns, never a bare taxonomy); the 2026-09-21 transcript as golden scenario file with pre/post assertions.
+- **Dependencies**: W1–W5 (threads, confirm machinery, profiles, commitments).
+- **Acceptance**: the golden transcript replays materially better (interpreter proposes exactly 8 tasks / 3 deadlines; "track them" writes 8 commitments with 3 deterministic Wednesday dates; capability answers match the live brief; no persistence hallucination; gmail answer leads with the coverage limit; Yusra directive stages a profile with an honest enable path) — all pinned; proposals never write without confirm (DB pin); zero new model authority.
+- **Security/adversarial**: interpreter output is data — it cannot name models, grant reads, or bypass confirm; injected content in proposals flattened; cross-principal config directives require the owner principal + explicit approve; migration 020 additive.
+- **Rollback**: interpreter off via policy.yaml `gateway.interpret` (fail-closed default off until ratified); self-brief inert (DATA-only); prompt rules revert with the prompt version bump.
+
+### W6-phase 2 — Initiative & Follow-Through (post-proposal-bridge)
+- **Goal**: bounded proactive intelligence; no spam. (Original W6 scope, unchanged: reconcile-unknown workflow, follow-up loops that graduate occurrence state, nudge suggestions as proposals, interruption policy per ratified defaults — quiet 22:00–07:00 PT, ≤3 unsolicited/day, attention decision log.)
+- **Dependencies**: W6 (proposals are the substrate nudges/follow-ups ride).
 
 ### W7 — Self-Awareness
 - **Goal**: "what can you see/do / why did you miss that / what are you?" answered from runtime truth.
