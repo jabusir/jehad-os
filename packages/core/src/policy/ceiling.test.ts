@@ -5,12 +5,14 @@ import {
   AUTONOMY_LEVELS,
   DEFAULT_CALIBRATION_POLICY,
   DEFAULT_GMAIL_SENSOR_POLICY,
+  DEFAULT_PERSONAS_POLICY,
   calibrationPolicyOf,
   decideAutonomy,
   gatewayContextPolicyOf,
   gmailSensorPolicyOf,
   loadPolicyFile,
   parsePolicyV1,
+  personasPolicyOf,
 } from "./ceiling";
 import { DEFAULT_PER_BLOCK_TOKEN_BUDGET } from "../context/assembler";
 
@@ -746,5 +748,67 @@ describe("policy calibration (Lane C1 — the daily accuracy check)", () => {
     const fromDisk = await loadPolicyFile(new URL("../../../../policy.yaml", import.meta.url));
     expect(fromDisk.calibration).toEqual({ enabled: true, principals: ["josctl"], promptLocalHour: 20 });
     expect(calibrationPolicyOf(fromDisk).enabled).toBe(true); // owner ratified 2026-09-21
+  });
+});
+
+describe("policy personas (W4 interaction-profile flag — security/default layer only)", () => {
+  const BASE = VALID;
+
+  it("parses the strict ordered flow mapping onto PersonasPolicy", () => {
+    const policy = parsePolicyV1(
+      `${BASE}\npersonas: { enabled: true, principals: [josctl, yusra] }\n`,
+    );
+    expect(policy.personas).toEqual({ enabled: true, principals: ["josctl", "yusra"] });
+    expect(personasPolicyOf(policy)).toEqual({ enabled: true, principals: ["josctl", "yusra"] });
+  });
+
+  it("admits the disabled shape with an empty allowlist", () => {
+    const policy = parsePolicyV1(`${BASE}\npersonas: { enabled: false, principals: [] }\n`);
+    expect(policy.personas).toEqual({ enabled: false, principals: [] });
+  });
+
+  it("absent section → personasPolicyOf returns fail-closed defaults (profiles inert)", () => {
+    const policy = parsePolicyV1(BASE);
+    expect(policy.personas).toBeUndefined();
+    expect(personasPolicyOf(policy)).toEqual(DEFAULT_PERSONAS_POLICY);
+    expect(DEFAULT_PERSONAS_POLICY.enabled).toBe(false);
+    expect(DEFAULT_PERSONAS_POLICY.principals).toEqual([]);
+  });
+
+  it("NO PROMPT TEXT IN POLICY: register/brevity/address keys structurally fail closed", () => {
+    const cases = [
+      "personas: { enabled: true, principals: [josctl], register: terse }",
+      "personas: { enabled: true, principals: [josctl], max_sentences: 4 }",
+      "personas: { enabled: true, principals: [josctl], address: Chief }",
+      "personas: { enabled: true, principals: [josctl], prompt: \"you are a chief of staff\" }",
+      "personas: { principals: [josctl], enabled: true }",
+      "personas: { enabled: true }",
+      "personas: { enabled: maybe, principals: [] }",
+      "personas: { enabled: true, principals: [josctl, josctl, yusra, yusra], extra: 1 }",
+      "personas: just a string",
+      "personas: {}",
+    ];
+    for (const entry of cases) {
+      expect(() => parsePolicyV1(`${BASE}\n${entry}\n`), entry).toThrow();
+    }
+    expect(() =>
+      parsePolicyV1(`${BASE}\npersonas: { enabled: true, principals: [] }\npersonas: { enabled: false, principals: [] }\n`),
+    ).toThrow(/duplicate personas/);
+  });
+
+  it("duplicate principals collapse; coexists with every other section", () => {
+    const policy = parsePolicyV1(
+      BASE +
+        "\npersonas: { enabled: true, principals: [josctl, josctl] }\n" +
+        "calibration:\n  daily: { enabled: true, principals: [josctl], prompt_local_hour: 20 }\n",
+    );
+    expect(policy.personas?.principals).toEqual(["josctl"]);
+    expect(policy.calibration?.enabled).toBe(true);
+  });
+
+  it("the repo-root policy.yaml ships the section DISABLED pending owner seed approval (§18-2)", async () => {
+    const fromDisk = await loadPolicyFile(new URL("../../../../policy.yaml", import.meta.url));
+    expect(fromDisk.personas).toEqual({ enabled: false, principals: [] });
+    expect(personasPolicyOf(fromDisk).enabled).toBe(false);
   });
 });

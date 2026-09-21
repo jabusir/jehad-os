@@ -21,7 +21,7 @@ const ALL_MIGRATIONS = [
   "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
   "004_commitments_domain", "005_commitments_temporal", "006_notifications",
   "007_calendar", "008_feedback", "009_notification_calendar_change", "010_imessage_sensor", "011_imessage_pairing", "012_interaction_threads", "013_review_refs", "014_confirm_token_unique",
-  "015_gmail_sensor", "016_calibration",
+  "015_gmail_sensor", "016_calibration", "018_interaction_profiles",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -257,6 +257,33 @@ describe("migration files (fs only)", () => {
     expect(cal!.downSql).toMatch(/DROP TABLE IF EXISTS calibration_items\b/);
   });
 
+  it("018 creates append-only interaction_profiles + the active-version view + write guard; down reverses", async () => {
+    const migrations = await listMigrations();
+    const profiles = migrations.find((m) => m.name === "018_interaction_profiles");
+    expect(profiles).toBeDefined();
+    expect(profiles!.sql).toMatch(/CREATE TABLE interaction_profiles\b/);
+    for (const column of [
+      "principal_id", "surface", "version", "definition", "created_via", "created_at",
+    ]) {
+      expect(profiles!.sql).toMatch(new RegExp(`\\b${column}\\s`));
+    }
+    // Version identity + provenance vocabulary are structural.
+    expect(profiles!.sql).toMatch(/UNIQUE \(principal_id, surface, version\)/);
+    expect(profiles!.sql).toMatch(/CHECK \(created_via IN \('owner_seed', 'self'\)\)/);
+    expect(profiles!.sql).toMatch(/CHECK \(version > 0\)/);
+    // Active version = max(version) per (principal, surface).
+    expect(profiles!.sql).toMatch(
+      /CREATE VIEW interaction_profiles_active[\s\S]*DISTINCT ON \(principal_id, surface\)[\s\S]*version DESC/,
+    );
+    // Append-only + cross-principal write guard (012 trigger pattern).
+    expect(profiles!.sql).toMatch(/CREATE TRIGGER interaction_profiles_write_guard_trigger/);
+    expect(profiles!.sql).toMatch(/BEFORE UPDATE OR DELETE ON interaction_profiles/);
+    expect(profiles!.downSql).toMatch(/DROP TRIGGER IF EXISTS interaction_profiles_write_guard_trigger/);
+    expect(profiles!.downSql).toMatch(/DROP FUNCTION IF EXISTS interaction_profiles_write_guard/);
+    expect(profiles!.downSql).toMatch(/DROP VIEW IF EXISTS interaction_profiles_active/);
+    expect(profiles!.downSql).toMatch(/DROP TABLE IF EXISTS interaction_profiles\b/);
+  });
+
   it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {
     const migrations = await listMigrations();
     const guard = migrations.find((m) => m.name === "002_action_transition_guard");
@@ -320,6 +347,12 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate up/down (integration)", () => {
     expect(afterUp.has("review_refs")).toBe(true);
     expect(afterUp.has("gmail_sync_state")).toBe(true);
     expect(afterUp.has("calibration_items")).toBe(true);
+    expect(afterUp.has("interaction_profiles")).toBe(true);
+    // 018 active-version view (views are absent from information_schema.tables).
+    const activeView = await pool.query<{ ok: boolean }>(
+      `SELECT to_regclass('interaction_profiles_active') IS NOT NULL AS ok`,
+    );
+    expect(activeView.rows[0].ok).toBe(true);
 
     const records = await pool.query<{ name: string }>("SELECT name FROM schema_migrations");
     expect(records.rows.map((r) => r.name)).toEqual([...ALL_MIGRATIONS]);
@@ -331,10 +364,14 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate up/down (integration)", () => {
     for (const table of [
       ...TABLES_001, "principals",
       "imessage_transport_events", "sent_message_fingerprints", "imessage_sensor_state",
-      "review_refs", "gmail_sync_state", "calibration_items",
+      "review_refs", "gmail_sync_state", "calibration_items", "interaction_profiles",
     ]) {
       expect(afterDown.has(table)).toBe(false);
     }
+    const activeViewGone = await pool.query<{ ok: boolean }>(
+      `SELECT to_regclass('interaction_profiles_active') IS NULL AS ok`,
+    );
+    expect(activeViewGone.rows[0].ok).toBe(true);
     expect(afterDown.has("schema_migrations")).toBe(true);
   });
 

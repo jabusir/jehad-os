@@ -74,6 +74,16 @@ gateway:
     yusra: { model: openai/gpt-4o-mini, requests_per_hour: 20, cost_per_day: 2.0 }
     josctl: { model: openai/gpt-4o-mini, requests_per_hour: 30, cost_per_day: 5.0, reads: [calendar, commitments, gmail, state, memory, system] }
 
+# personas — W4 interaction-profile switch (jarvis-v1.md §7 W4 rev2 R2;
+# §5 invariant 2). SECURITY/DEFAULT LAYER ONLY: the on/off flag plus the
+# principals allowed to hold conversation profiles. Deliberately nothing
+# else — NO prompt text, register, brevity, or address content lives here;
+# profile content is versioned data in interaction_profiles (append-only,
+# active = max version) and can never alter reads, tools, budgets, egress,
+# or authorization. Disabled until the owner approves the initial josctl
+# seed profile (§18-2); flip to enabled + principals: [josctl] then.
+personas: { enabled: false, principals: [] }
+
 # sensors — cloud sensor policy (GMAIL; gmail-sensor-contracts.md §5/§10.3).
 # sensors.gmail: metadata ingest for ALL senders; deterministic extraction
 # ONLY for extract_senders globs over the From address (ESCALATE-4 — the
