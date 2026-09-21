@@ -130,15 +130,21 @@ export function gmailWorkflowPort(adapter: GmailAdapter): GmailSyncPort {
     hasToken: async () => true,
     listBootstrapMessages: async (opts) => {
       const page = await adapter.bootstrapList(opts.newerThanDays, opts);
-      if (page.newestHistoryId === null) {
+      // messages.list carries NO top-level historyId (only profile/threads
+      // do) — resolve the bootstrap cursor from the mailbox profile.
+      let historyId = page.newestHistoryId;
+      if (historyId === null) {
+        historyId = (await adapter.profileHistoryId()).historyId;
+      }
+      if (historyId === null || historyId <= 0) {
         // A zero cursor would 404-loop into endless re-bootstrap — fail
         // the tick loudly instead (verifier D3).
-        throw new Error("gmail bootstrap: response carried no historyId");
+        throw new Error("gmail bootstrap: no resolvable historyId");
       }
       return {
         messages: page.messageIds,
         nextPageToken: page.nextPageToken,
-        historyId: page.newestHistoryId,
+        historyId,
       };
     },
     listHistory: async (opts) => {
@@ -184,7 +190,7 @@ async function loadGmailSensorPolicy() {
     // Module-relative like every other policy loader (cwd-independent —
     // the LaunchAgent worker runs from /).
     const moduleDefault = resolve(
-      fileURLToPath(new URL("../../../../policy.yaml", import.meta.url)),
+      fileURLToPath(new URL("../../../policy.yaml", import.meta.url)),
     );
     const file = process.env.POLICY_YAML_PATH ?? moduleDefault;
     const policy = parsePolicyV1(await readFile(file, "utf8"));
