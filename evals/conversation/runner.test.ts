@@ -207,7 +207,7 @@ describe.skipIf(!TEST_DATABASE_URL)("conversation eval runner (integration, herm
     expect(run.results[0]!.turns).toEqual([]);
   });
 
-  it("runs the checked-in suite: continuity + plain chat pass; day.state/staleness skip until their lanes land", async () => {
+  it("runs the checked-in suite: all four scenarios pass post-W1-integration", async () => {
     const file = loadScenarioFile(new URL("./scenarios.yaml", import.meta.url).pathname);
     const requires = [...new Set(file.scenarios.flatMap((s) => [...s.requires]))];
     const probes = await probeCoreCapabilities(requires);
@@ -217,12 +217,12 @@ describe.skipIf(!TEST_DATABASE_URL)("conversation eval runner (integration, herm
       capabilityProbes: probes,
       scenarios: file.scenarios,
     });
-    expect(run.counts).toEqual({ pass: 2, fail: 0, skip: 2 });
+    expect(run.counts).toEqual({ pass: 4, fail: 0, skip: 0 });
     const byId = new Map(run.results.map((result) => [result.id, result]));
     expect(byId.get("referent-continuity-01")!.status).toBe("pass");
     expect(byId.get("plain-chat-none-01")!.status).toBe("pass");
-    expect(byId.get("daystate-grounding-01")!.status).toBe("skip");
-    expect(byId.get("staleness-honesty-01")!.status).toBe("skip");
+    expect(byId.get("daystate-grounding-01")!.status).toBe("pass");
+    expect(byId.get("staleness-honesty-01")!.status).toBe("pass");
     const continuity = byId.get("referent-continuity-01")!;
     expect(continuity.turns[1]!.routedTools).toEqual(["calendar.day"]);
     expect(continuity.turns[1]!.reply).toContain("4–5 PM");

@@ -306,7 +306,7 @@ export interface GatewayPrincipalPolicy {
 
 /** Valid grounded-read sources (fail-closed parse: unknown names throw).
  *  `gmail` added additively by Phase GMAIL §8.3 (gmail.recent read tool). */
-export const READ_SOURCES = ["calendar", "commitments", "gmail"] as const;
+export const READ_SOURCES = ["calendar", "commitments", "gmail", "state"] as const;
 
 /**
  * Phase F capture policy — `gateway.capture` (ig-phase-f-contracts.md §8):

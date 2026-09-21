@@ -231,7 +231,7 @@ describe("policy gateway section (multi-principal Lane P)", () => {
       model: "openai/gpt-4o-mini",
       requestsPerHour: 30,
       costPerDay: 5,
-      reads: ["calendar", "commitments", "gmail"], // gmail: Phase GMAIL §8.3
+      reads: ["calendar", "commitments", "gmail", "state"], // state: W1 day.state
     });
     expect(policy.gateway?.actions).toEqual({
       enabled: true,
@@ -502,16 +502,16 @@ describe("policy gateway.context (Lane J1 context assembler flag)", () => {
     ).toThrow(/duplicate gateway.context/);
   });
 
-  it("the repo-root policy.yaml parses without a context section (absent = disabled, current behavior)", async () => {
+  it("the repo-root policy.yaml ships the owner-ratified context section (W1: enabled, 3 reads, 1500 budget)", async () => {
     const policy = await loadPolicyFile(
       new URL("../../../../policy.yaml", import.meta.url),
     );
-    expect(policy.gateway?.context).toBeUndefined();
-    expect(gatewayContextPolicyOf(policy)).toEqual({
-      enabled: false,
-      maxReadsPerTurn: 1,
+    expect(policy.gateway?.context).toEqual({
+      enabled: true,
+      maxReadsPerTurn: 3,
       perBlockTokenBudget: 1500,
     });
+    expect(gatewayContextPolicyOf(policy).enabled).toBe(true);
   });
 
   it("coexists with the other gateway sub-policies in any position", () => {
