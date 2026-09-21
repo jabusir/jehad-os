@@ -42,6 +42,27 @@ export type {
 export { highestLeverageDecision } from "./leverage.js";
 
 export type {
+  ImminentEventInput,
+  OverdueFollowUpInput,
+  PriorityBuildInputs,
+  PriorityInput,
+  PriorityKind,
+  PriorityResult,
+  TopPrioritiesInput,
+  WaitingAgingInput,
+} from "./priority.js";
+export {
+  buildPriorityResults,
+  DEFAULT_PRIORITY_LIMIT,
+  MAX_PRIORITY_LIMIT,
+  PRIORITY_IMMINENT_HOURS,
+  renderPriorityLine,
+  theOneThing,
+  topPriorities,
+  WAITING_AGING_DAYS,
+} from "./priority.js";
+
+export type {
   DayStateData,
   DayStateEscalationSummary,
   DayStateOptions,

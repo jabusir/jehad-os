@@ -21,6 +21,8 @@ describe.skipIf(!TEST_DATABASE_URL)("day.state (integration)", () => {
   let principalA: string;
   let principalB: string;
   let quietPrincipal: string;
+  let hennaId: string;
+  let venueId: string;
 
   beforeAll(async () => {
     db = await createIsolatedTestDb(TEST_DATABASE_URL!, "j2daystate");
@@ -82,6 +84,75 @@ describe.skipIf(!TEST_DATABASE_URL)("day.state (integration)", () => {
        VALUES ($1::uuid, 'i_owe', 'ISP', 'Pay internet bill', NULL, 0.9, 'met', $2::uuid,
                $3::timestamptz, $3::timestamptz)`,
       [domainId, metEvent, new Date(NOW.getTime() - 4 * HOUR).toISOString()],
+    );
+
+    // W5(a) priority seeds: the one-thing — an overdue owes_me commitment with
+    // may_follow_up on and downstream work (venue deposit) blocked on it.
+    // Distinct timestamps keep the overnight delta ordering deterministic.
+    const hennaEvent = await insertEvent(
+      "capture.recorded",
+      { text: "Henna owes the venue confirmation" },
+      new Date(NOW.getTime() - 70 * 60_000),
+    );
+    const henna = await db.pool.query(
+      `INSERT INTO commitments (domain_id, direction, counterparty_text, description, due_at,
+                                confidence, status, source_event_id, may_follow_up, temporal,
+                                created_at, updated_at)
+       VALUES ($1::uuid, 'owes_me', 'Henna', 'Henna owes the venue confirmation',
+               $2::timestamptz, 0.9, 'open', $3::uuid, true, $4::jsonb,
+               $5::timestamptz, $5::timestamptz)
+       RETURNING id`,
+      [
+        domainId,
+        new Date(NOW.getTime() - 3 * 24 * HOUR).toISOString(),
+        hennaEvent,
+        JSON.stringify({
+          rawExpression: "2026-09-14",
+          anchorTime: NOW.toISOString(),
+          anchorTimezone: "UTC",
+          normalizedTime: "2026-09-14",
+          resolutionStatus: "resolved",
+          normalizerVersion: "test-fixture",
+          resolutionConfidence: 1,
+          resolutionMethod: "calendar-native",
+        }),
+        new Date(NOW.getTime() - 70 * 60_000).toISOString(),
+      ],
+    );
+    hennaId = String(henna.rows[0]!.id);
+
+    const venueEvent = await insertEvent(
+      "capture.recorded",
+      { text: "Venue deposit" },
+      new Date(NOW.getTime() - 65 * 60_000),
+    );
+    const venue = await db.pool.query(
+      `INSERT INTO commitments (domain_id, direction, counterparty_text, description, due_at,
+                                confidence, status, source_event_id, created_at, updated_at)
+       VALUES ($1::uuid, 'i_owe', 'Venue', 'Venue deposit', NULL, 0.9, 'open', $2::uuid,
+               $3::timestamptz, $3::timestamptz)
+       RETURNING id`,
+      [domainId, venueEvent, new Date(NOW.getTime() - 65 * 60_000).toISOString()],
+    );
+    venueId = String(venue.rows[0]!.id);
+
+    const edgeEvent = await insertEvent(
+      "capture.recorded",
+      { note: "venue dependency" },
+      new Date(NOW.getTime() - 60 * 60_000),
+    );
+    await db.pool.query(
+      `INSERT INTO relationships (domain_id, from_type, from_id, relation, to_type, to_id,
+                                  source_event_id, valid_from, created_at, updated_at)
+       VALUES ($1::uuid, 'commitment', $2::uuid, 'blocked_by', 'commitment', $3::uuid,
+               $4::uuid, $5::timestamptz, $5::timestamptz, $5::timestamptz)`,
+      [
+        domainId,
+        venueId,
+        hennaId,
+        edgeEvent,
+        new Date(NOW.getTime() - 60 * 60_000).toISOString(),
+      ],
     );
 
     const mkPrincipal = async (name: string): Promise<string> => {
@@ -181,10 +252,17 @@ describe.skipIf(!TEST_DATABASE_URL)("day.state (integration)", () => {
 
   it("busy day: deterministic labeled-section golden render", async () => {
     const data = await collectDayState(db.pool, principalA, { now });
+    expect(data.priority).not.toBeNull();
+    expect(data.priority!.ref).toBe(`commitment:${hennaId}`);
+    expect(data.priority!.kind).toBe("overdue_follow_up");
+    expect(data.priority!.score).toBe(69);
     const text = renderDayStateText(data);
     expect(text).toBe(
       [
         "Day state — Thu, Sep 17",
+        "",
+        "You have one thing that actually needs your attention: Henna owes the venue confirmation (3 days overdue; may_follow_up is on; Venue deposit is blocked on this).",
+        "Also in play: 27 waiting, 16 blocked or stalled.",
         "",
         "NOW/NEXT",
         "- 8–9 AM Calendar sync review",
@@ -193,7 +271,8 @@ describe.skipIf(!TEST_DATABASE_URL)("day.state (integration)", () => {
         "- OVERDUE Pay October rent — due Wed, Sep 16 (i_owe Landlord)",
         "- OVERDUE Send the contractor the signed renewal — due Wed, Sep 16 (i_owe Contractor)",
         "- DUE SOON Submit quarter-end paperwork — due Sat, Sep 19 (i_owe Bank)",
-        "- 19 more open commitments without near due dates",
+        "- 20 more open commitments without near due dates",
+        "- OVERDUE Henna owes the venue confirmation — due Mon, Sep 14 (owes_me Henna)",
         "- OVERDUE Acme owes Jehad the signed SOW — due Tue, Sep 15 (owes_me Acme Corp)",
         "- 2 more waiting on others",
         "",
@@ -209,6 +288,7 @@ describe.skipIf(!TEST_DATABASE_URL)("day.state (integration)", () => {
         '- Task T3 (depth 3 under A) — blocked by commitment "Task T2 (depth 2 under A)"',
         '- Task T4 (depth 4 under A — beyond cap) — blocked by commitment "Task T3 (depth 3 under A)"',
         '- Task already delivered — blocked by decision "Vendor contract renewal"',
+        '- Venue deposit — blocked by commitment "Henna owes the venue confirmation"',
         "- Legacy Migration — stalled 12.0d (threshold 7d)",
         "- Acme owes Jehad the signed SOW — stalled 8.0d (threshold 7d)",
         "- Stale unblocked commitment (8 days silent) — stalled 8.0d (threshold 7d)",
@@ -224,16 +304,19 @@ describe.skipIf(!TEST_DATABASE_URL)("day.state (integration)", () => {
         "  - Task T3 (depth 3 under A)",
         "",
         "OVERNIGHT",
-        "- 11 events:",
+        "- 14 events:",
+        "  - capture.recorded ×6",
         "  - escalation.raised ×4",
         "  - calendar.event.created ×3",
-        "  - capture.recorded ×3",
         "  - …and 1 more kinds",
-        "- 2 commitments captured:",
+        "- 4 commitments captured:",
         "  - Pay internet bill (i_owe, met)",
         "  - Book squash court (i_owe, open)",
+        "  - Henna owes the venue confirmation (owes_me, open)",
+        "  - Venue deposit (i_owe, open)",
         "- 1 decision:",
         "  - Pick the briefing channel → stdout",
+        "- 1 relationship update",
         "",
         "ESCALATIONS",
         "- 2 open (pending 1, batched 1)",
@@ -249,6 +332,7 @@ describe.skipIf(!TEST_DATABASE_URL)("day.state (integration)", () => {
 
   it("empty day: quiet golden render with fresh calendar", async () => {
     const data = await collectDayState(emptyDb.pool, quietPrincipal, { now });
+    expect(data.priority).toBeNull();
     expect(renderDayStateText(data)).toBe(
       [
         "Day state — Thu, Sep 17",

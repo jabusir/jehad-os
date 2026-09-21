@@ -6,6 +6,11 @@ import { whatIsBlocked, type BlockedItem, type StalledItem } from "./blocked.js"
 import { highestLeverageDecision, type LeverageDecision } from "./leverage.js";
 import { whatChanged, type WhatChangedResult } from "./changed.js";
 import {
+  renderPriorityLine,
+  theOneThing,
+  type PriorityResult,
+} from "./priority.js";
+import {
   getNextUpcomingEvent,
   getTodaySchedule,
   localDayBounds,
@@ -43,6 +48,8 @@ export interface DayStateData {
   readonly nextUpcoming: TodayScheduleItem | null;
   readonly escalations: DayStateEscalationSummary;
   readonly freshness: readonly SourceFreshness[];
+  /** The one-thing priority result; null in a quiet world (no line rendered). */
+  readonly priority: PriorityResult | null;
 }
 
 const OPEN_ESCALATIONS_SQL = `
@@ -144,7 +151,7 @@ export async function collectDayState(
   const { now, since } = resolveWindow(opts);
   const nowFn = (): Date => now;
 
-  const [waitsOnMe, waitingOnOthers, blockedResult, ranked, changed, todaySchedule, nextUpcoming, escalations, freshness] =
+  const [waitsOnMe, waitingOnOthers, blockedResult, ranked, changed, todaySchedule, nextUpcoming, escalations, freshness, priority] =
     await Promise.all([
       whatWaitsOnMe(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
       whatAmIWaitingFor(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
@@ -155,6 +162,7 @@ export async function collectDayState(
       getNextUpcomingEvent(db, { dayEnd: localDayBounds(now, BRIEF_TIMEZONE).dayEnd }),
       escalationSummary(db, principalId),
       sourceFreshness(db, principalId, { now: nowFn }),
+      theOneThing(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
     ]);
 
   const overdue = waitsOnMe.filter((c) => c.overdue);
@@ -182,6 +190,7 @@ export async function collectDayState(
     nextUpcoming,
     escalations,
     freshness,
+    priority,
   };
 }
 
@@ -414,8 +423,23 @@ function escalationsLines(data: DayStateData): string[] {
   ];
 }
 
+function priorityLines(data: DayStateData): string[] {
+  if (data.priority === null) return [];
+  const lines = [renderPriorityLine(data.priority)];
+  const w = data.waitingOnYou;
+  const waitingCount =
+    w.overdue.length + w.dueSoon.length + w.otherOpenCount + data.waitingOnOthers.length;
+  const blockedCount = data.blocked.length + data.stalled.length;
+  const parts: string[] = [];
+  if (waitingCount > 0) parts.push(`${waitingCount} waiting`);
+  if (blockedCount > 0) parts.push(`${blockedCount} blocked or stalled`);
+  if (parts.length > 0) lines.push(`Also in play: ${parts.join(", ")}.`);
+  return lines;
+}
+
 export function renderDayStateText(data: DayStateData): string {
   const sections = [
+    priorityLines(data),
     nowNextLines(data),
     waitingLines(data),
     blockedLines(data),
