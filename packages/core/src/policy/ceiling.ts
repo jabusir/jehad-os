@@ -211,6 +211,8 @@ export interface GatewayPolicyV1 {
   readonly review?: GatewayReviewPolicy;
   /** Phase H action-lane config (gateway.actions); absent → module default. */
   readonly actions?: GatewayActionsPolicy;
+  /** Lane J1 context-assembler config (gateway.context); absent → module default. */
+  readonly context?: GatewayContextPolicy;
   /** Lane R1 pass-model overrides (gateway.passes); absent → null (no overrides). */
   readonly passes: GatewayPassesPolicy | null;
 }
@@ -427,6 +429,38 @@ export function parseGatewayActionsEntry(value: string): GatewayActionsPolicy {
   };
 }
 
+export interface GatewayContextPolicy {
+  readonly enabled: boolean;
+  readonly maxReadsPerTurn: 1 | 2 | 3;
+  readonly perBlockTokenBudget: number;
+}
+
+export const DEFAULT_GATEWAY_CONTEXT_POLICY: GatewayContextPolicy = {
+  enabled: false,
+  maxReadsPerTurn: 1,
+  perBlockTokenBudget: 1500,
+};
+
+export function parseGatewayContextEntry(value: string): GatewayContextPolicy {
+  const m = value.match(
+    /^\{\s*enabled:\s*(true|false),\s*max_reads_per_turn:\s*([123]),\s*per_block_token_budget:\s*(\d+)\s*\}$/,
+  );
+  if (m === null) {
+    throw new Error(
+      `policy: gateway.context must be "{ enabled: <bool>, max_reads_per_turn: <1|2|3>, per_block_token_budget: <int> }" (got '${value}')`,
+    );
+  }
+  const perBlockTokenBudget = Number(m[3]);
+  if (perBlockTokenBudget <= 0) {
+    throw new Error("policy: gateway.context per_block_token_budget must be positive");
+  }
+  return {
+    enabled: m[1] === "true",
+    maxReadsPerTurn: Number(m[2]) as 1 | 2 | 3,
+    perBlockTokenBudget,
+  };
+}
+
 /**
  * Strict flow-mapping parse for one gateway principal entry — exactly
  * `{ model: <id>, requests_per_hour: <int>, cost_per_day: <number> }`,
@@ -573,6 +607,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const gatewayCapture: { value: GatewayCapturePolicy | null } = { value: null };
   const gatewayReview: { value: GatewayReviewPolicy | null } = { value: null };
   const gatewayActions: { value: GatewayActionsPolicy | null } = { value: null };
+  const gatewayContext: { value: GatewayContextPolicy | null } = { value: null };
   const gatewayPasses: { value: GatewayPassesPolicy | null } = { value: null };
   const sensorsGmail: { value: GmailSensorPolicy | null } = { value: null };
   const calibrationDaily: { value: CalibrationPolicy | null } = { value: null };
@@ -676,6 +711,11 @@ export function parsePolicyV1(text: string): PolicyV1 {
         gatewayActions.value = parseGatewayActionsEntry(value);
         continue;
       }
+      if (key === "context") {
+        if (gatewayContext.value !== null) throw new Error("policy: duplicate gateway.context key");
+        gatewayContext.value = parseGatewayContextEntry(value);
+        continue;
+      }
       if (key === "passes") {
         if (gatewayPasses.value !== null) throw new Error("policy: duplicate gateway.passes key");
         gatewayPasses.value = parseGatewayPassesEntry(value);
@@ -708,6 +748,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
       ...(gatewayCapture.value !== null ? { capture: gatewayCapture.value } : {}),
       ...(gatewayReview.value !== null ? { review: gatewayReview.value } : {}),
       ...(gatewayActions.value !== null ? { actions: gatewayActions.value } : {}),
+      ...(gatewayContext.value !== null ? { context: gatewayContext.value } : {}),
       passes: gatewayPasses.value,
     };
   }
@@ -740,6 +781,10 @@ export function gmailSensorPolicyOf(policy: PolicyV1): GmailSensorPolicy {
  */
 export function calibrationPolicyOf(policy: PolicyV1): CalibrationPolicy {
   return policy.calibration ?? DEFAULT_CALIBRATION_POLICY;
+}
+
+export function gatewayContextPolicyOf(policy: PolicyV1): GatewayContextPolicy {
+  return policy.gateway?.context ?? DEFAULT_GATEWAY_CONTEXT_POLICY;
 }
 
 /** The configured ceiling for an action type. Unknown types throw. */

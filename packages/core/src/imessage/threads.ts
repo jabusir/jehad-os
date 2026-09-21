@@ -13,6 +13,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { QueryExecutor } from "../queries/executor.js";
+import { parseDateInput } from "../queries/executor.js";
 import { redactContent } from "./redact.js";
 
 /** Active-context horizon (owner decision 2026-09-20). */
@@ -51,6 +52,7 @@ export interface AppendMessageInput {
   readonly content: string;
   readonly receivedAt: Date;
   readonly sourceRef?: string | null;
+  readonly threadState?: TurnArtifacts | null;
 }
 
 export interface ContextMessage {
@@ -171,6 +173,8 @@ export async function appendInteractionMessage(
 ): Promise<string> {
   const id = randomUUID();
   const content = redactContent(input.content);
+  const derivedState =
+    input.threadState != null ? deriveThreadState(input.threadState) : null;
   await db.query(
     `INSERT INTO interaction_messages
        (id, thread_id, principal_id, surface, direction, trust_class,
@@ -191,6 +195,9 @@ export async function appendInteractionMessage(
       input.sourceRef ?? null,
     ],
   );
+  if (derivedState !== null && Object.keys(derivedState).length > 0) {
+    await writeThreadMetadata(db, input.threadId, derivedState);
+  }
   await touchThread(db, input.threadId, input.receivedAt);
   return id;
 }
@@ -285,6 +292,215 @@ export function createDefaultWorkingContextProvider(db: QueryExecutor): WorkingC
       });
     },
   };
+}
+
+export type ThreadReferentKind = "action" | "read" | "review";
+
+const THREAD_REFERENT_KINDS: ReadonlySet<string> = new Set(["action", "read", "review"]);
+
+export interface ThreadReferent {
+  readonly kind: ThreadReferentKind;
+  readonly ref: string;
+  readonly label: string;
+  readonly at: string;
+}
+
+export interface ThreadStance {
+  readonly kind: string;
+  readonly summary: string;
+  readonly at: string;
+}
+
+export interface ThreadMetadata {
+  readonly topic?: string;
+  readonly referents?: readonly ThreadReferent[];
+  readonly lastStance?: ThreadStance;
+}
+
+export interface TurnReferentArtifact {
+  readonly kind: ThreadReferentKind;
+  readonly ref: string;
+  readonly label: string;
+}
+
+export interface TurnArtifacts {
+  readonly at: string;
+  readonly topic?: string | null;
+  readonly referents?: readonly TurnReferentArtifact[] | null;
+  readonly stance?: { readonly kind: string; readonly summary: string } | null;
+}
+
+export const THREAD_REFERENT_REGISTRY_CAP = 20;
+export const TURN_REFERENTS_MAX = 8;
+const TOPIC_MAX_CHARS = 160;
+const REFERENT_REF_MAX_CHARS = 64;
+const REFERENT_LABEL_MAX_CHARS = 200;
+const STANCE_KIND_MAX_CHARS = 64;
+const STANCE_SUMMARY_MAX_CHARS = 400;
+
+type MutableThreadMetadata = {
+  topic?: string;
+  referents?: ThreadReferent[];
+  lastStance?: ThreadStance;
+};
+
+function sanitizeThreadText(text: string, maxChars: number): string {
+  return redactContent(text.trim())
+    .replace(/\r?\n/g, "\\n")
+    .slice(0, maxChars);
+}
+
+export function deriveThreadState(artifacts: TurnArtifacts): ThreadMetadata {
+  const at = parseDateInput(artifacts.at, "TurnArtifacts.at").toISOString();
+  const metadata: MutableThreadMetadata = {};
+  if (artifacts.topic != null) {
+    const topic = sanitizeThreadText(artifacts.topic, TOPIC_MAX_CHARS);
+    if (topic.length > 0) metadata.topic = topic;
+  }
+  if (artifacts.referents != null && artifacts.referents.length > 0) {
+    const referents: ThreadReferent[] = [];
+    const seen = new Set<string>();
+    for (const referent of artifacts.referents.slice(0, TURN_REFERENTS_MAX)) {
+      if (!THREAD_REFERENT_KINDS.has(referent.kind)) continue;
+      const ref = referent.ref.trim().slice(0, REFERENT_REF_MAX_CHARS);
+      const label = sanitizeThreadText(referent.label, REFERENT_LABEL_MAX_CHARS);
+      if (ref.length === 0 || label.length === 0) continue;
+      const key = `${referent.kind}\u0000${ref}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      referents.push({ kind: referent.kind, ref, label, at });
+    }
+    if (referents.length > 0) metadata.referents = referents;
+  }
+  if (artifacts.stance != null) {
+    const kind = artifacts.stance.kind.trim().slice(0, STANCE_KIND_MAX_CHARS);
+    const summary = sanitizeThreadText(artifacts.stance.summary, STANCE_SUMMARY_MAX_CHARS);
+    if (kind.length > 0 && summary.length > 0) {
+      metadata.lastStance = { kind, summary, at };
+    }
+  }
+  return metadata;
+}
+
+export function mergeThreadState(
+  existing: ThreadMetadata | null,
+  turn: ThreadMetadata | null,
+): ThreadMetadata {
+  const base = existing ?? {};
+  const delta = turn ?? {};
+  const merged: MutableThreadMetadata = {};
+  const topic = delta.topic ?? base.topic;
+  if (topic !== undefined && topic.length > 0) merged.topic = topic;
+  const byKey = new Map<string, ThreadReferent>();
+  for (const referent of [...(base.referents ?? []), ...(delta.referents ?? [])]) {
+    if (!THREAD_REFERENT_KINDS.has(referent.kind)) continue;
+    if (typeof referent.ref !== "string" || referent.ref.length === 0) continue;
+    if (typeof referent.label !== "string" || referent.label.length === 0) continue;
+    byKey.set(`${referent.kind}\u0000${referent.ref}`, {
+      kind: referent.kind,
+      ref: referent.ref,
+      label: referent.label,
+      at: referent.at,
+    });
+  }
+  if (byKey.size > 0) {
+    merged.referents = [...byKey.values()].slice(-THREAD_REFERENT_REGISTRY_CAP);
+  }
+  const lastStance = delta.lastStance ?? base.lastStance;
+  if (lastStance !== undefined) merged.lastStance = lastStance;
+  return merged;
+}
+
+export function retractLastStance(metadata: ThreadMetadata | null): ThreadMetadata {
+  if (metadata === null) return {};
+  return {
+    ...(metadata.topic !== undefined ? { topic: metadata.topic } : {}),
+    ...(metadata.referents !== undefined ? { referents: metadata.referents } : {}),
+  };
+}
+
+export function parseThreadMetadata(value: unknown): ThreadMetadata | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return null;
+  const obj = value as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (key !== "topic" && key !== "referents" && key !== "lastStance") return null;
+  }
+  const metadata: MutableThreadMetadata = {};
+  if (obj.topic !== undefined) {
+    if (typeof obj.topic !== "string" || obj.topic.length === 0) return null;
+    metadata.topic = obj.topic;
+  }
+  if (obj.referents !== undefined) {
+    if (!Array.isArray(obj.referents)) return null;
+    const referents: ThreadReferent[] = [];
+    for (const item of obj.referents) {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) return null;
+      const row = item as Record<string, unknown>;
+      if (typeof row.kind !== "string" || !THREAD_REFERENT_KINDS.has(row.kind)) return null;
+      if (typeof row.ref !== "string" || row.ref.length === 0) return null;
+      if (typeof row.label !== "string" || row.label.length === 0) return null;
+      if (typeof row.at !== "string" || Number.isNaN(Date.parse(row.at))) return null;
+      referents.push({
+        kind: row.kind as ThreadReferentKind,
+        ref: row.ref,
+        label: row.label,
+        at: row.at,
+      });
+    }
+    if (referents.length > 0) metadata.referents = referents;
+  }
+  if (obj.lastStance !== undefined) {
+    if (typeof obj.lastStance !== "object" || obj.lastStance === null || Array.isArray(obj.lastStance)) {
+      return null;
+    }
+    const stance = obj.lastStance as Record<string, unknown>;
+    if (typeof stance.kind !== "string" || stance.kind.length === 0) return null;
+    if (typeof stance.summary !== "string" || stance.summary.length === 0) return null;
+    if (typeof stance.at !== "string" || Number.isNaN(Date.parse(stance.at))) return null;
+    metadata.lastStance = { kind: stance.kind, summary: stance.summary, at: stance.at };
+  }
+  return metadata;
+}
+
+async function writeThreadMetadata(
+  db: QueryExecutor,
+  threadId: string,
+  turn: ThreadMetadata,
+): Promise<void> {
+  const row = await db.query(
+    `SELECT metadata FROM interaction_threads WHERE id = $1::uuid FOR UPDATE`,
+    [threadId],
+  );
+  const current = row.rows[0] === undefined ? null : row.rows[0].metadata;
+  const merged = mergeThreadState(parseThreadMetadata(current), turn);
+  await db.query(
+    `UPDATE interaction_threads SET metadata = $2::jsonb WHERE id = $1::uuid`,
+    [threadId, JSON.stringify(merged)],
+  );
+}
+
+export async function retractThreadStance(
+  db: QueryExecutor,
+  opts: {
+    readonly threadId: string;
+    readonly principalId: string;
+  },
+): Promise<ThreadMetadata> {
+  const row = await db.query(
+    `SELECT principal_id, metadata FROM interaction_threads WHERE id = $1::uuid FOR UPDATE`,
+    [opts.threadId],
+  );
+  const thread = row.rows[0];
+  if (thread === undefined || String(thread.principal_id) !== opts.principalId) {
+    throw new Error("retractThreadStance: thread does not belong to the requesting principal");
+  }
+  const retracted = retractLastStance(parseThreadMetadata(thread.metadata));
+  await db.query(
+    `UPDATE interaction_threads SET metadata = $2::jsonb WHERE id = $1::uuid`,
+    [opts.threadId, JSON.stringify(retracted)],
+  );
+  return retracted;
 }
 
 /** Retention pass (§13): delete raw content past the 7-day horizon, delete

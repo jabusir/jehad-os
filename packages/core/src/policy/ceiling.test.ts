@@ -6,10 +6,12 @@ import {
   DEFAULT_GMAIL_SENSOR_POLICY,
   calibrationPolicyOf,
   decideAutonomy,
+  gatewayContextPolicyOf,
   gmailSensorPolicyOf,
   loadPolicyFile,
   parsePolicyV1,
 } from "./ceiling";
+import { DEFAULT_PER_BLOCK_TOKEN_BUDGET } from "../context/assembler";
 
 const VALID = `\
 version: 1
@@ -417,6 +419,110 @@ describe("policy gateway.passes (Lane R1 model routing)", () => {
       route: { model: "openai/gpt-4.1-mini" },
       route_fallback: { model: "google/gemini-3.8-flash" },
     });
+  });
+});
+
+describe("policy gateway.context (Lane J1 context assembler flag)", () => {
+  const BASE = [
+    "version: 1",
+    "autonomy_ceiling:",
+    "  read: autonomous",
+    "  propose: autonomous",
+    "  write_canonical: gated",
+    "  external_side_effect: approval_required",
+    "  money_and_contracts: prohibited",
+  ].join("\n");
+  const ENTRY = "  context: { enabled: true, max_reads_per_turn: 3, per_block_token_budget: 2000 }";
+
+  it("parses the strict ordered flow mapping onto GatewayContextPolicy", () => {
+    const policy = parsePolicyV1(`${BASE}\ngateway:\n${ENTRY}\n`);
+    expect(policy.gateway?.context).toEqual({
+      enabled: true,
+      maxReadsPerTurn: 3,
+      perBlockTokenBudget: 2000,
+    });
+  });
+
+  it("accepts every legal max_reads_per_turn and both enabled states", () => {
+    for (const maxReads of [1, 2, 3]) {
+      const policy = parsePolicyV1(
+        BASE +
+          `\ngateway:\n  context: { enabled: ${maxReads === 2}, max_reads_per_turn: ${maxReads}, per_block_token_budget: 1500 }\n`,
+      );
+      expect(policy.gateway?.context).toEqual({
+        enabled: maxReads === 2,
+        maxReadsPerTurn: maxReads,
+        perBlockTokenBudget: 1500,
+      });
+    }
+  });
+
+  it("absent section → gatewayContextPolicyOf returns fail-closed current-behavior defaults", () => {
+    const policy = parsePolicyV1(BASE + "\ngateway:\n  principals:\n");
+    expect(policy.gateway?.context).toBeUndefined();
+    expect(gatewayContextPolicyOf(policy)).toEqual({
+      enabled: false,
+      maxReadsPerTurn: 1,
+      perBlockTokenBudget: 1500,
+    });
+    expect(gatewayContextPolicyOf(parsePolicyV1(BASE))).toEqual({
+      enabled: false,
+      maxReadsPerTurn: 1,
+      perBlockTokenBudget: 1500,
+    });
+  });
+
+  it("the default per-block budget matches the assembler's default (one source of truth)", () => {
+    expect(gatewayContextPolicyOf(parsePolicyV1(BASE)).perBlockTokenBudget).toBe(
+      DEFAULT_PER_BLOCK_TOKEN_BUDGET,
+    );
+  });
+
+  it("malformed entries fail closed (shape, order, unknown keys, read-set bounds, positivity)", () => {
+    const cases = [
+      "  context: { enabled: true }",
+      "  context: { max_reads_per_turn: 3, enabled: true, per_block_token_budget: 1500 }",
+      "  context: { enabled: maybe, max_reads_per_turn: 3, per_block_token_budget: 1500 }",
+      "  context: { enabled: true, max_reads_per_turn: 0, per_block_token_budget: 1500 }",
+      "  context: { enabled: true, max_reads_per_turn: 4, per_block_token_budget: 1500 }",
+      "  context: { enabled: true, max_reads_per_turn: 2.5, per_block_token_budget: 1500 }",
+      "  context: { enabled: true, max_reads_per_turn: three, per_block_token_budget: 1500 }",
+      "  context: { enabled: true, max_reads_per_turn: 3, per_block_token_budget: 0 }",
+      "  context: { enabled: true, max_reads_per_turn: 3, per_block_token_budget: -100 }",
+      "  context: { enabled: true, max_reads_per_turn: 3, per_block_token_budget: 1500, quiet_mode: true }",
+      "  context: { enabled: true, max_reads_per_turn: 3 }",
+      "  context: just a string",
+      "  context: {}",
+    ];
+    for (const entry of cases) {
+      expect(() => parsePolicyV1(`${BASE}\ngateway:\n${entry}\n`), entry).toThrow();
+    }
+    expect(() =>
+      parsePolicyV1(`${BASE}\ngateway:\n${ENTRY}\n${ENTRY}\n`),
+    ).toThrow(/duplicate gateway.context/);
+  });
+
+  it("the repo-root policy.yaml parses without a context section (absent = disabled, current behavior)", async () => {
+    const policy = await loadPolicyFile(
+      new URL("../../../../policy.yaml", import.meta.url),
+    );
+    expect(policy.gateway?.context).toBeUndefined();
+    expect(gatewayContextPolicyOf(policy)).toEqual({
+      enabled: false,
+      maxReadsPerTurn: 1,
+      perBlockTokenBudget: 1500,
+    });
+  });
+
+  it("coexists with the other gateway sub-policies in any position", () => {
+    const policy = parsePolicyV1(
+      BASE +
+        "\ngateway:\n" +
+        ENTRY +
+        "\n  capture: { enabled: true, principals: [josctl], max_per_hour: 5, dedupe_window_hours: 24 }\n",
+    );
+    expect(policy.gateway?.context?.enabled).toBe(true);
+    expect(policy.gateway?.capture?.enabled).toBe(true);
   });
 });
 
