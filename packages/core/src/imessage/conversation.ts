@@ -937,6 +937,7 @@ async function converseTurn(
       const outcome = await dispatch(
         buildConversationPrompt(String(principalName), policy.model, input.text, history),
         CONVERSATION_PROMPT_VERSION,
+        policy.model,
       );
       replyText = capReplyText(outcome.result.text);
       costUsd = outcome.costUsd;
