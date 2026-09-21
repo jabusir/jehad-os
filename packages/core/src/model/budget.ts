@@ -12,8 +12,11 @@ export interface ModelBudget {
   readonly hardUsd: number;
 }
 
-export const DEFAULT_MODEL_BUDGET_SOFT_USD = 20;
-export const DEFAULT_MODEL_BUDGET_HARD_USD = 50;
+// Jarvis V1 proving-phase envelope (plan §18-1, owner-ratified 2026-09-21):
+// $40 soft / $90 hard monthly. Revert decision scheduled at V1 exit.
+// MODEL_BUDGET_SOFT_USD / MODEL_BUDGET_HARD_USD still override.
+export const DEFAULT_MODEL_BUDGET_SOFT_USD = 40;
+export const DEFAULT_MODEL_BUDGET_HARD_USD = 90;
 
 /** Misconfigured caps fail closed and loud — never silently fall back open. */
 export class ModelBudgetConfigError extends Error {
