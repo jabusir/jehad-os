@@ -226,9 +226,58 @@ describe("parseThreadMetadata (fail-closed DB reader)", () => {
       { lastStance: { kind: "", summary: "s", at: AT } },
       { lastStance: { kind: "k", summary: "s", at: "nope" } },
       { lastStance: { kind: "k" } },
+      { profileOverride: { brevityDelta: { maxSentences: -2 } } },
+      { "profile-override": {} },
     ];
     for (const value of cases) {
       expect(parseThreadMetadata(value), JSON.stringify(value)).toBeNull();
     }
+  });
+
+  it("admits the W4 profile_override key (strict shape) and rejects malformed ones", () => {
+    const valid = {
+      topic: "t",
+      profile_override: {
+        brevityDelta: { maxSentences: -2, maxChars: -300 },
+        extraDirective: "Answer the principal as \"Chief\" for this thread only.",
+      },
+    };
+    expect(parseThreadMetadata(JSON.parse(JSON.stringify(valid)))).toEqual(valid);
+
+    const malformed: unknown[] = [
+      { profile_override: "brief" },
+      { profile_override: {} },
+      { profile_override: null },
+      { profile_override: [] },
+      { profile_override: { brevityDelta: {} } },
+      { profile_override: { brevityDelta: { maxSentences: 1.5, maxChars: -300 } } },
+      { profile_override: { brevityDelta: { maxSentences: "-2" } } },
+      { profile_override: { brevityDelta: { tone: -2 } } },
+      { profile_override: { extraDirective: "" } },
+      { profile_override: { extraDirective: 7 } },
+      { profile_override: { extraDirective: "two\nlines" } },
+      { profile_override: { extraDirective: "x".repeat(121) } },
+      { profile_override: { brevityDelta: { maxChars: -300 }, extra: true } },
+    ];
+    for (const value of malformed) {
+      expect(parseThreadMetadata(value), JSON.stringify(value)).toBeNull();
+    }
+  });
+
+  it("thread-state merges preserve a profile_override untouched (W4 expiry-with-thread semantics)", () => {
+    const existing = {
+      topic: "t",
+      profile_override: { brevityDelta: { maxSentences: -2 } },
+    };
+    const turn = deriveThreadState({
+      at: AT,
+      topic: "new topic",
+      stance: { kind: "answer", summary: "s" },
+    });
+    const merged = mergeThreadState(existing, turn);
+    expect(merged.topic).toBe("new topic");
+    expect(merged.profile_override).toEqual({ brevityDelta: { maxSentences: -2 } });
+    const retracted = retractLastStance(merged);
+    expect(retracted.profile_override).toEqual({ brevityDelta: { maxSentences: -2 } });
   });
 });

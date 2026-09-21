@@ -311,10 +311,28 @@ export interface ThreadStance {
   readonly at: string;
 }
 
+/**
+ * W4 thread-scoped profile override — lives in
+ * interaction_threads.metadata.profile_override (the literal storage key;
+ * the TS field name matches it 1:1 like topic/referents/lastStance so the
+ * JSON round-trip is exact) and expires with the thread. Presentation
+ * only: brevity deltas + one directive line, never authority.
+ */
+export interface ThreadBrevityDelta {
+  readonly maxSentences?: number;
+  readonly maxChars?: number;
+}
+
+export interface ThreadProfileOverride {
+  readonly brevityDelta?: ThreadBrevityDelta;
+  readonly extraDirective?: string;
+}
+
 export interface ThreadMetadata {
   readonly topic?: string;
   readonly referents?: readonly ThreadReferent[];
   readonly lastStance?: ThreadStance;
+  readonly profile_override?: ThreadProfileOverride;
 }
 
 export interface TurnReferentArtifact {
@@ -342,6 +360,7 @@ type MutableThreadMetadata = {
   topic?: string;
   referents?: ThreadReferent[];
   lastStance?: ThreadStance;
+  profile_override?: ThreadProfileOverride;
 };
 
 function sanitizeThreadText(text: string, maxChars: number): string {
@@ -408,6 +427,9 @@ export function mergeThreadState(
   }
   const lastStance = delta.lastStance ?? base.lastStance;
   if (lastStance !== undefined) merged.lastStance = lastStance;
+  // W4: a thread-scoped profile override rides along untouched — turn
+  // artifacts never produce or mutate it (setThreadProfileOverride owns it).
+  if (base.profile_override !== undefined) merged.profile_override = base.profile_override;
   return merged;
 }
 
@@ -416,6 +438,9 @@ export function retractLastStance(metadata: ThreadMetadata | null): ThreadMetada
   return {
     ...(metadata.topic !== undefined ? { topic: metadata.topic } : {}),
     ...(metadata.referents !== undefined ? { referents: metadata.referents } : {}),
+    ...(metadata.profile_override !== undefined
+      ? { profile_override: metadata.profile_override }
+      : {}),
   };
 }
 
@@ -424,7 +449,14 @@ export function parseThreadMetadata(value: unknown): ThreadMetadata | null {
   if (typeof value !== "object" || Array.isArray(value)) return null;
   const obj = value as Record<string, unknown>;
   for (const key of Object.keys(obj)) {
-    if (key !== "topic" && key !== "referents" && key !== "lastStance") return null;
+    if (
+      key !== "topic" &&
+      key !== "referents" &&
+      key !== "lastStance" &&
+      key !== "profile_override"
+    ) {
+      return null;
+    }
   }
   const metadata: MutableThreadMetadata = {};
   if (obj.topic !== undefined) {
@@ -460,7 +492,53 @@ export function parseThreadMetadata(value: unknown): ThreadMetadata | null {
     if (typeof stance.at !== "string" || Number.isNaN(Date.parse(stance.at))) return null;
     metadata.lastStance = { kind: stance.kind, summary: stance.summary, at: stance.at };
   }
+  if (obj.profile_override !== undefined) {
+    const override = parseProfileOverride(obj.profile_override);
+    if (override === null) return null;
+    metadata.profile_override = override;
+  }
   return metadata;
+}
+
+/** W4: strict fail-closed parse of the profile_override metadata value. */
+function parseProfileOverride(value: unknown): ThreadProfileOverride | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const obj = value as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (key !== "brevityDelta" && key !== "extraDirective") return null;
+  }
+  const override: { brevityDelta?: { maxSentences?: number; maxChars?: number }; extraDirective?: string } =
+    {};
+  let carried = false;
+  if (obj.brevityDelta !== undefined) {
+    if (typeof obj.brevityDelta !== "object" || obj.brevityDelta === null || Array.isArray(obj.brevityDelta)) {
+      return null;
+    }
+    const delta = obj.brevityDelta as Record<string, unknown>;
+    for (const key of Object.keys(delta)) {
+      if (key !== "maxSentences" && key !== "maxChars") return null;
+    }
+    const brevityDelta: { maxSentences?: number; maxChars?: number } = {};
+    if (delta.maxSentences !== undefined) {
+      if (typeof delta.maxSentences !== "number" || !Number.isInteger(delta.maxSentences)) return null;
+      brevityDelta.maxSentences = delta.maxSentences;
+    }
+    if (delta.maxChars !== undefined) {
+      if (typeof delta.maxChars !== "number" || !Number.isInteger(delta.maxChars)) return null;
+      brevityDelta.maxChars = delta.maxChars;
+    }
+    if (Object.keys(brevityDelta).length === 0) return null;
+    override.brevityDelta = brevityDelta;
+    carried = true;
+  }
+  if (obj.extraDirective !== undefined) {
+    if (typeof obj.extraDirective !== "string") return null;
+    const line = obj.extraDirective;
+    if (line.trim().length === 0 || line.includes("\n") || line.length > 120) return null;
+    override.extraDirective = line;
+    carried = true;
+  }
+  return carried ? override : null;
 }
 
 async function writeThreadMetadata(

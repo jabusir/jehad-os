@@ -7,6 +7,7 @@ export * from "./read-tools.js";
 export * from "./action-route.js";
 export * from "./redact.js";
 export * from "./threads.js";
+export * from "./profiles.js";
 export * from "./capture.js";
 export * from "./review-commands.js";
 export * from "./calendar-actions.js";

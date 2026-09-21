@@ -55,7 +55,8 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
     //    roll back exactly 004 — its down path drops the column.
     await migrateUp(pool, defaultMigrationsDir());
     expect(await migrateDown(pool, { to: "003_evidence_links" }, defaultMigrationsDir())).toEqual([
-      "017_calendar_occurrence", "016_calibration", "015_gmail_sensor", "014_confirm_token_unique", "013_review_refs",
+"013_review_refs", "014_confirm_token_unique", "015_gmail_sensor",
+"016_calibration", "017_calendar_occurrence", "018_interaction_profiles",
       "012_interaction_threads",
       "011_imessage_pairing",
       "010_imessage_sensor",
@@ -88,7 +89,7 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
       "011_imessage_pairing",
       "012_interaction_threads",
       "013_review_refs", "014_confirm_token_unique", "015_gmail_sensor", "016_calibration",
-      "017_calendar_occurrence",
+"017_calendar_occurrence", "018_interaction_profiles",
     ]);
     const rows = (
       await pool.query<{ id: string; domain_id: string }>(
@@ -114,7 +115,8 @@ describe.skipIf(!TEST_DATABASE_URL)("004 commitments.domain_id backfill (integra
 
     // 5. A post-backfill down path still reverses 004 cleanly (005+ first).
     expect(await migrateDown(pool, { to: "003_evidence_links" }, defaultMigrationsDir())).toEqual([
-      "017_calendar_occurrence", "016_calibration", "015_gmail_sensor", "014_confirm_token_unique", "013_review_refs",
+"013_review_refs", "014_confirm_token_unique", "015_gmail_sensor",
+"016_calibration", "017_calendar_occurrence", "018_interaction_profiles",
       "012_interaction_threads",
       "011_imessage_pairing",
       "010_imessage_sensor",

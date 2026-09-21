@@ -45,6 +45,15 @@ export interface PolicyV1 {
    * daily check until the owner ratifies the section).
    */
   calibration?: CalibrationPolicy;
+  /**
+   * W4 interaction-profile config — the SECURITY/DEFAULT LAYER ONLY
+   * (jarvis-v1.md §7 W4 rev2 R2; §5 invariant 2): the on/off flag and the
+   * principals allowed to hold conversation profiles. Deliberately nothing
+   * else — no prompt text, no register/brevity/address content; profile
+   * content is versioned data in interaction_profiles. Absent → disabled
+   * + empty principals (profiles stay inert).
+   */
+  personas?: PersonasPolicy;
 }
 
 /**
@@ -111,6 +120,40 @@ export const DEFAULT_CALIBRATION_POLICY: CalibrationPolicy = {
   principals: [],
   promptLocalHour: 19,
 };
+
+/**
+ * The `personas:` section (W4): `{ enabled: <bool>, principals: [name, …] }`
+ * — EXACTLY those two keys in that order (the gateway.context strict-shape
+ * pattern). This is the security/default layer only: the flag + allowlist
+ * that gate whether conversation profiles are consulted at all. Prompt
+ * text, register, brevity, or address values are structurally unparseable
+ * here — fail closed. Defaults: disabled, no principals.
+ */
+export interface PersonasPolicy {
+  readonly enabled: boolean;
+  readonly principals: readonly string[];
+}
+
+/** Fail-safe defaults — disabled + empty principals (profiles stay inert). */
+export const DEFAULT_PERSONAS_POLICY: PersonasPolicy = {
+  enabled: false,
+  principals: [],
+};
+
+export function parsePersonasEntry(value: string): PersonasPolicy {
+  const m = value.match(
+    /^\{\s*enabled:\s*(true|false),\s*principals:\s*\[([A-Za-z0-9_,\s]*)\]\s*\}$/,
+  );
+  if (m === null) {
+    throw new Error(
+      `policy: personas must be "{ enabled: <bool>, principals: [name, …] }" — and nothing else; no prompt text lives in policy (got '${value}')`,
+    );
+  }
+  return {
+    enabled: m[1] === "true",
+    principals: [...new Set((m[2] ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0))],
+  };
+}
 
 /**
  * `calibration.daily` flow-mapping parse — exactly
@@ -627,6 +670,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   let sawGateway = false;
   let sawSensors = false;
   let sawCalibration = false;
+  let sawPersonas = false;
   let inGatewayPrincipals = false;
   const notificationEntries: Array<{ key: string; value: string }> = [];
   const gatewayPrincipals: Record<string, GatewayPrincipalPolicy> = {};
@@ -637,6 +681,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const gatewayPasses: { value: GatewayPassesPolicy | null } = { value: null };
   const sensorsGmail: { value: GmailSensorPolicy | null } = { value: null };
   const calibrationDaily: { value: CalibrationPolicy | null } = { value: null };
+  const personasPolicy: { value: PersonasPolicy | null } = { value: null };
 
   for (const rawLine of text.split("\n")) {
     const line = stripComment(rawLine);
@@ -679,6 +724,13 @@ export function parsePolicyV1(text: string): PolicyV1 {
         if (sawCalibration) throw new Error("policy: duplicate calibration key");
         sawCalibration = true;
         section = "calibration";
+      } else if (key === "personas") {
+        if (sawPersonas) throw new Error("policy: duplicate personas key");
+        sawPersonas = true;
+        if (value === "") {
+          throw new Error("policy: personas must be a flow mapping '{ enabled: <bool>, principals: [name, …] }'");
+        }
+        personasPolicy.value = parsePersonasEntry(value);
       } else {
         throw new Error(`policy: unknown top-level key '${key}'`);
       }
@@ -784,6 +836,9 @@ export function parsePolicyV1(text: string): PolicyV1 {
   if (sawCalibration && calibrationDaily.value !== null) {
     policy.calibration = calibrationDaily.value;
   }
+  if (sawPersonas && personasPolicy.value !== null) {
+    policy.personas = personasPolicy.value;
+  }
   return policy;
 }
 
@@ -811,6 +866,15 @@ export function calibrationPolicyOf(policy: PolicyV1): CalibrationPolicy {
 
 export function gatewayContextPolicyOf(policy: PolicyV1): GatewayContextPolicy {
   return policy.gateway?.context ?? DEFAULT_GATEWAY_CONTEXT_POLICY;
+}
+
+/**
+ * The effective personas policy: the parsed section when present, else the
+ * fail-safe defaults (enabled:false, no principals — interaction profiles
+ * stay inert until the owner ratifies the section and the seed profile).
+ */
+export function personasPolicyOf(policy: PolicyV1): PersonasPolicy {
+  return policy.personas ?? DEFAULT_PERSONAS_POLICY;
 }
 
 /** The configured ceiling for an action type. Unknown types throw. */
