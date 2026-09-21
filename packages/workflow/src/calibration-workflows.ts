@@ -24,11 +24,10 @@
  * POLICY: `policy.calibration { enabled, principals, prompt_local_hour }`
  * (repo-root policy.yaml, loaded module-relative exactly like
  * loadGmailSensorPolicy — THREE directory ups from packages/workflow/src
- * reach the repo root; the two-up variant bit this repo twice). Until
- * lane C1's parser section lands, a policy.yaml carrying a `calibration:`
- * key fails parsePolicyV1 (strict, fail-closed) and the loader falls
- * back to the disabled default — the kill switch holds. Defaults are
- * fail-safe: disabled, no principals, 20:00 local.
+ * reach the repo root; the two-up variant bit this repo twice). The
+ * owner ratified the section 2026-09-21: enabled, josctl, 20:00 local.
+ * An unparseable/absent section fails closed to disabled — the kill
+ * switch holds.
  *
  * Each firing builds its own pg pool from DATABASE_URL inside a memoized
  * step (short-lived, closed in finally) like every scheduled workflow in
