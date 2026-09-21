@@ -30,7 +30,6 @@ const REGISTRY = new ModelEgressPolicyRegistry([
 describe.skipIf(!TEST_DATABASE_URL)("W1 context wiring (integration)", () => {
   let db: IsolatedDb;
   let principalId: string;
-  let runId: string;
   let provider: FakeModelProvider;
   let deps: ConversationDeps;
 
