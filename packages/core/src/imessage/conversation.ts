@@ -299,7 +299,11 @@ export function buildAnswerPrompt(
   results: readonly ReadToolResult[],
   lookupNote: LookupNote = null,
   history: WorkingContext | null = null,
-  opts: { blocks?: readonly ReadSetBlock[]; caveats?: readonly string[] } = {},
+  opts: {
+    blocks?: readonly ReadSetBlock[];
+    caveats?: readonly string[];
+    perBlockTokenBudget?: number;
+  } = {},
 ): string {
   const lines = [
     `You are a helpful, concise assistant chatting over iMessage with ${principalName}.`,
@@ -315,10 +319,11 @@ export function buildAnswerPrompt(
     const assembled = assemblePassContext({
       dataBlocks: opts.blocks.map((b) => ({
         source: b.source,
-        provenance: `tool: ${b.tool} | coverage: ${b.coverage}`,
+        provenance: `tool: ${b.tool} | coverage: ${b.coverage}${b.truncated ? " | truncated — data was cut to fit the context budget" : ""}`,
         content: typeof b.data === "string" ? b.data : JSON.stringify(b.data),
       })),
       caveats: opts.caveats ?? [],
+      perBlockTokenBudget: opts.perBlockTokenBudget,
     });
     lines.push(...assembled.lines);
     lines.push("END DATA");
@@ -993,7 +998,9 @@ async function converseTurn(
           });
         }
       }
-      const readSet = contextEnabled ? parseRouteReadSet(route.result.text) : null;
+      const parsedReadSet = contextEnabled ? parseRouteReadSet(route.result.text) : null;
+      const readSet =
+        parsedReadSet === null ? null : parsedReadSet.slice(0, contextPolicy.maxReadsPerTurn);
       let blocks: readonly ReadSetBlock[] | null = null;
       if (readSet !== null && readSet.length > 0) {
         // Bounded read set (W1): allowlisted, policy-gated per source,
@@ -1028,6 +1035,7 @@ async function converseTurn(
                 source: r.source,
                 coverage: r.coverage,
                 data: over ? serialized.slice(0, READ_BLOCK_CHAR_BUDGET) : r.data,
+                serialized,
                 truncated: over,
                 charBudget: READ_BLOCK_CHAR_BUDGET,
               };
@@ -1062,7 +1070,9 @@ async function converseTurn(
             results,
             lookupNote,
             history,
-            blocks !== null && blocks.length > 0 ? { blocks, caveats } : undefined,
+            blocks !== null && blocks.length > 0
+              ? { blocks, caveats, perBlockTokenBudget: contextPolicy.perBlockTokenBudget }
+              : undefined,
           ),
           CONVERSATION_PROMPT_VERSION,
         );
@@ -1074,7 +1084,7 @@ async function converseTurn(
             (b): TurnReferentArtifact => ({
               kind: "read",
               ref: b.tool,
-              label: `${b.tool}: ${String(b.data).slice(0, 120)}`,
+              label: `${b.tool}: ${b.serialized.slice(0, 120)}`,
             }),
           ),
           stance: { kind: "answer", summary: replyText.slice(0, 400) },
@@ -1329,7 +1339,12 @@ async function resolveGatewayServicePrincipal(db: SqlExecutor): Promise<string> 
 
 /** Repo-root policy.yaml — same depth from src/ and dist/. */
 function defaultPolicyYamlPath(): string {
-  return path.resolve(fileURLToPath(new URL("../../../../policy.yaml", import.meta.url)));
+  // POLICY_YAML_PATH: the same override seam the workflow loaders
+  // honor (calibration-workflows) — tests and staged rollouts use it.
+  return (
+    process.env.POLICY_YAML_PATH ??
+    path.resolve(fileURLToPath(new URL("../../../../policy.yaml", import.meta.url)))
+  );
 }
 
 function principalPolicyFromPolicy(policy: PolicyV1 | null | undefined) {

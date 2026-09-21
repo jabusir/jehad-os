@@ -1,0 +1,83 @@
+# Jehad OS autonomy ceiling — policy.yaml v1 (§35 pattern; plan §9; ADR-0007).
+# Policy is data, not model judgment: models propose; policy disposes.
+# Levels: autonomous | gated | approval_required | prohibited.
+# v1 ships exactly the five action types below; later versions may add the
+# further §35 dimensions (domain, amount/impact, reversibility, confidence,
+# data sensitivity, user-defined rules). Every evaluation denies by default.
+version: 1
+autonomy_ceiling:
+  read: autonomous
+  propose: autonomous
+  write_canonical: gated
+  external_side_effect: approval_required
+  money_and_contracts: prohibited
+
+# notifications — E4 (OpenClaw attach) delivery policy. The notification queue
+# sits BEHIND review/policy: creation consults these keys, never model judgment.
+#   autoApproveKinds      — notification kinds that skip the user review queue
+#                           and land status=approved at creation (briefs are
+#                           self-authored structured output, not external
+#                           actions; calendar-change rows are pre-gated by the
+#                           producer's 48h disruptive-change filter — ONLY
+#                           start_end_changed/cancelled whose (new or previous)
+#                           start falls within the NEXT 48h enqueue at all.
+#                           That filter IS the noise gate: created/updated
+#                           changes ride the morning brief instead. Everything
+#                           else — escalation, custom — lands pending until
+#                           POST /notifications/:id/approve.
+#   escalationMinUrgency  — an escalation raise enqueues a delivery
+#                           notification only at/above this urgency
+#                           (low < medium < high < critical < blocker).
+#                           Escalations stay at >= high: they interrupt a
+#                           human and must never fire below it.
+#   defaultTtlMinutes     — delivery window stamped on new notifications as
+#                           expires_at; past it a row is expired and can never
+#                           be claimed or delivered.
+notifications:
+  autoApproveKinds: ["brief", "calendar-change", "calibration"]
+  escalationMinUrgency: high
+  defaultTtlMinutes: 240
+
+# gateway — iMessage multi-principal conversational budgets (Lane P; keyed by
+# principal NAME). A principal absent here is DENIED conversation (fail
+# closed): caps are owner-tuned config, not state (§5.4). Enforcement counts
+# model_calls rows (principal_id + surface='imessage') over rolling-hour and
+# UTC-day windows BEFORE dispatch. Model id must pass the egress policy for
+# personal/normal. NOTE (deviation from the contracts sketch): the sketched
+# `openrouter/auto-fast` is not in the repo's allowlisted model ids; the
+# cheapest fast allowlisted model is the evals-pinned openai/gpt-4o-mini.
+gateway:
+  # per-pass model routing (eval 2026-09: route gpt-4.1-mini 96.7%/658ms,
+  # answer gpt-4o-mini 12/12, fallback gemini-3.8-flash best-on-adversarial)
+  passes: { route: { model: openai/gpt-4.1-mini }, route_fallback: { model: google/gemini-3.8-flash } }
+  capture: { enabled: true, principals: [josctl], max_per_hour: 5, dedupe_window_hours: 24 }
+  # review — Phase G deterministic review/control over iMessage
+  # (ig-phase-g-contracts.md §7). Control commands are exact-match, zero
+  # model calls (deterministicReply class); refs are owner-scoped 3-char
+  # Crockford codes minted per queue item at first surfacing.
+  review: { enabled: true, principals: [josctl], max_bad_refs: 3, snooze_hours: 24, ref_ttl_hours: 168, digest_max_candidates: 10, digest_max_escalations: 5 }
+  # actions — Phase H consequential-action lane (calendar_create v1). Always-
+  # confirm model: there is deliberately NO key that could disable per-action
+  # owner confirmation (ig-phase-h-contracts.md §2/§7). Quotas are per-principal
+  # UTC-day flood bounds over proposals and confirmed dispatches; they never
+  # buy silence. Defaults are ESCALATE-4 (owner tunes).
+  actions: { enabled: true, principals: [josctl], max_proposals_per_day: 10, max_dispatches_per_day: 5, confirm_ttl_minutes: 10 }
+  principals:
+    yusra: { model: openai/gpt-4o-mini, requests_per_hour: 20, cost_per_day: 2.0 }
+    josctl: { model: openai/gpt-4o-mini, requests_per_hour: 30, cost_per_day: 5.0, reads: [calendar, commitments, gmail, state] }
+
+# sensors — cloud sensor policy (GMAIL; gmail-sensor-contracts.md §5/§10.3).
+# sensors.gmail: metadata ingest for ALL senders; deterministic extraction
+# ONLY for extract_senders globs over the From address (ESCALATE-4 — the
+# owner ratifies the default and the list). enabled:false is the kill
+# switch (§9.4): the sync grant fails closed and the sensor halts without
+# touching the Google credential. Absent section = same fail-safe defaults.
+# calibration — proactive world-model feedback loop (owner spec 2026-09-21):
+# one compact daily prompt per principal during active soak, independent of
+# evening-close suppression; bare 1-5 / "rate N" rate the day's picture;
+# prose replies to an open prompt record as missed-feedback evidence.
+calibration:
+  daily: { enabled: true, principals: [josctl], prompt_local_hour: 20 }
+
+sensors:
+  gmail: { enabled: true, poll_cron: "*/5 * * *", bootstrap_window_days: 30, extract_senders: [billing@*, statements@*, *@stripe.com], max_messages_per_poll: 40, max_candidates_per_day: 20 }

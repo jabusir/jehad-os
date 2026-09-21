@@ -182,6 +182,7 @@ export interface ReadSetBlock {
   readonly source: ReadSource;
   readonly coverage: string;
   readonly data: unknown;
+  readonly serialized?: string;
   readonly truncated: boolean;
   readonly charBudget: number;
 }
@@ -221,13 +222,14 @@ export async function runReadSet(
   return results.map((result) => {
     const serialized = JSON.stringify(result.data);
     if (serialized.length <= charBudget) {
-      return { ...result, truncated: false, charBudget };
+      return { ...result, serialized, truncated: false, charBudget };
     }
     return {
       tool: result.tool,
       source: result.source,
       coverage: result.coverage,
       data: truncate(serialized, charBudget),
+      serialized,
       truncated: true,
       charBudget,
     };
