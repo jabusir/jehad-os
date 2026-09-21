@@ -22,6 +22,7 @@ const ALL_MIGRATIONS = [
   "004_commitments_domain", "005_commitments_temporal", "006_notifications",
   "007_calendar", "008_feedback", "009_notification_calendar_change", "010_imessage_sensor", "011_imessage_pairing", "012_interaction_threads", "013_review_refs", "014_confirm_token_unique",
   "015_gmail_sensor", "016_calibration", "017_calendar_occurrence", "018_interaction_profiles", "019_grant_reminder_kind",
+  "020_system_feedback",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -285,6 +286,31 @@ describe("migration files (fs only)", () => {
     expect(m!.downSql).toMatch(/DROP CONSTRAINT IF EXISTS calendar_events_occurrence_graduation_check/);
     expect(m!.downSql).toMatch(/DROP COLUMN IF EXISTS occurrence_confirmed_by/);
     expect(m!.downSql).toMatch(/DROP COLUMN IF EXISTS occurrence\b/);
+  });
+
+  it("020 widens the feedback item_type/verdict CHECKs for system_feedback; down purges then narrows", async () => {
+    const migrations = await listMigrations();
+    const m = migrations.find((x) => x.name === "020_system_feedback");
+    expect(m).toBeDefined();
+    // Additive drop/recreate of BOTH feedback CHECKs (016 precedent); one
+    // new item world, the three interpreter categories as verdicts.
+    expect(m!.sql).toMatch(
+      /CHECK \(item_type IN \('notification', 'attention_item', 'review_item', 'brief_section', 'event', 'calibration', 'system_feedback'\)\)/,
+    );
+    expect(m!.sql).toMatch(
+      /CHECK \(verdict IN \('useful', 'noise', 'missed', 'incorrect', 'interruptive', 'capability_gap', 'bug', 'request'\)\)/,
+    );
+    // Nothing else changes; no NOT NULL added, no columns touched.
+    expect(m!.sql).not.toMatch(/ADD COLUMN/);
+    expect(m!.sql).not.toMatch(/DROP COLUMN/);
+    // Down: purge widened rows BEFORE narrowing; restore the 016 vocabulary.
+    expect(m!.downSql).toMatch(/DELETE FROM feedback WHERE item_type = 'system_feedback'/);
+    expect(m!.downSql).toMatch(
+      /CHECK \(item_type IN \('notification', 'attention_item', 'review_item', 'brief_section', 'event', 'calibration'\)\)/,
+    );
+    expect(m!.downSql).toMatch(
+      /CHECK \(verdict IN \('useful', 'noise', 'missed', 'incorrect', 'interruptive'\)\)/,
+    );
   });
 
   it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {

@@ -280,4 +280,64 @@ describe("parseThreadMetadata (fail-closed DB reader)", () => {
     const retracted = retractLastStance(merged);
     expect(retracted.profile_override).toEqual({ brevityDelta: { maxSentences: -2 } });
   });
+
+  it("admits the W6(a) pendingProposal key (strict shape) and rejects malformed ones", () => {
+    const valid = {
+      topic: "t",
+      pendingProposal: {
+        type: "task_batch",
+        at: AT,
+        payload: { type: "task_batch", items: [{ title: "Clean apartment", due: "by wednesday" }] },
+        offered: "I pulled out 1 tasks: Clean apartment. Reply 'track them' and I'll track all 1.",
+      },
+    };
+    expect(parseThreadMetadata(JSON.parse(JSON.stringify(valid)))).toEqual(valid);
+
+    const malformed: unknown[] = [
+      { pendingProposal: "yes" },
+      { pendingProposal: {} },
+      { pendingProposal: null },
+      { pendingProposal: [] },
+      { pendingProposal: { type: "calendar.create", at: AT, payload: {}, offered: "x" } },
+      { pendingProposal: { type: "task_batch", payload: {}, offered: "x" } },
+      { pendingProposal: { type: "task_batch", at: "garbage", payload: {}, offered: "x" } },
+      { pendingProposal: { type: "task_batch", at: AT, offered: "x" } },
+      { pendingProposal: { type: "task_batch", at: AT, payload: "x".repeat(1001), offered: "x" } },
+      { pendingProposal: { type: "task_batch", at: AT, payload: {}, offered: "" } },
+      { pendingProposal: { type: "task_batch", at: AT, payload: {}, offered: "x".repeat(401) } },
+      { pendingProposal: { type: "task_batch", at: AT, payload: {}, offered: "two\nlines" } },
+      { pendingProposal: { type: "task_batch", at: AT, payload: {}, offered: "x", extra: 1 } },
+    ];
+    for (const value of malformed) {
+      expect(parseThreadMetadata(value), JSON.stringify(value)).toBeNull();
+    }
+  });
+
+  it("thread-state merges and retractions preserve a pendingProposal untouched (W6(a) mirror of the override law)", () => {
+    const existing = {
+      topic: "t",
+      pendingProposal: {
+        type: "system_feedback",
+        at: AT,
+        payload: { type: "system_feedback", category: "bug", subject: "s", detail: null },
+        offered: "Worth logging about me: \"s\" (bug).",
+      },
+    };
+    const turn = deriveThreadState({
+      at: AT,
+      topic: "new topic",
+      stance: { kind: "answer", summary: "s" },
+    });
+    const merged = mergeThreadState(existing, turn);
+    expect(merged.pendingProposal).toEqual(existing.pendingProposal);
+    const retracted = retractLastStance(merged);
+    expect(retracted.pendingProposal).toEqual(existing.pendingProposal);
+    // Both thread-scoped records coexist and survive together.
+    const both = mergeThreadState(
+      { ...existing, profile_override: { brevityDelta: { maxSentences: -2 } } },
+      turn,
+    );
+    expect(both.profile_override).toEqual({ brevityDelta: { maxSentences: -2 } });
+    expect(both.pendingProposal).toEqual(existing.pendingProposal);
+  });
 });

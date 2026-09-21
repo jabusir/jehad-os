@@ -328,11 +328,34 @@ export interface ThreadProfileOverride {
   readonly extraDirective?: string;
 }
 
+/**
+ * W6(a) pending turn proposal — lives in
+ * interaction_threads.metadata.pendingProposal (literal storage key, the
+ * profile_override convention) and expires with the thread. The interpreter
+ * PROPOSES; only a deterministic confirm verb mutates, so this is the
+ * thread-local hand-off between the two. `payload` is the opaque proposal
+ * JSON (≤1000 chars serialized — shape-validated by the turn-interpretation
+ * bridges, never here); `offered` is the offer text that was sent.
+ */
+export type ThreadPendingProposalType =
+  | "task_batch"
+  | "configuration_directive"
+  | "system_feedback"
+  | "memory_candidate";
+
+export interface ThreadPendingProposal {
+  readonly type: ThreadPendingProposalType;
+  readonly at: string;
+  readonly payload: unknown;
+  readonly offered: string;
+}
+
 export interface ThreadMetadata {
   readonly topic?: string;
   readonly referents?: readonly ThreadReferent[];
   readonly lastStance?: ThreadStance;
   readonly profile_override?: ThreadProfileOverride;
+  readonly pendingProposal?: ThreadPendingProposal;
 }
 
 export interface TurnReferentArtifact {
@@ -355,12 +378,23 @@ const REFERENT_REF_MAX_CHARS = 64;
 const REFERENT_LABEL_MAX_CHARS = 200;
 const STANCE_KIND_MAX_CHARS = 64;
 const STANCE_SUMMARY_MAX_CHARS = 400;
+/** W6(a): serialized pendingProposal.payload bound (bounded thread state). */
+export const PENDING_PROPOSAL_PAYLOAD_MAX_CHARS = 1000;
+export const PENDING_PROPOSAL_OFFERED_MAX_CHARS = 400;
+
+const PENDING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
+  "task_batch",
+  "configuration_directive",
+  "system_feedback",
+  "memory_candidate",
+]);
 
 type MutableThreadMetadata = {
   topic?: string;
   referents?: ThreadReferent[];
   lastStance?: ThreadStance;
   profile_override?: ThreadProfileOverride;
+  pendingProposal?: ThreadPendingProposal;
 };
 
 function sanitizeThreadText(text: string, maxChars: number): string {
@@ -430,6 +464,10 @@ export function mergeThreadState(
   // W4: a thread-scoped profile override rides along untouched — turn
   // artifacts never produce or mutate it (setThreadProfileOverride owns it).
   if (base.profile_override !== undefined) merged.profile_override = base.profile_override;
+  // W6(a): the pending turn proposal rides along untouched — turn artifacts
+  // never produce or mutate it (setThreadPendingProposal owns it); a NEW
+  // turn's proposal replaces it only through that writer.
+  if (base.pendingProposal !== undefined) merged.pendingProposal = base.pendingProposal;
   return merged;
 }
 
@@ -440,6 +478,9 @@ export function retractLastStance(metadata: ThreadMetadata | null): ThreadMetada
     ...(metadata.referents !== undefined ? { referents: metadata.referents } : {}),
     ...(metadata.profile_override !== undefined
       ? { profile_override: metadata.profile_override }
+      : {}),
+    ...(metadata.pendingProposal !== undefined
+      ? { pendingProposal: metadata.pendingProposal }
       : {}),
   };
 }
@@ -453,7 +494,8 @@ export function parseThreadMetadata(value: unknown): ThreadMetadata | null {
       key !== "topic" &&
       key !== "referents" &&
       key !== "lastStance" &&
-      key !== "profile_override"
+      key !== "profile_override" &&
+      key !== "pendingProposal"
     ) {
       return null;
     }
@@ -497,7 +539,44 @@ export function parseThreadMetadata(value: unknown): ThreadMetadata | null {
     if (override === null) return null;
     metadata.profile_override = override;
   }
+  if (obj.pendingProposal !== undefined) {
+    const pending = parsePendingProposal(obj.pendingProposal);
+    if (pending === null) return null;
+    metadata.pendingProposal = pending;
+  }
   return metadata;
+}
+
+/** W6(a): strict fail-closed parse of the pendingProposal metadata value. */
+function parsePendingProposal(value: unknown): ThreadPendingProposal | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const obj = value as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (key !== "type" && key !== "at" && key !== "payload" && key !== "offered") return null;
+  }
+  if (typeof obj.type !== "string" || !PENDING_PROPOSAL_TYPES.has(obj.type)) return null;
+  if (typeof obj.at !== "string" || Number.isNaN(Date.parse(obj.at))) return null;
+  if (obj.payload === undefined) return null;
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(obj.payload);
+  } catch {
+    return null;
+  }
+  if (serialized === undefined || serialized.length > PENDING_PROPOSAL_PAYLOAD_MAX_CHARS) {
+    return null;
+  }
+  if (typeof obj.offered !== "string") return null;
+  if (obj.offered.length === 0 || obj.offered.length > PENDING_PROPOSAL_OFFERED_MAX_CHARS) {
+    return null;
+  }
+  if (obj.offered.includes("\n")) return null;
+  return {
+    type: obj.type as ThreadPendingProposalType,
+    at: obj.at,
+    payload: obj.payload,
+    offered: obj.offered,
+  };
 }
 
 /** W4: strict fail-closed parse of the profile_override metadata value. */
@@ -579,6 +658,52 @@ export async function retractThreadStance(
     [opts.threadId, JSON.stringify(retracted)],
   );
   return retracted;
+}
+
+/**
+ * W6(a): write (or clear, with null) the thread's pending turn proposal —
+ * the thread-local record of what the interpreter offered and awaits a
+ * confirm verb for. Mirrors setThreadProfileOverride: owner-checked under
+ * FOR UPDATE, every sibling metadata key (topic/referents/lastStance/
+ * profile_override) preserved, expires with the thread, never canonical.
+ * A new proposal simply replaces the previous one (one pending at a time).
+ */
+export async function setThreadPendingProposal(
+  db: QueryExecutor,
+  opts: {
+    readonly threadId: string;
+    readonly principalId: string;
+    readonly pending: ThreadPendingProposal | null;
+  },
+): Promise<void> {
+  if (opts.pending !== null) {
+    const candidate: unknown = { pendingProposal: opts.pending };
+    if (parseThreadMetadata(candidate) === null) {
+      throw new Error("setThreadPendingProposal: pending proposal failed the strict shape");
+    }
+  }
+  const row = await db.query(
+    `SELECT principal_id, metadata FROM interaction_threads WHERE id = $1::uuid FOR UPDATE`,
+    [opts.threadId],
+  );
+  const thread = row.rows[0];
+  if (thread === undefined || String(thread.principal_id) !== opts.principalId) {
+    throw new Error("setThreadPendingProposal: thread does not belong to the requesting principal");
+  }
+  const existing = parseThreadMetadata(thread.metadata) ?? {};
+  const merged: Record<string, unknown> = {
+    ...(existing.topic !== undefined ? { topic: existing.topic } : {}),
+    ...(existing.referents !== undefined ? { referents: existing.referents } : {}),
+    ...(existing.lastStance !== undefined ? { lastStance: existing.lastStance } : {}),
+    ...(existing.profile_override !== undefined
+      ? { profile_override: existing.profile_override }
+      : {}),
+    ...(opts.pending !== null ? { pendingProposal: opts.pending } : {}),
+  };
+  await db.query(
+    `UPDATE interaction_threads SET metadata = $2::jsonb WHERE id = $1::uuid`,
+    [opts.threadId, JSON.stringify(merged)],
+  );
 }
 
 /** Retention pass (§13): delete raw content past the 7-day horizon, delete

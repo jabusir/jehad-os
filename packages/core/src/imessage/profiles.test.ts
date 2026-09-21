@@ -19,6 +19,7 @@ import {
   parseProfileDefinition,
   parseProfileDirective,
   renderPersonaFragment,
+  resolveProfileBehaviors,
 } from "./profiles";
 import { parseThreadMetadata } from "./threads";
 
@@ -96,10 +97,79 @@ describe("parseProfileDefinition (strict, fail-closed)", () => {
       { ...VALID, extraDirectives: ["x".repeat(121)] },
       { ...VALID, extraDirectives: Array.from({ length: PROFILE_EXTRA_DIRECTIVES_MAX + 1 }, () => "x") },
       { ...VALID, unknownKey: true },
+      // W6(a) behaviors: strict booleans; unknown keys fail the WHOLE
+      // definition closed (fail-closed, never a guess).
+      { ...VALID, behaviors: "on" },
+      { ...VALID, behaviors: [] },
+      { ...VALID, behaviors: null },
+      { ...VALID, behaviors: { detectTasks: "yes" } },
+      { ...VALID, behaviors: { detectTasks: 1 } },
+      { ...VALID, behaviors: { detectTasks: null } },
+      { ...VALID, behaviors: { detectTasks: true, unknownBehavior: true } },
+      { ...VALID, behaviors: { surfaceDeadlines: true, preferNextAction: false, extra: 1 } },
     ];
     for (const value of cases) {
       expect(parseProfileDefinition(value), JSON.stringify(value)).toBeNull();
     }
+  });
+
+  it("W6(a) behaviors: parses strict booleans; absent flags default true", () => {
+    const off = parseProfileDefinition({
+      ...VALID,
+      behaviors: { detectTasks: false, surfaceDeadlines: false },
+    });
+    expect(off?.behaviors).toEqual({ detectTasks: false, surfaceDeadlines: false });
+    // An empty behaviors object is valid — every flag defaults true.
+    const empty = parseProfileDefinition({ ...VALID, behaviors: {} });
+    expect(empty?.behaviors).toEqual({});
+    expect(resolveProfileBehaviors(empty!)).toEqual({
+      detectTasks: true,
+      proposeCapture: true,
+      convertDirectives: true,
+      surfaceDeadlines: true,
+      preferNextAction: true,
+    });
+    // No behaviors key at all → all true (the attentive default).
+    expect(resolveProfileBehaviors(parseProfileDefinition(VALID)!)).toEqual({
+      detectTasks: true,
+      proposeCapture: true,
+      convertDirectives: true,
+      surfaceDeadlines: true,
+      preferNextAction: true,
+    });
+    // Explicit false resolves false; partial objects carry the defaults.
+    expect(resolveProfileBehaviors(off!)).toEqual({
+      detectTasks: false,
+      proposeCapture: true,
+      convertDirectives: true,
+      surfaceDeadlines: false,
+      preferNextAction: true,
+    });
+  });
+
+  it("the josctl seed carries every behavior ON (R11) and still round-trips", () => {
+    expect(JOSCTL_PROFILE_DEFINITION.behaviors).toEqual({
+      detectTasks: true,
+      proposeCapture: true,
+      convertDirectives: true,
+      surfaceDeadlines: true,
+      preferNextAction: true,
+    });
+    expect(parseProfileDefinition(JOSCTL_PROFILE_DEFINITION)).toEqual(JOSCTL_PROFILE_DEFINITION);
+    expect(resolveProfileBehaviors(JOSCTL_PROFILE_DEFINITION).detectTasks).toBe(true);
+  });
+
+  it("behaviors ride through delta + override merges untouched (presentation-only)", () => {
+    const definition = parseProfileDefinition({ ...VALID, behaviors: { detectTasks: false } })!;
+    const viaDelta = applyDefinitionDelta(definition, { extraDirective: "line" });
+    expect(viaDelta.behaviors).toEqual({ detectTasks: false });
+    const viaOverride = mergeThreadOverride(definition, { brevityDelta: { maxSentences: -1 } });
+    expect(viaOverride.behaviors).toEqual({ detectTasks: false });
+    // The rendered fragment is UNCHANGED by behaviors (they gate code, not
+    // voice) — every existing fragment golden stays byte-identical.
+    expect(renderPersonaFragment(viaDelta, { principalName: "josctl" })).toBe(
+      renderPersonaFragment({ ...viaDelta, behaviors: undefined }, { principalName: "josctl" }),
+    );
   });
 });
 

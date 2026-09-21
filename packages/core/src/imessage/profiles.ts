@@ -30,6 +30,35 @@ import type { ThreadProfileOverride } from "./threads.js";
 
 export type ProfileExplanationStyle = "lead_with_answer" | "lead_with_context";
 
+/**
+ * W6(a)/R11 — persona is BEHAVIOR policy, not just voice. Presentation-only
+ * switches the deterministic offer layer consults; they cannot alter reads,
+ * tools, budgets, egress, or authorization (§5 invariant 2 — same ceiling as
+ * every other definition field). Strict booleans; absent = true (the
+ * attentive default), unknown keys fail the whole definition closed.
+ */
+export interface ProfileBehaviors {
+  readonly detectTasks?: boolean;
+  readonly proposeCapture?: boolean;
+  readonly convertDirectives?: boolean;
+  readonly surfaceDeadlines?: boolean;
+  readonly preferNextAction?: boolean;
+}
+
+/** All-true resolution of a definition's behaviors (defaults when absent). */
+export function resolveProfileBehaviors(
+  definition: Pick<ProfileDefinition, "behaviors">,
+): Required<ProfileBehaviors> {
+  const b = definition.behaviors ?? {};
+  return {
+    detectTasks: b.detectTasks ?? true,
+    proposeCapture: b.proposeCapture ?? true,
+    convertDirectives: b.convertDirectives ?? true,
+    surfaceDeadlines: b.surfaceDeadlines ?? true,
+    preferNextAction: b.preferNextAction ?? true,
+  };
+}
+
 export interface ProfileBrevity {
   readonly maxSentences: number;
   readonly maxChars: number;
@@ -46,6 +75,8 @@ export interface ProfileDefinition {
   readonly explanation: ProfileExplanationStyle;
   readonly address: ProfileAddress;
   readonly extraDirectives?: readonly string[];
+  /** W6(a) behavior flags — all default true when absent. */
+  readonly behaviors?: ProfileBehaviors;
 }
 
 /** Schema ceilings — the parser, the merge clamps, and the deltas all share these. */
@@ -90,7 +121,16 @@ function exactKeys(obj: Record<string, unknown>, keys: readonly string[]): boole
 export function parseProfileDefinition(value: unknown): ProfileDefinition | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const obj = value as Record<string, unknown>;
-  if (!exactKeys(obj, ["register", "brevity", "explanation", "address", "extraDirectives"])) {
+  if (
+    !exactKeys(obj, [
+      "register",
+      "brevity",
+      "explanation",
+      "address",
+      "extraDirectives",
+      "behaviors",
+    ])
+  ) {
     return null;
   }
   if (typeof obj.register !== "string") return null;
@@ -140,12 +180,43 @@ export function parseProfileDefinition(value: unknown): ProfileDefinition | null
     extraDirectives = parsed;
   }
 
+  let behaviors: ProfileBehaviors | undefined;
+  if (obj.behaviors !== undefined) {
+    if (typeof obj.behaviors !== "object" || obj.behaviors === null || Array.isArray(obj.behaviors)) {
+      return null;
+    }
+    const raw = obj.behaviors as Record<string, unknown>;
+    if (
+      !exactKeys(raw, [
+        "detectTasks",
+        "proposeCapture",
+        "convertDirectives",
+        "surfaceDeadlines",
+        "preferNextAction",
+      ])
+    ) {
+      return null;
+    }
+    const flags: { detectTasks?: boolean; proposeCapture?: boolean; convertDirectives?: boolean; surfaceDeadlines?: boolean; preferNextAction?: boolean } =
+      {};
+    let carried = false;
+    for (const [key, flag] of Object.entries(raw)) {
+      if (flag !== undefined) {
+        if (typeof flag !== "boolean") return null;
+        flags[key as "detectTasks"] = flag;
+        carried = true;
+      }
+    }
+    behaviors = carried ? flags : {};
+  }
+
   return {
     register,
     brevity: { maxSentences, maxChars },
     explanation,
     address,
     ...(extraDirectives !== undefined && extraDirectives.length > 0 ? { extraDirectives } : {}),
+    ...(behaviors !== undefined ? { behaviors } : {}),
   };
 }
 
@@ -164,6 +235,15 @@ export const JOSCTL_PROFILE_DEFINITION: ProfileDefinition = {
     "State what you cannot see rather than papering over it.",
     "Lead with the judgment, then the smallest sufficient support.",
   ],
+  // R11 — the chief-of-staff behaviors are ON: detect tasks, propose
+  // capture, convert directives, surface deadlines, prefer next action.
+  behaviors: {
+    detectTasks: true,
+    proposeCapture: true,
+    convertDirectives: true,
+    surfaceDeadlines: true,
+    preferNextAction: true,
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -441,6 +521,9 @@ export async function setThreadProfileOverride(
     ...(existing.topic !== undefined ? { topic: existing.topic } : {}),
     ...(existing.referents !== undefined ? { referents: existing.referents } : {}),
     ...(existing.lastStance !== undefined ? { lastStance: existing.lastStance } : {}),
+    ...(existing.pendingProposal !== undefined
+      ? { pendingProposal: existing.pendingProposal }
+      : {}),
     ...(opts.override !== null ? { profile_override: opts.override } : {}),
   };
   await db.query(
