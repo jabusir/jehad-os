@@ -9,9 +9,19 @@ import {
 import type { ConversationDeps, GatewayPrincipalPolicy } from "@jehad/core";
 import { migrateUp, seedDomains } from "@jehad/db";
 import { createIsolatedTestDb, dropIsolatedTestDb } from "../../packages/db/tests/test-db.js";
+import { persistenceClaimIn } from "./assertions.js";
 import type { DbPin, Scenario, ScenarioExpectations } from "./scenarios.js";
 
 export type CapabilityProbes = Readonly<Record<string, boolean>>;
+
+/** W6(a/R8): the interpret pass observation — captured from the
+ * `imessage.converse.interpret` audit rows the interpreter's caller (the
+ * orchestrator) emits per turn. Until that wiring lands, requires-gated
+ * scenarios skip and audits stay 0. */
+export interface InterpretationObservation {
+  readonly audits: number;
+  readonly payloads: readonly unknown[];
+}
 
 export interface TurnObservation {
   readonly user: string;
@@ -19,7 +29,8 @@ export interface TurnObservation {
   readonly replyReason: string | null;
   readonly reply: string | null;
   readonly routedTools: readonly string[];
-  readonly passes: readonly ("route" | "answer")[];
+  readonly passes: readonly ("route" | "interpret" | "answer")[];
+  readonly interpretation: InterpretationObservation;
   readonly scriptIssues: readonly string[];
 }
 
@@ -46,6 +57,10 @@ export interface ConversationEvalOptions {
 export type SqlRunner = (sql: string) => Promise<readonly Record<string, unknown>[]>;
 
 const ROUTE_PROMPT_MARKER = "query router for a personal assistant message gateway";
+// Coordinate (W6(a) lane): the interpret pass is route-class and its prompt
+// must open with this sentence — the same convention the route prompt uses —
+// so the eval harness can tell the two passes apart by marker.
+const INTERPRET_PROMPT_MARKER = "turn interpreter for a personal assistant message gateway";
 const ANCHOR_ISO = "2026-09-21T18:00:00.000Z";
 const TURN_STEP_MS = 60_000;
 const DAY_MS = 24 * 60 * 60_000;
@@ -76,10 +91,12 @@ const CLEANUP_SQL = `
   DELETE FROM audit_log; DELETE FROM review_refs;
   DELETE FROM action_attempts; DELETE FROM action_intents;
   DELETE FROM model_calls; DELETE FROM runs; DELETE FROM notifications;
+  DELETE FROM commitments; DELETE FROM interaction_profiles;
   DELETE FROM capability_grants WHERE capability = 'imessage:converse';
 `;
 
-export function passKindOf(prompt: string): "route" | "answer" {
+export function passKindOf(prompt: string): "route" | "interpret" | "answer" {
+  if (prompt.includes(INTERPRET_PROMPT_MARKER)) return "interpret";
   return prompt.includes(ROUTE_PROMPT_MARKER) ? "route" : "answer";
 }
 
@@ -89,7 +106,9 @@ interface ScriptedDispatch {
   readonly consumed: () => number;
 }
 
-function scriptedDispatch(script: readonly { readonly pass: string; readonly output: string }[]): ScriptedDispatch {
+export function scriptedDispatch(
+  script: readonly { readonly pass: string; readonly output: string }[],
+): ScriptedDispatch {
   const mismatches: string[] = [];
   let index = 0;
   return {
@@ -111,9 +130,17 @@ function scriptedDispatch(script: readonly { readonly pass: string; readonly out
   };
 }
 
+export interface ExpectationContext {
+  /** True when at least one expect_one db pin found its row — i.e. the
+   * scenario demonstrated a durable write, which is what licenses a
+   * persistence claim in the reply (§5-15). */
+  readonly writeEvidence?: boolean;
+}
+
 export function checkExpectations(
   expectations: ScenarioExpectations,
   lastTurn: TurnObservation | null,
+  ctx: ExpectationContext = {},
 ): string[] {
   const failures: string[] = [];
   if (lastTurn === null) {
@@ -129,6 +156,22 @@ export function checkExpectations(
     for (const needle of expectations.replyNotContains ?? []) {
       if (lastTurn.reply.includes(needle)) failures.push(`reply contains "${needle}"`);
     }
+    if (expectations.noPersistenceClaimWithoutWrite === true) {
+      const claim = persistenceClaimIn(lastTurn.reply);
+      if (claim !== null && ctx.writeEvidence !== true) {
+        failures.push(
+          `persistence claim "${claim}" without a durable write (no db write pin passed)`,
+        );
+      }
+    }
+  }
+  if (expectations.interpretAudits !== undefined) {
+    const audits = lastTurn.interpretation.audits;
+    if (audits !== expectations.interpretAudits) {
+      failures.push(
+        `expected ${expectations.interpretAudits} interpret audit row(s) on the final turn, got ${audits}`,
+      );
+    }
   }
   for (const tool of expectations.routedTools ?? []) {
     if (!lastTurn.routedTools.includes(tool)) {
@@ -141,8 +184,15 @@ export function checkExpectations(
   return failures;
 }
 
-export async function evaluatePins(runSql: SqlRunner, pins: readonly DbPin[]): Promise<string[]> {
+export interface PinRun {
+  readonly failures: readonly string[];
+  /** True when an expect_one pin found its row — evidence of a durable write. */
+  readonly writeEvidence: boolean;
+}
+
+async function runPins(runSql: SqlRunner, pins: readonly DbPin[]): Promise<PinRun> {
   const failures: string[] = [];
+  let writeEvidence = false;
   for (const pin of pins) {
     let rows: readonly Record<string, unknown>[];
     try {
@@ -157,8 +207,16 @@ export async function evaluatePins(runSql: SqlRunner, pins: readonly DbPin[]): P
     if (pin.expectZero && rows.length !== 0) {
       failures.push(`db pin expected 0 rows, got ${rows.length} (${pin.sql})`);
     }
+    if (pin.expectOne && rows.length >= 1) writeEvidence = true;
   }
-  return failures;
+  return { failures, writeEvidence };
+}
+
+export async function evaluatePins(
+  runSql: SqlRunner,
+  pins: readonly DbPin[],
+): Promise<readonly string[]> {
+  return (await runPins(runSql, pins)).failures;
 }
 
 async function toolUsedCount(pool: ConversationDeps["db"]): Promise<number> {
@@ -173,6 +231,19 @@ async function toolsUsedSince(pool: ConversationDeps["db"], offset: number): Pro
     `SELECT (outputs_ref::jsonb)->>'tool' AS tool FROM audit_log WHERE action = 'imessage.converse.tool_used'`,
   );
   return rows.rows.slice(offset).map((row) => String(row["tool"]));
+}
+
+/** W6(a/R8) observation: `imessage.converse.interpret` audit rows the
+ * orchestrator emits for the interpreter, sliced to this turn's window. */
+async function interpretationsSince(
+  pool: ConversationDeps["db"],
+  offset: number,
+): Promise<InterpretationObservation> {
+  const rows = await pool.query(
+    `SELECT outputs_ref::jsonb AS payload FROM audit_log WHERE action = 'imessage.converse.interpret'`,
+  );
+  const slice = rows.rows.slice(offset);
+  return { audits: slice.length, payloads: slice.map((row) => row["payload"]) };
 }
 
 async function replyContent(pool: ConversationDeps["db"], notificationId: string): Promise<string | null> {
@@ -240,6 +311,11 @@ async function runScenario(
   let scenarioNow = new Date(anchor.getTime());
   for (const turn of scenario.turns) {
     const before = await toolUsedCount(pool);
+    const beforeInterpretations = (
+      await pool.query(
+        `SELECT count(*)::int AS n FROM audit_log WHERE action = 'imessage.converse.interpret'`,
+      )
+    ).rows[0];
     const script = scriptedDispatch(turn.modelScript);
     const provider = new FakeModelProvider({ respond: script.responder });
     const deps: ConversationDeps = {
@@ -251,6 +327,7 @@ async function runScenario(
     };
     const outcome = await handleInbound(deps, { principalId, handle, text: turn.user });
     const routedTools = await toolsUsedSince(pool, before);
+    const interpretation = await interpretationsSince(pool, Number(beforeInterpretations?.["n"] ?? 0));
     const reply = outcome.notificationId !== undefined ? await replyContent(pool, outcome.notificationId) : null;
     const passes = provider.requests.map((request) => passKindOf(request.prompt));
     const issues = [...script.mismatches()];
@@ -264,6 +341,7 @@ async function runScenario(
       reply,
       routedTools,
       passes,
+      interpretation,
       scriptIssues: issues,
     });
     scenarioNow = new Date(scenarioNow.getTime() + TURN_STEP_MS);
@@ -275,13 +353,16 @@ async function runScenario(
       failures.push(`turn ${index + 1} modelScript: ${issue}`);
     }
   }
-  failures.push(
-    ...(await evaluatePins(
-      async (sql) => (await pool.query(sql)).rows as readonly Record<string, unknown>[],
-      scenario.expectations.dbPins ?? [],
-    )),
+  const pinRun = await runPins(
+    async (sql) => (await pool.query(sql)).rows as readonly Record<string, unknown>[],
+    scenario.expectations.dbPins ?? [],
   );
-  failures.push(...checkExpectations(scenario.expectations, observations.at(-1) ?? null));
+  failures.push(...pinRun.failures);
+  failures.push(
+    ...checkExpectations(scenario.expectations, observations.at(-1) ?? null, {
+      writeEvidence: pinRun.writeEvidence,
+    }),
+  );
   return { id: scenario.id, status: failures.length === 0 ? "pass" : "fail", reason: null, failures, turns: observations };
 }
 

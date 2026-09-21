@@ -155,4 +155,45 @@ describe("scenario file validation", () => {
     emptyTools.expectations = { routed_tools: [] };
     expectInvalid({ version: 1, scenarios: [emptyTools] });
   });
+
+  it("accepts an interpret pass in modelScript alongside route and answer", () => {
+    const raw = baseScenario() as { turns: { modelScript: { pass: string; output: string }[] }[] };
+    raw.turns[0]!.modelScript = [
+      { pass: "interpret", output: '{"proposals":[]}' },
+      { pass: "route", output: '{"tool":"none"}' },
+      { pass: "answer", output: "ok" },
+    ];
+    const file = parseScenarioFile({ version: 1, scenarios: [raw] });
+    expect(file.scenarios[0]!.turns[0]!.modelScript.map((p) => p.pass)).toEqual([
+      "interpret",
+      "route",
+      "answer",
+    ]);
+  });
+
+  it("parses no_persistence_claim_without_write and interpret_audits expectations", () => {
+    const raw = baseScenario() as { expectations: Record<string, unknown> };
+    raw.expectations = { no_persistence_claim_without_write: true, interpret_audits: 2 };
+    const file = parseScenarioFile({ version: 1, scenarios: [raw] });
+    expect(file.scenarios[0]!.expectations.noPersistenceClaimWithoutWrite).toBe(true);
+    expect(file.scenarios[0]!.expectations.interpretAudits).toBe(2);
+  });
+
+  it("no_persistence_claim_without_write alone satisfies the at-least-one-expectation rule", () => {
+    const raw = baseScenario() as { expectations: Record<string, unknown> };
+    raw.expectations = { no_persistence_claim_without_write: true };
+    expect(() => parseScenarioFile({ version: 1, scenarios: [raw] })).not.toThrow();
+  });
+
+  it("rejects a non-boolean no_persistence_claim_without_write and bad interpret_audits values", () => {
+    const badFlag = baseScenario() as { expectations: Record<string, unknown> };
+    badFlag.expectations = { no_persistence_claim_without_write: "yes" };
+    expectInvalid({ version: 1, scenarios: [badFlag] });
+
+    for (const bad of [0, -1, 1.5, "2"]) {
+      const badAudits = baseScenario() as { expectations: Record<string, unknown> };
+      badAudits.expectations = { interpret_audits: bad };
+      expectInvalid({ version: 1, scenarios: [badAudits] });
+    }
+  });
 });

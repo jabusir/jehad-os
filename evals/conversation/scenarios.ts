@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 
-export type ScriptPass = "route" | "answer";
+export type ScriptPass = "route" | "interpret" | "answer";
 
 export interface ScriptedPass {
   readonly pass: ScriptPass;
@@ -25,6 +25,13 @@ export interface ScenarioExpectations {
   readonly replyContains?: readonly string[];
   readonly replyNotContains?: readonly string[];
   readonly dbPins?: readonly DbPin[];
+  /** W6(c) invariant 15: the final reply must not carry a persistence claim
+   * (noted/saved/remember/tracking — PERSISTENCE_CLAIM_RE) unless a db pin
+   * demonstrates a durable write this scenario. */
+  readonly noPersistenceClaimWithoutWrite?: boolean;
+  /** W6(a/R8): exact count of `imessage.converse.interpret` audit rows the
+   * interpreter's caller must emit for the final turn. */
+  readonly interpretAudits?: number;
 }
 
 export interface Scenario {
@@ -120,8 +127,8 @@ function parseTurns(value: unknown, where: string, errors: string[]): readonly S
       }
       const pass = rawPass["pass"];
       const output = rawPass["output"];
-      if (pass !== "route" && pass !== "answer") {
-        errors.push(`${passWhere}.pass: must be "route" or "answer"`);
+      if (pass !== "route" && pass !== "interpret" && pass !== "answer") {
+        errors.push(`${passWhere}.pass: must be "route", "interpret", or "answer"`);
         scriptOk = false;
         continue;
       }
@@ -154,6 +161,19 @@ function parseExpectations(value: unknown, where: string, errors: string[]): Sce
   }
   const replyContains = stringArray(value["reply_contains"], `${where}.reply_contains`, errors);
   const replyNotContains = stringArray(value["reply_not_contains"], `${where}.reply_not_contains`, errors);
+  const noPersistenceClaimWithoutWrite = value["no_persistence_claim_without_write"];
+  if (noPersistenceClaimWithoutWrite !== undefined && typeof noPersistenceClaimWithoutWrite !== "boolean") {
+    errors.push(`${where}.no_persistence_claim_without_write: must be a boolean`);
+    return undefined;
+  }
+  const interpretAudits = value["interpret_audits"];
+  if (
+    interpretAudits !== undefined &&
+    (typeof interpretAudits !== "number" || !Number.isInteger(interpretAudits) || interpretAudits < 1)
+  ) {
+    errors.push(`${where}.interpret_audits: must be a positive integer`);
+    return undefined;
+  }
   const rawPins = value["db_pins"];
   let dbPins: readonly DbPin[] | undefined;
   if (rawPins !== undefined) {
@@ -174,12 +194,22 @@ function parseExpectations(value: unknown, where: string, errors: string[]): Sce
     routedNone === undefined &&
     replyContains === undefined &&
     replyNotContains === undefined &&
-    dbPins === undefined
+    dbPins === undefined &&
+    noPersistenceClaimWithoutWrite === undefined &&
+    interpretAudits === undefined
   ) {
     errors.push(`${where}: at least one expectation is required`);
     return undefined;
   }
-  return { routedTools, routedNone, replyContains, replyNotContains, dbPins };
+  return {
+    routedTools,
+    routedNone,
+    replyContains,
+    replyNotContains,
+    dbPins,
+    noPersistenceClaimWithoutWrite,
+    interpretAudits,
+  };
 }
 
 function parseScenario(value: unknown, where: string, errors: string[]): Scenario | undefined {

@@ -1,0 +1,264 @@
+version: 1
+
+# W6(c) golden conversational eval — the EXACT 2026-09-21 transcript
+# (12:36–12:41 PT), replayed as scenarios with pre/post assertions
+# (plan rev3 §7 W6(c), R12; §5 invariant 15).
+#
+# Fixed scenario clock: the runner anchors every scenario at
+# 2026-09-21T18:00:00.000Z = Monday, Sep 21 2026, 11:00 AM PT, one turn
+# per minute. From that anchor the deterministic temporal normalizer
+# resolves "wednesday" to Wednesday 2026-09-23 (America/Los_Angeles) —
+# the date asserted in golden-todo-confirm-01's db pins.
+#
+# Pre/post split: reply_not_contains pins the transcript's observed
+# failure modes (persistence hallucination, bare gmail taxonomy, stale
+# self-model phrasing); reply_contains + db_pins pin the post-W6
+# behavior. Scenarios whose turns depend on the Turn Interpreter
+# (R8/W6(a)) carry `requires: [turn_interpreter]` and skip until the
+# core export probe matches; interpret passes are scripted FIRST —
+# coordinate dispatch order with the interpreter lane if it differs.
+scenarios:
+  # ——— Transcript 12:36 PT: the to-do list message ———
+  - id: golden-todo-proposal-01
+    description: >-
+      Golden transcript (a): the 8-item to-do message is interpreted as a
+      task_batch proposal with due words on the three wednesday items —
+      offered, never mutated. The reply must count 8 items / 3 deadlines,
+      invite the confirm verb, and make NO persistence claim (the actual
+      transcript reply claimed noted/tracking with zero writes). Requires
+      the Turn Interpreter (W6(a)); skips until core exports it.
+    principal: jehad
+    requires:
+      - turn_interpreter
+    turns:
+      - user: |
+          Here's my to-do list:
+          Wedding seating chart
+          wedding playlist
+          wedding appetizers
+          get prenup signed (wednesday)
+          finish companions lecture by wednesday
+          build console table
+          build bed
+          Clean apartment and bathrooms by wednesday
+        modelScript:
+          - pass: interpret
+            output: >-
+              {"proposals":[{"type":"task_batch","items":[{"title":"Wedding seating chart"},{"title":"wedding playlist"},{"title":"wedding appetizers"},{"title":"get prenup signed","due":"wednesday"},{"title":"finish companions lecture","due":"wednesday"},{"title":"build console table"},{"title":"build bed"},{"title":"Clean apartment and bathrooms","due":"wednesday"}]}]}
+          - pass: route
+            output: '{"tool":"none"}'
+          - pass: answer
+            output: >-
+              I count 8 items in your list, and 3 of them carry wednesday
+              deadlines (prenup, companions lecture, apartment and
+              bathrooms). I'm not tracking these yet — they live only in
+              this conversation. Say "track them" and I'll add all 8 as
+              commitments with those due dates.
+    expectations:
+      reply_contains:
+        - "8"
+        - "3"
+        - track them
+      reply_not_contains:
+        - noted
+        - tracking it
+        - saved
+        - remember
+      no_persistence_claim_without_write: true
+      interpret_audits: 1
+      db_pins:
+        - sql: SELECT 1 FROM commitments
+          expect_zero: true
+
+  # ——— Transcript 12:37 PT: "track them" ———
+  - id: golden-todo-confirm-01
+    description: >-
+      Golden transcript (b): the confirm verb "track them" executes the
+      pending 8-item task_batch proposal — interpret returns no new
+      proposals, the deterministic verb writes. From the fixed clock
+      (Mon 2026-09-21) the three due words land on Wednesday 2026-09-23.
+      Requires the Turn Interpreter (W6(a)); skips until core exports it.
+    principal: jehad
+    requires:
+      - turn_interpreter
+    turns:
+      - user: |
+          Here's my to-do list:
+          Wedding seating chart
+          wedding playlist
+          wedding appetizers
+          get prenup signed (wednesday)
+          finish companions lecture by wednesday
+          build console table
+          build bed
+          Clean apartment and bathrooms by wednesday
+        modelScript:
+          - pass: interpret
+            output: >-
+              {"proposals":[{"type":"task_batch","items":[{"title":"Wedding seating chart"},{"title":"wedding playlist"},{"title":"wedding appetizers"},{"title":"get prenup signed","due":"wednesday"},{"title":"finish companions lecture","due":"wednesday"},{"title":"build console table"},{"title":"build bed"},{"title":"Clean apartment and bathrooms","due":"wednesday"}]}]}
+          - pass: route
+            output: '{"tool":"none"}'
+          - pass: answer
+            output: >-
+              I count 8 items in your list, and 3 of them carry wednesday
+              deadlines (prenup, companions lecture, apartment and
+              bathrooms). I'm not tracking these yet — they live only in
+              this conversation. Say "track them" and I'll add all 8 as
+              commitments with those due dates.
+      - user: track them
+        modelScript:
+          - pass: interpret
+            output: '{"proposals":[]}'
+          - pass: route
+            output: '{"tool":"none"}'
+          - pass: answer
+            output: >-
+              Tracked — 8 commitments are now in the world model, 3 with
+              due dates on Wednesday Sep 23 (prenup, companions lecture,
+              apartment and bathrooms).
+    expectations:
+      reply_contains:
+        - "8"
+      no_persistence_claim_without_write: true
+      db_pins:
+        - sql: SELECT 1 FROM commitments HAVING count(*) = 8
+          expect_one: true
+        - sql: SELECT 1 FROM commitments WHERE (due_at AT TIME ZONE 'America/Los_Angeles')::date = '2026-09-23' HAVING count(*) = 3
+          expect_one: true
+
+  # ——— Transcript: "gotcha — this is a gap in your capabilities…" ———
+  - id: golden-capability-gap-01
+    description: >-
+      Golden transcript (c): an owner observation about a capability gap
+      becomes a system_feedback proposal — offered via the "log it" verb,
+      never silently persisted. The reply must make no persistence claim
+      while the feedback table stays empty. Requires the Turn Interpreter
+      (W6(a)); skips until core exports it.
+    principal: jehad
+    requires:
+      - turn_interpreter
+    turns:
+      - user: gotcha — this is a gap in your capabilities that we should address
+        modelScript:
+          - pass: interpret
+            output: >-
+              {"proposals":[{"type":"system_feedback","category":"capability_gap","subject":"cannot judge pertinence of email from metadata-only coverage","detail":"Owner flagged 2026-09-21 after the gmail pertinence answer: metadata-only coverage cannot support judgment questions."}]}
+          - pass: route
+            output: '{"tool":"none"}'
+          - pass: answer
+            output: >-
+              Agreed, that's a real gap. I can file it as system feedback
+              for the next iteration — say "log it" and it goes to the
+              feedback log; until then it stays in this conversation only.
+    expectations:
+      reply_contains:
+        - log it
+      no_persistence_claim_without_write: true
+      interpret_audits: 1
+      db_pins:
+        - sql: SELECT 1 FROM feedback
+          expect_zero: true
+
+  # ——— Transcript: "any pertinent emails come in lately?" ———
+  - id: golden-gmail-pertinence-01
+    description: >-
+      Golden transcript (d): a judgment question ("pertinent") over the
+      metadata-only gmail source gets the coverage limit FIRST — sender
+      and arrival-time patterns, never a bare taxonomy presented as an
+      answer. Not interpreter-dependent: the gmail.recent read exists
+      today, so this scenario runs (and pins) now.
+    principal: jehad
+    turns:
+      - user: any pertinent emails come in lately?
+        modelScript:
+          - pass: route
+            output: '{"tool":"gmail.recent"}'
+          - pass: answer
+            output: >-
+              Honest limit first: for gmail I only see metadata — senders
+              and arrival times, no subjects or content — so I can't
+              judge "pertinent" directly. What the senders do show: two
+              arrivals from billing@ in the last 24h, nothing else
+              unusual. To judge pertinence I'd need subject lines or a
+              sender filter list.
+    expectations:
+      routed_tools:
+        - gmail.recent
+      reply_contains:
+        - sender
+        - metadata
+        - content
+      reply_not_contains:
+        - here are the pertinent emails
+        - the pertinent ones are
+      db_pins:
+        - sql: SELECT 1 FROM interaction_threads WHERE status = 'active'
+          expect_one: true
+
+  # ——— Transcript: Yusra's persona directive ———
+  - id: golden-yusra-persona-01
+    description: >-
+      Golden transcript (e): a cross-principal configuration directive
+      from the owner — Yusra's user-facing persona — is staged as a
+      proposal with an honest activation path (explicit "approve"), and
+      zero interaction_profiles rows exist for yusra until that approve.
+      Requires the Turn Interpreter (W6(a)); skips until core exports it.
+    principal: jehad
+    requires:
+      - turn_interpreter
+    turns:
+      - user: user, Yusra, should have her user facing persona as a friendly, nice, bubbly character / are you seeing that?
+        modelScript:
+          - pass: interpret
+            output: >-
+              {"proposals":[{"type":"configuration_directive","target_principal":"yusra","target":"interaction_profile.imessage","change":{"register":"friendly, nice, bubbly"}}]}
+          - pass: route
+            output: '{"tool":"none"}'
+          - pass: answer
+            output: >-
+              Not yet — Yusra has no persona configured on my side, so
+              nothing is rendering that way today. I can stage it as a
+              profile proposal for her iMessage surface (friendly, nice,
+              bubbly), but it only takes effect when you approve it —
+              say "approve" and the staged version becomes hers.
+    expectations:
+      reply_contains:
+        - approve
+      no_persistence_claim_without_write: true
+      interpret_audits: 1
+      db_pins:
+        - sql: SELECT 1 FROM interaction_profiles p JOIN principals pr ON pr.id = p.principal_id WHERE pr.name = 'yusra'
+          expect_zero: true
+
+  # ——— Transcript: "remember how we can configure your persona per user?" ———
+  - id: golden-persona-selfbrief-01
+    description: >-
+      Golden transcript (f): a self-configuration question answered from
+      the live SELF-BRIEF block (W6(b)/R9) — consistent with
+      self-modifiability, and free of the stale self-model phrasings the
+      transcript actually got ("not something I…", "I only see data when
+      you explicitly ask"). Requires the self-brief injection; skips
+      until core exports it.
+    principal: jehad
+    requires:
+      - self_brief
+    turns:
+      - user: remember how we can configure your persona per user?
+        modelScript:
+          - pass: route
+            output: '{"tool":"none"}'
+          - pass: answer
+            output: >-
+              Yes — per the live configuration: persona is per-user. Each
+              principal can configure their own wording and register,
+              adjust it by proposing changes right here in chat, and
+              confirm to version them; thread-scoped tweaks ("be brief
+              today") expire with the thread and never touch the stored
+              profile.
+    expectations:
+      reply_contains:
+        - configure
+        - adjust
+      reply_not_contains:
+        - not something I
+        - I only see data when you explicitly ask
