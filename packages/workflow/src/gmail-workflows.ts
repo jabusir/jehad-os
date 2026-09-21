@@ -132,17 +132,25 @@ export async function runGmailSyncTick(db: SqlExecutor, token: string): Promise<
 /** Map the G1 adapter onto the G2 sync port, translating the adapter's
  *  404-historyId-expiry error into the core-recognized error name. */
 export function gmailWorkflowPort(adapter: GmailAdapter): GmailSyncPort {
-  let fetchCount = 0;
+  let callCount = 0;
+  // Quota pacing (Gmail: 250 units/min/user): every 2nd API call takes a
+  // 1.5s breath — a full tick (paged list + ≤40 gets) spans well past a
+  // minute of budget, so no burst can blow the window.
+  const paced = async <T>(fn: () => Promise<T>): Promise<T> => {
+    callCount += 1;
+    if (callCount % 2 === 0) await new Promise((r) => setTimeout(r, 1500));
+    return await fn();
+  };
   return {
     id: adapter.id,
     hasToken: async () => true,
     listBootstrapMessages: async (opts) => {
-      const page = await adapter.bootstrapList(opts.newerThanDays, opts);
+      const page = await paced(() => adapter.bootstrapList(opts.newerThanDays, opts));
       // messages.list carries NO top-level historyId (only profile/threads
       // do) — resolve the bootstrap cursor from the mailbox profile.
       let historyId = page.newestHistoryId;
       if (historyId === null) {
-        historyId = (await adapter.profileHistoryId()).historyId;
+        historyId = (await paced(() => adapter.profileHistoryId())).historyId;
       }
       if (historyId === null || historyId <= 0) {
         // A zero cursor would 404-loop into endless re-bootstrap — fail
@@ -158,7 +166,7 @@ export function gmailWorkflowPort(adapter: GmailAdapter): GmailSyncPort {
     listHistory: async (opts) => {
       let page;
       try {
-        page = await adapter.historyList(opts.startHistoryId, opts);
+        page = await paced(() => adapter.historyList(opts.startHistoryId, opts));
       } catch (err) {
         if (adapterHistoryExpired(err)) {
           throw Object.assign(new Error("gmail history cursor expired"), {
@@ -174,12 +182,7 @@ export function gmailWorkflowPort(adapter: GmailAdapter): GmailSyncPort {
       };
     },
     getMessage: async (opts) => {
-      // Quota pacing (Gmail: 250 units/min/user; messages.get=5): a
-      // 1.2s breath every 4th fetch keeps a 50-msg tick ≈ 15s spread
-      // and comfortably under the per-minute budget.
-      fetchCount += 1;
-      if (fetchCount % 4 === 0) await new Promise((r) => setTimeout(r, 1200));
-      const m = await adapter.getMessage(opts.id);
+      const m = await paced(() => adapter.getMessage(opts.id));
       return {
         id: m.id,
         threadId: m.threadId ?? "",
