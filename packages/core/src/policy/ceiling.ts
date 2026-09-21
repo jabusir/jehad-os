@@ -218,21 +218,39 @@ export interface GatewayPolicyV1 {
 }
 
 /**
- * Model-routing pass overrides — `gateway.passes` (Lane R1): optional
- * per-pass model ids that override the principal's model for the route
- * and answer passes. `{}` = no overrides; an absent section parses to
+ * Model-routing pass overrides — `gateway.passes` (Lane R1 + W3 tiers):
+ * optional per-pass model ids that override the principal's model for the
+ * route and answer passes. `{}` = no overrides; an absent section parses to
  * null (identical semantics — every pass rides the principal model).
- * Strict like every gateway key: only route/answer/route_fallback, in
- * that order, each `{ model: <id> }`; anything else throws (fail closed).
+ * Strict like every gateway key, in this order only: route, answer,
+ * answer_fast, answer_standard, answer_deep, answer_fallback,
+ * route_fallback — each `{ model: <id> }`; anything else throws (fail
+ * closed). W3 tier semantics: `answer` is the legacy single-answer pin
+ * (honored as STANDARD's fallback), `answer_fast`/`answer_standard`/
+ * `answer_deep` are the tier pins (DEEP falls back to STANDARD's
+ * resolution), `answer_fallback` is the provider-failure retry model
+ * (nullable in effect — absent means no retry).
  */
 export interface GatewayPassesPolicy {
   readonly route?: { readonly model: string };
   readonly answer?: { readonly model: string };
+  readonly answer_fast?: { readonly model: string };
+  readonly answer_standard?: { readonly model: string };
+  readonly answer_deep?: { readonly model: string };
+  readonly answer_fallback?: { readonly model: string };
   readonly route_fallback?: { readonly model: string };
 }
 
 /** The only keys `gateway.passes` may carry, in the only legal order. */
-const PASS_KEYS = ["route", "answer", "route_fallback"] as const;
+const PASS_KEYS = [
+  "route",
+  "answer",
+  "answer_fast",
+  "answer_standard",
+  "answer_deep",
+  "answer_fallback",
+  "route_fallback",
+] as const;
 type PassKey = (typeof PASS_KEYS)[number];
 
 /** Model id charset (the gateway.principals model convention). */
@@ -241,7 +259,7 @@ const PASS_MODEL_RE = /^[A-Za-z0-9._/-]+$/;
 export function parseGatewayPassesEntry(value: string): GatewayPassesPolicy {
   if (!value.startsWith("{") || !value.endsWith("}")) {
     throw new Error(
-      `policy: gateway.passes must be "{ [route: { model: <id> }][, answer: { model: <id> }][, route_fallback: { model: <id> }] }" (got '${value}')`,
+      `policy: gateway.passes must be "{ [route: { model: <id> }][, answer: { model: <id> }][, answer_fast: { model: <id> }][, answer_standard: { model: <id> }][, answer_deep: { model: <id> }][, answer_fallback: { model: <id> }][, route_fallback: { model: <id> }] }" (got '${value}')`,
     );
   }
   const inner = value.slice(1, -1).trim();
@@ -250,11 +268,11 @@ export function parseGatewayPassesEntry(value: string): GatewayPassesPolicy {
   if (inner !== "") {
     for (const part of inner.split(",")) {
       const m = part.trim().match(
-        /^(route|answer|route_fallback):\s*\{\s*model:\s*([A-Za-z0-9._/-]+)\s*\}$/,
+        /^(route|answer|answer_fast|answer_standard|answer_deep|answer_fallback|route_fallback):\s*\{\s*model:\s*([A-Za-z0-9._/-]+)\s*\}$/,
       );
       if (m === null) {
         throw new Error(
-          `policy: gateway.passes entries must be 'route|answer|route_fallback: { model: <id> }' in that key order (got '${part.trim()}')`,
+          `policy: gateway.passes entries must be 'route|answer|answer_fast|answer_standard|answer_deep|answer_fallback|route_fallback: { model: <id> }' in that key order (got '${part.trim()}')`,
         );
       }
       const id = m[2]!;
@@ -273,7 +291,7 @@ export function parseGatewayPassesEntry(value: string): GatewayPassesPolicy {
       }
       if (PASS_KEYS.indexOf(key) <= lastOrder) {
         throw new Error(
-          "policy: gateway.passes keys must appear in order route, answer, route_fallback",
+          "policy: gateway.passes keys must appear in order route, answer, answer_fast, answer_standard, answer_deep, answer_fallback, route_fallback",
         );
       }
       lastOrder = PASS_KEYS.indexOf(key);
@@ -283,6 +301,14 @@ export function parseGatewayPassesEntry(value: string): GatewayPassesPolicy {
   return {
     ...(models.route !== undefined ? { route: { model: models.route } } : {}),
     ...(models.answer !== undefined ? { answer: { model: models.answer } } : {}),
+    ...(models.answer_fast !== undefined ? { answer_fast: { model: models.answer_fast } } : {}),
+    ...(models.answer_standard !== undefined
+      ? { answer_standard: { model: models.answer_standard } }
+      : {}),
+    ...(models.answer_deep !== undefined ? { answer_deep: { model: models.answer_deep } } : {}),
+    ...(models.answer_fallback !== undefined
+      ? { answer_fallback: { model: models.answer_fallback } }
+      : {}),
     ...(models.route_fallback !== undefined
       ? { route_fallback: { model: models.route_fallback } }
       : {}),

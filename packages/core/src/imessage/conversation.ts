@@ -890,7 +890,7 @@ async function converseTurn(
         parseRouteReadSet(route.result.text) === null &&
         parseActionRouteJson(route.result.text) === null &&
         !isRouteNoneJson(route.result.text) &&
-        shouldEscalateRoute(route.result.text, true) &&
+        shouldEscalateRoute(true) &&
         passModels.routeFallback !== null
       ) {
         // Parse-failure escalation: exactly ONE retry on the fallback

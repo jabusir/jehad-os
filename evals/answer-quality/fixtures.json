@@ -1,0 +1,516 @@
+{
+  "version": 1,
+  "description": "W3 answer-quality bake-off fixtures (plan §7 W3 + §13). Scenarios drive the REAL buildAnswerPrompt from @jehad/core with synthetic ReadToolResult DATA blocks shaped exactly like executeReadTool output (read-tools.ts), including W1 day.state assembled-text blocks. Scored live by an INDEPENDENT-family blind judge (google/gemini-2.5-flash). Groups: synthesis (8), multiturn (5), explainwhy (5), plainchat (6).",
+  "principalName": "Jehad",
+  "scenarios": [
+    {
+      "id": "S01",
+      "group": "synthesis",
+      "question": "What's going on today?",
+      "results": [
+        {
+          "tool": "day.state",
+          "source": "state",
+          "coverage": "assembled world-model queries + calendar + tracked commitments + gmail metadata; it does not see chat, notes, or anything you did not put in the system",
+          "data": {
+            "timezone": "America/Los_Angeles",
+            "date": "2026-09-21",
+            "stale": ["calendar last synced 6 hours ago — late changes may not be reflected"],
+            "text": "TODAY (Mon, Sep 21)\n- 9:00 AM Henna sync (calendar)\n- 2:30 PM Dentist (calendar) — occurrence unverified\nWAITING ON YOU (2)\n- Reply to Henna about Saturday dinner — asked twice, last Wed (overdue 3d, may follow up)\n- Pay invoice #2231 to Acme Corp $240 — due today\nWAITING ON OTHERS (2)\n- Marco: dessert options for the dinner — no reply since Fri\n- Venue: deposit receipt — sent Tue\nBLOCKED\n- Venue deposit confirmation is blocked by your reply to Henna\nBEST UNLOCK\n- Replying to Henna unblocks the venue deposit and the Saturday plan\nOVERNIGHT\n- 6 emails (3 linkedin.com, 2 github.com, 1 amazon.com) — metadata only"
+          }
+        }
+      ]
+    },
+    {
+      "id": "S02",
+      "group": "synthesis",
+      "question": "What's going on, and does this tie to what I decided last week?",
+      "results": [
+        {
+          "tool": "day.state",
+          "source": "state",
+          "coverage": "assembled world-model queries + calendar + tracked commitments + gmail metadata; it does not see chat, notes, or anything you did not put in the system",
+          "data": {
+            "timezone": "America/Los_Angeles",
+            "date": "2026-09-21",
+            "stale": [],
+            "text": "TODAY (Mon, Sep 21)\n- 9:00 AM Henna sync (calendar)\nWAITING ON YOU (1)\n- Reply to Henna about Saturday dinner — overdue 3d, may follow up\nBLOCKED\n- Venue deposit confirmation is blocked by your reply to Henna\nDECIDED LAST WEEK\n- Sep 15: chose Palmaya venue for the Saturday dinner (your decision, captured)\n- Sep 16: cap dinner budget at $40/head (your decision, captured)"
+          }
+        },
+        {
+          "tool": "commitments.waiting",
+          "source": "commitments",
+          "coverage": "manually captured commitments in the world model only",
+          "data": {
+            "overdueCount": 1,
+            "overdue": [
+              { "description": "Reply to Henna about Saturday dinner", "counterparty": "Henna", "due": "Fri, Sep 18" }
+            ],
+            "dueSoonCount": 1,
+            "dueSoon": [
+              { "description": "Pay invoice #2231 ($240)", "counterparty": "Acme Corp", "due": "Mon, Sep 21" }
+            ],
+            "otherOpenCount": 4
+          }
+        }
+      ]
+    },
+    {
+      "id": "S03",
+      "group": "synthesis",
+      "question": "What should I prioritize today?",
+      "results": [
+        {
+          "tool": "day.state",
+          "source": "state",
+          "coverage": "assembled world-model queries + calendar + tracked commitments + gmail metadata; it does not see chat, notes, or anything you did not put in the system",
+          "data": {
+            "timezone": "America/Los_Angeles",
+            "date": "2026-09-21",
+            "stale": [],
+            "text": "BEST UNLOCK\n- Replying to Henna unblocks the venue deposit and the Saturday plan (2 downstream items)\nWAITING ON YOU (2)\n- Reply to Henna — overdue 3d, asked twice\n- Pay invoice #2231 $240 — due today\nCALENDAR\n- 9:00 AM Henna sync\n- 2:30 PM Dentist — occurrence unverified\nESCALATIONS\n- none"
+          }
+        },
+        {
+          "tool": "calendar.day",
+          "source": "calendar",
+          "coverage": "calendar events only; email, chat, and notes are not connected",
+          "data": {
+            "date": "2026-09-21",
+            "timezone": "America/Los_Angeles",
+            "total": 2,
+            "items": [
+              { "when": "9 AM", "title": "Henna sync", "location": null },
+              { "when": "2:30 PM", "title": "Dentist", "location": "Bay Dental" }
+            ],
+            "truncated": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "S04",
+      "group": "synthesis",
+      "question": "Give me the full picture of where things stand this morning.",
+      "results": [
+        {
+          "tool": "day.state",
+          "source": "state",
+          "coverage": "assembled world-model queries + calendar + tracked commitments + gmail metadata; it does not see chat, notes, or anything you did not put in the system",
+          "data": {
+            "timezone": "America/Los_Angeles",
+            "date": "2026-09-21",
+            "stale": ["calendar last synced 7 hours ago — late changes may not be reflected"],
+            "text": "TODAY (Mon, Sep 21)\n- 9:00 AM Henna sync (calendar)\n- 2:30 PM Dentist (calendar) — occurrence unverified\nWAITING ON YOU (2)\n- Reply to Henna about Saturday dinner — overdue 3d\n- Pay invoice #2231 to Acme Corp $240 — due today\nWAITING ON OTHERS (2)\n- Marco: dessert options — no reply since Fri\n- Venue: deposit receipt — sent Tue\nBLOCKED\n- Venue deposit confirmation blocked by your reply to Henna\nPLAN DIVERGENCE (yesterday)\n- 3 of 5 calendared blocks were moved or cancelled same-day; what actually happened is unverified"
+          }
+        },
+        {
+          "tool": "gmail.recent",
+          "source": "gmail",
+          "coverage": "Gmail (your connected account): recent inbox arrivals, last 24h (metadata only; no subjects or bodies)",
+          "data": {
+            "timezone": "America/Los_Angeles",
+            "windowHours": 24,
+            "totalMessages": 6,
+            "domains": [
+              { "fromDomain": "linkedin.com", "count": 3 },
+              { "fromDomain": "github.com", "count": 2 },
+              { "fromDomain": "amazon.com", "count": 1 }
+            ],
+            "truncated": false,
+            "latestTimes": ["9:15 AM", "8:02 AM"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "S05",
+      "group": "synthesis",
+      "question": "what's happening with the Saturday dinner plan?",
+      "results": [
+        {
+          "tool": "commitments.waiting",
+          "source": "commitments",
+          "coverage": "manually captured commitments in the world model only",
+          "data": {
+            "overdueCount": 1,
+            "overdue": [
+              { "description": "Reply to Henna about Saturday dinner", "counterparty": "Henna", "due": "Fri, Sep 18" }
+            ],
+            "dueSoonCount": 0,
+            "dueSoon": [],
+            "otherOpenCount": 5,
+            "blockedBy": [
+              { "description": "Venue deposit confirmation", "blockedBy": "Reply to Henna about Saturday dinner" }
+            ]
+          }
+        },
+        {
+          "tool": "calendar.day",
+          "source": "calendar",
+          "coverage": "calendar events only; email, chat, and notes are not connected",
+          "data": {
+            "date": "2026-09-26",
+            "timezone": "America/Los_Angeles",
+            "total": 1,
+            "items": [
+              { "when": "7:30 PM", "title": "Dinner — Palmaya", "location": "Palmaya" }
+            ],
+            "truncated": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "S06",
+      "group": "synthesis",
+      "question": "What do I actually need to deal with, across everything you can see?",
+      "results": [
+        {
+          "tool": "commitments.waiting",
+          "source": "commitments",
+          "coverage": "manually captured commitments in the world model only",
+          "data": {
+            "overdueCount": 2,
+            "overdue": [
+              { "description": "Return library book to Maria", "counterparty": "Maria", "due": "Fri, Sep 18" },
+              { "description": "Reply to Henna about Saturday dinner", "counterparty": "Henna", "due": "Fri, Sep 18" }
+            ],
+            "dueSoonCount": 1,
+            "dueSoon": [
+              { "description": "Pay invoice #2231 ($240)", "counterparty": "Acme Corp", "due": "Mon, Sep 21" }
+            ],
+            "otherOpenCount": 4
+          }
+        },
+        {
+          "tool": "calendar.day",
+          "source": "calendar",
+          "coverage": "calendar events only; email, chat, and notes are not connected",
+          "data": {
+            "date": "2026-09-21",
+            "timezone": "America/Los_Angeles",
+            "total": 2,
+            "items": [
+              { "when": "9 AM", "title": "Henna sync", "location": null },
+              { "when": "2:30 PM", "title": "Dentist", "location": "Bay Dental" }
+            ],
+            "truncated": false
+          }
+        },
+        {
+          "tool": "gmail.recent",
+          "source": "gmail",
+          "coverage": "Gmail (your connected account): recent inbox arrivals, last 24h (metadata only; no subjects or bodies)",
+          "data": {
+            "timezone": "America/Los_Angeles",
+            "windowHours": 24,
+            "totalMessages": 6,
+            "domains": [
+              { "fromDomain": "linkedin.com", "count": 3 },
+              { "fromDomain": "github.com", "count": 2 },
+              { "fromDomain": "amazon.com", "count": 1 }
+            ],
+            "truncated": false,
+            "latestTimes": ["9:15 AM"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "S07",
+      "group": "synthesis",
+      "question": "What happened to my plan yesterday? Did it hold?",
+      "results": [
+        {
+          "tool": "day.state",
+          "source": "state",
+          "coverage": "assembled world-model queries + calendar + tracked commitments + gmail metadata; it does not see chat, notes, or anything you did not put in the system",
+          "data": {
+            "timezone": "America/Los_Angeles",
+            "date": "2026-09-21",
+            "stale": [],
+            "text": "PLAN DIVERGENCE (yesterday, Sun Sep 20)\n- 'Deep work — funding memo' moved from 9 AM to 4 PM (same-day change)\n- 'Gym' cancelled same-day\n- 'Call mom' moved to today 6 PM\n- What actually happened during those blocks is unverified — the calendar only shows the plan changes\nHELD\n- 'Groceries' completed as planned\nTODAY\n- 9:00 AM Henna sync\n- 2:30 PM Dentist — occurrence unverified"
+          }
+        }
+      ]
+    },
+    {
+      "id": "S08",
+      "group": "synthesis",
+      "question": "Walk me through why the venue deposit is stuck.",
+      "results": [
+        {
+          "tool": "day.state",
+          "source": "state",
+          "coverage": "assembled world-model queries + calendar + tracked commitments + gmail metadata; it does not see chat, notes, or anything you did not put in the system",
+          "data": {
+            "timezone": "America/Los_Angeles",
+            "date": "2026-09-21",
+            "stale": [],
+            "text": "BLOCKED CHAIN\n- Venue deposit confirmation (owed by venue, sent Tue) is blocked by: your reply to Henna about Saturday dinner\n- Your reply to Henna is overdue 3d; Henna asked twice, last Wed\n- Downstream of the deposit: the Saturday 7:30 PM Palmaya reservation cannot be final-count confirmed\nBEST UNLOCK\n- Replying to Henna unblocks 2 items"
+          }
+        }
+      ]
+    },
+    {
+      "id": "M01",
+      "group": "multiturn",
+      "question": "What about the second one?",
+      "priorTurns": [
+        { "direction": "inbound", "content": "I'm picking between two windows for the venue visit. What's on my calendar tomorrow?" },
+        { "direction": "outbound", "content": "Tomorrow you have two open windows: 11 AM–12 PM and 4–5 PM. Either works for a venue visit." }
+      ],
+      "results": [
+        {
+          "tool": "calendar.day",
+          "source": "calendar",
+          "coverage": "calendar events only; email, chat, and notes are not connected",
+          "data": {
+            "date": "2026-09-22",
+            "timezone": "America/Los_Angeles",
+            "total": 2,
+            "items": [
+              { "when": "11 AM–12 PM", "title": "open window", "location": null },
+              { "when": "4–5 PM", "title": "open window", "location": null }
+            ],
+            "truncated": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "M02",
+      "group": "multiturn",
+      "question": "Actually, I changed my mind — make it the earlier one.",
+      "priorTurns": [
+        { "direction": "inbound", "content": "Should I take the 4pm or the 11am slot for the venue visit?" },
+        { "direction": "outbound", "content": "The 4–5 PM window is fully open; 11 AM–12 PM overlaps nothing either, but the venue confirmed staff availability at 4. Either works, 4 PM is the safer bet." }
+      ],
+      "results": []
+    },
+    {
+      "id": "M03",
+      "group": "multiturn",
+      "question": "Did the reservation hold?",
+      "priorTurns": [
+        { "direction": "inbound", "content": "Can you set up the dinner reservation at Palmaya for Saturday?" },
+        { "direction": "outbound", "content": "Proposed: Dinner — Palmaya, Sat Sep 26, 7:30 PM. Reply YES to confirm and I'll create it." },
+        { "direction": "inbound", "content": "YES" },
+        { "direction": "outbound", "content": "Confirmed — Dinner at Palmaya, Saturday 7:30 PM, is on your calendar. I'll check back Sunday morning on how it went." }
+      ],
+      "results": [
+        {
+          "tool": "calendar.day",
+          "source": "calendar",
+          "coverage": "calendar events only; email, chat, and notes are not connected",
+          "data": {
+            "date": "2026-09-27",
+            "timezone": "America/Los_Angeles",
+            "total": 1,
+            "items": [
+              { "when": "Sat 7:30 PM (past)", "title": "Dinner — Palmaya", "location": "Palmaya", "occurrence": "scheduled_past_unverified" }
+            ],
+            "truncated": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "M04",
+      "group": "multiturn",
+      "question": "And what did Marco say about the dessert options?",
+      "priorTurns": [
+        { "direction": "inbound", "content": "Who still owes me a reply?" },
+        { "direction": "outbound", "content": "Two people owe you a reply: Marco on the dessert options for the Saturday dinner (since Friday), and the venue on the deposit receipt (since Tuesday)." }
+      ],
+      "results": [
+        {
+          "tool": "commitments.waiting",
+          "source": "commitments",
+          "coverage": "manually captured commitments in the world model only",
+          "data": {
+            "overdueCount": 0,
+            "overdue": [],
+            "dueSoonCount": 0,
+            "dueSoon": [],
+            "otherOpenCount": 6,
+            "waitingOnOthers": [
+              { "description": "Marco: dessert options for Saturday dinner", "since": "Fri, Sep 18" },
+              { "description": "Venue: deposit receipt", "since": "Tue, Sep 15" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "M05",
+      "group": "multiturn",
+      "question": "What about next week — anything I should get ahead of?",
+      "priorTurns": [
+        { "direction": "inbound", "content": "What do I owe anyone right now?" },
+        { "direction": "outbound", "content": "Right now: the reply to Henna about Saturday dinner (overdue since Friday) and the $240 Acme invoice due today." }
+      ],
+      "results": [
+        {
+          "tool": "calendar.next",
+          "source": "calendar",
+          "coverage": "calendar events only; email, chat, and notes are not connected",
+          "data": {
+            "timezone": "America/Los_Angeles",
+            "items": [
+              { "when": "Mon, Sep 28, 10 AM", "title": "Quarterly planning", "location": null },
+              { "when": "Wed, Sep 30, 9 AM", "title": "Dentist follow-up", "location": "Bay Dental" }
+            ],
+            "truncated": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "W01",
+      "group": "explainwhy",
+      "question": "Why is the venue deposit blocked?",
+      "results": [
+        {
+          "tool": "commitments.waiting",
+          "source": "commitments",
+          "coverage": "manually captured commitments in the world model only",
+          "data": {
+            "overdueCount": 1,
+            "overdue": [
+              { "description": "Reply to Henna about Saturday dinner", "counterparty": "Henna", "due": "Fri, Sep 18", "mayFollowUp": true }
+            ],
+            "dueSoonCount": 0,
+            "dueSoon": [],
+            "otherOpenCount": 5,
+            "blockedBy": [
+              { "description": "Venue deposit confirmation", "blockedBy": "Reply to Henna about Saturday dinner", "reason": "you told me Sep 12: confirm the venue after the guest count is settled with Henna" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "W02",
+      "group": "explainwhy",
+      "question": "Why do you keep saying the Henna reply is the one thing?",
+      "results": [
+        {
+          "tool": "day.state",
+          "source": "state",
+          "coverage": "assembled world-model queries + calendar + tracked commitments + gmail metadata; it does not see chat, notes, or anything you did not put in the system",
+          "data": {
+            "timezone": "America/Los_Angeles",
+            "date": "2026-09-21",
+            "stale": [],
+            "text": "WHY THIS RANKS FIRST\n- It is the only commitment past due where you owe the reply (asked twice, last Wed, overdue 3d, follow-ups allowed)\n- Something downstream is blocked by it: the venue deposit confirmation\n- Your last two reschedules of the Henna sync were same-day\n- Everything else open is either waiting on someone else (2) or can wait (4)"
+          }
+        }
+      ]
+    },
+    {
+      "id": "W03",
+      "group": "explainwhy",
+      "question": "Explain the plan churn from yesterday — I thought I had a solid day.",
+      "results": [
+        {
+          "tool": "day.state",
+          "source": "state",
+          "coverage": "assembled world-model queries + calendar + tracked commitments + gmail metadata; it does not see chat, notes, or anything you did not put in the system",
+          "data": {
+            "timezone": "America/Los_Angeles",
+            "date": "2026-09-21",
+            "stale": [],
+            "text": "PLAN DIVERGENCE (yesterday, Sun Sep 20)\n- 3 of 5 calendared blocks were moved or cancelled same-day:\n  - 'Deep work — funding memo' 9 AM → 4 PM\n  - 'Gym' cancelled\n  - 'Call mom' → today 6 PM\n- The calendar records the plan changes only; it cannot verify what you actually did in those blocks"
+          }
+        }
+      ]
+    },
+    {
+      "id": "W04",
+      "group": "explainwhy",
+      "question": "Why can't you just tell me whether the dentist happened?",
+      "results": [
+        {
+          "tool": "calendar.day",
+          "source": "calendar",
+          "coverage": "calendar events only; email, chat, and notes are not connected",
+          "data": {
+            "date": "2026-09-21",
+            "timezone": "America/Los_Angeles",
+            "total": 1,
+            "items": [
+              { "when": "2:30 PM (past)", "title": "Dentist", "location": "Bay Dental", "occurrence": "scheduled_past_unverified" }
+            ],
+            "truncated": false,
+            "note": "occurrence=scheduled_past_unverified means the event's time passed but nothing corroborates whether it happened"
+          }
+        }
+      ]
+    },
+    {
+      "id": "W05",
+      "group": "explainwhy",
+      "question": "Why are you hedging on my calendar? You showed it to me an hour ago.",
+      "results": [
+        {
+          "tool": "calendar.day",
+          "source": "calendar",
+          "coverage": "calendar events only; email, chat, and notes are not connected",
+          "data": {
+            "date": "2026-09-21",
+            "timezone": "America/Los_Angeles",
+            "total": 2,
+            "items": [
+              { "when": "9 AM", "title": "Henna sync", "location": null },
+              { "when": "2:30 PM", "title": "Dentist", "location": "Bay Dental" }
+            ],
+            "truncated": false,
+            "staleness": "calendar last synced 6 hours ago; changes made in the last 6 hours may not be reflected"
+          }
+        }
+      ]
+    },
+    {
+      "id": "C01",
+      "group": "plainchat",
+      "question": "hey how's it going?",
+      "results": []
+    },
+    {
+      "id": "C02",
+      "group": "plainchat",
+      "question": "thanks, that's all I needed",
+      "results": []
+    },
+    {
+      "id": "C03",
+      "group": "plainchat",
+      "question": "I'm feeling pretty drained today",
+      "results": []
+    },
+    {
+      "id": "C04",
+      "group": "plainchat",
+      "question": "write me a two-line poem about fog",
+      "results": []
+    },
+    {
+      "id": "C05",
+      "group": "plainchat",
+      "question": "ok, I'll take the 4pm slot then",
+      "priorTurns": [
+        { "direction": "inbound", "content": "Should I take the 4pm or the 11am slot for the venue visit?" },
+        { "direction": "outbound", "content": "The 4–5 PM window is fully open; 11 AM–12 PM overlaps nothing either. Either works, 4 PM is the safer bet." }
+      ],
+      "results": []
+    },
+    {
+      "id": "C06",
+      "group": "plainchat",
+      "question": "what's the capital of Australia?",
+      "results": []
+    }
+  ]
+}
