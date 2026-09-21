@@ -1,0 +1,103 @@
+version: 1
+scenarios:
+  - id: referent-continuity-01
+    description: >-
+      Referent continuity — the follow-up "What about the second one?" must
+      resolve against the previous turn's read, so the second turn routes the
+      same calendar lookup instead of collapsing to none.
+    principal: jehad
+    turns:
+      - user: I'm picking between two venue options for the dinner. What's on my calendar tomorrow?
+        modelScript:
+          - pass: route
+            output: '{"tool":"calendar.day","day":"tomorrow"}'
+          - pass: answer
+            output: >-
+              Tomorrow you have two open windows: 11 AM–12 PM and 4–5 PM.
+              Either works for a venue visit.
+      - user: What about the second one?
+        modelScript:
+          - pass: route
+            output: '{"tool":"calendar.day","day":"tomorrow"}'
+          - pass: answer
+            output: >-
+              The 4–5 PM window is still open — nothing on the calendar
+              conflicts with it.
+    expectations:
+      routed_tools:
+        - calendar.day
+      reply_contains:
+        - 4–5 PM
+      reply_not_contains:
+        - I don't have access
+      db_pins:
+        - sql: SELECT 1 FROM interaction_threads WHERE status = 'active'
+          expect_one: true
+
+  - id: daystate-grounding-01
+    description: >-
+      Day grounding — "What's going on today?" routes to the assembled
+      day.state read and the reply carries labeled sections, not a tool dump.
+      Requires the day.state capability (lane J2); skipped until core exports it.
+    principal: jehad
+    requires:
+      - day.state
+    turns:
+      - user: What's going on today?
+        modelScript:
+          - pass: route
+            output: '{"tool":"day.state"}'
+          - pass: answer
+            output: >-
+              TODAY — one overdue commitment, two waiting on others.
+              WAITING — the venue deposit is blocked on the Henna reply.
+              NEXT — 2 PM Henna sync.
+    expectations:
+      routed_tools:
+        - day.state
+      reply_contains:
+        - WAITING
+
+  - id: staleness-honesty-01
+    description: >-
+      Staleness honesty — a calendar read whose source is past the freshness
+      threshold is caveated in the reply instead of presented as current
+      truth. Requires the staleness capability (lane J1); skipped until core
+      exports it.
+    principal: jehad
+    turns:
+      - user: What's on my calendar today?
+        modelScript:
+          - pass: route
+            output: '{"tool":"calendar.day","day":"today"}'
+          - pass: answer
+            output: >-
+              You have the 2 PM Henna sync. Calendar last synced 7 hours
+              ago — late changes may not be reflected.
+    expectations:
+      routed_tools:
+        - calendar.day
+      reply_contains:
+        - synced
+    requires:
+      - staleness
+
+  - id: plain-chat-none-01
+    description: >-
+      Plain chat routes tool none and answers from the conversation alone —
+      no fabricated world state.
+    principal: jehad
+    turns:
+      - user: hey — quick one, what's the capital of Australia?
+        modelScript:
+          - pass: route
+            output: '{"tool":"none"}'
+          - pass: answer
+            output: Canberra.
+    expectations:
+      routed_none: true
+      reply_contains:
+        - Canberra
+      reply_not_contains:
+        - calendar
+        - commitment

@@ -38,6 +38,9 @@ importers:
       vitest:
         specifier: ^3.0.0
         version: 3.2.7(@types/debug@4.1.13)(@types/node@22.20.3)(supports-color@7.2.0)(tsx@4.23.13)(yaml@2.9.1)
+      yaml:
+        specifier: ^2.8.0
+        version: 2.9.1
 
   apps/api:
     dependencies:
