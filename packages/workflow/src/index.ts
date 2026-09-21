@@ -41,6 +41,10 @@ export {
 
 export { calendarSyncWorkflow, type CalendarSyncResult } from "./calendar-workflows.js";
 export {
+  calendarOccurrenceSweepWorkflow,
+  type CalendarOccurrenceSweepResult,
+} from "./occurrence-workflows.js";
+export {
   gmailSyncWorkflow,
   GMAIL_INGEST_CAPABILITY,
   GMAIL_INGEST_RESOURCE,

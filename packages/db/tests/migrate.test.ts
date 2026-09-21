@@ -21,7 +21,7 @@ const ALL_MIGRATIONS = [
   "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
   "004_commitments_domain", "005_commitments_temporal", "006_notifications",
   "007_calendar", "008_feedback", "009_notification_calendar_change", "010_imessage_sensor", "011_imessage_pairing", "012_interaction_threads", "013_review_refs", "014_confirm_token_unique",
-  "015_gmail_sensor", "016_calibration",
+  "015_gmail_sensor", "016_calibration", "017_calendar_occurrence",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -255,6 +255,36 @@ describe("migration files (fs only)", () => {
       /CHECK \(item_type IN \('notification', 'attention_item', 'review_item', 'brief_section', 'event'\)\)/,
     );
     expect(cal!.downSql).toMatch(/DROP TABLE IF EXISTS calibration_items\b/);
+  });
+
+  it("017 adds calendar occurrence state with the user-declared graduation pin; down drops it", async () => {
+    const migrations = await listMigrations();
+    const m = migrations.find((x) => x.name === "017_calendar_occurrence");
+    expect(m).toBeDefined();
+    // Occurrence vocabulary (the three states; time passing is never evidence).
+    expect(m!.sql).toMatch(
+      /CHECK \(occurrence IN \('scheduled_past_unverified', 'observed_occurred', 'observed_missed'\)\)/,
+    );
+    // Provenance jsonb with the kind vocabulary pinned.
+    expect(m!.sql).toMatch(/ADD COLUMN occurrence_confirmed_by jsonb/);
+    expect(m!.sql).toMatch(
+      /occurrence_confirmed_by->>'kind' IN \('user_declared', 'cross_source_proposed'\)/,
+    );
+    // Graduation law (§5 invariant 7) pinned at the DB: observed_* requires
+    // user_declared provenance — no code path can fabricate an observation.
+    expect(m!.sql).toMatch(
+      /calendar_events_occurrence_graduation_check[\s\S]*occurrence IS NULL OR occurrence = 'scheduled_past_unverified' OR[\s\S]*occurrence_confirmed_by->>'kind' = 'user_declared'/,
+    );
+    // Partial sweep index over ungraduated rows (past-ness is query-time —
+    // partial predicates must be immutable).
+    expect(m!.sql).toMatch(/CREATE INDEX calendar_events_occurrence_sweep_idx/);
+    expect(m!.sql).toMatch(
+      /WHERE \(occurrence IS NULL OR occurrence = 'scheduled_past_unverified'\)\s+AND end_time IS NOT NULL/,
+    );
+    expect(m!.downSql).toMatch(/DROP INDEX IF EXISTS calendar_events_occurrence_sweep_idx/);
+    expect(m!.downSql).toMatch(/DROP CONSTRAINT IF EXISTS calendar_events_occurrence_graduation_check/);
+    expect(m!.downSql).toMatch(/DROP COLUMN IF EXISTS occurrence_confirmed_by/);
+    expect(m!.downSql).toMatch(/DROP COLUMN IF EXISTS occurrence\b/);
   });
 
   it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {
