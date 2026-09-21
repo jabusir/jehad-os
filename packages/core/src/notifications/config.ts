@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { loadPolicyFile } from "../policy/ceiling.js";
 
 export const NOTIFICATION_KINDS = [
-  "brief", "escalation", "custom", "calendar-change", "reply",
+  "brief", "escalation", "custom", "calendar-change", "reply", "calibration",
 ] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 

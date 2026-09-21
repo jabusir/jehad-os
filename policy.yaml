@@ -74,3 +74,12 @@ gateway:
 # touching the Google credential. Absent section = same fail-safe defaults.
 sensors:
   gmail: { enabled: true, poll_cron: "*/5 * * *", bootstrap_window_days: 30, extract_senders: [billing@*, statements@*, *@stripe.com], max_messages_per_poll: 40, max_candidates_per_day: 20 }
+
+# calibration — the daily accuracy check (Lane C1). One 1-5 rating per
+# owner-local day plus optional "what did I miss" verdicts; weekly rollup.
+# Ships DISABLED with no principals (fail-safe): nothing runs until the
+# owner ratifies. Prompt copy lives in code, not policy. Delivery rides the
+# notifications queue — "calibration" joins autoApproveKinds when the owner
+# enables the section (same self-authored-structured-output class as briefs).
+calibration:
+  daily: { enabled: false, principals: [], prompt_local_hour: 19 }

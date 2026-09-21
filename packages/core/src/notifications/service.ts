@@ -28,7 +28,7 @@ export const NOTIFICATION_STATUSES = [
 ] as const;
 export type NotificationStatus = (typeof NOTIFICATION_STATUSES)[number];
 
-export const NOTIFICATION_SOURCE_TYPES = ["escalation", "brief", "run", "calendar"] as const;
+export const NOTIFICATION_SOURCE_TYPES = ["escalation", "brief", "run", "calendar", "calibration"] as const;
 export type NotificationSourceType = (typeof NOTIFICATION_SOURCE_TYPES)[number];
 
 export interface NotificationRow {
@@ -321,11 +321,11 @@ export async function createNotification(
 ): Promise<NotificationRow> {
   if (!isNotificationKind(input.kind)) {
     throw new NotificationInputError(
-      `kind must be one of brief|escalation|custom|calendar-change|reply`,
+      `kind must be one of brief|escalation|custom|calendar-change|reply|calibration`,
     );
   }
   if (!isSourceType(input.sourceType)) {
-    throw new NotificationInputError(`sourceType must be one of escalation|brief|run|calendar`);
+    throw new NotificationInputError(`sourceType must be one of escalation|brief|run|calendar|calibration`);
   }
   if (typeof input.title !== "string" || input.title.trim().length === 0 || input.title.length > 280) {
     throw new NotificationInputError("title must be a non-empty string of at most 280 chars");

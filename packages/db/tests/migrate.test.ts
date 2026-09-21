@@ -21,7 +21,7 @@ const ALL_MIGRATIONS = [
   "000_bootstrap_auth", "001_schema_core", "002_action_transition_guard", "003_evidence_links",
   "004_commitments_domain", "005_commitments_temporal", "006_notifications",
   "007_calendar", "008_feedback", "009_notification_calendar_change", "010_imessage_sensor", "011_imessage_pairing", "012_interaction_threads", "013_review_refs", "014_confirm_token_unique",
-  "015_gmail_sensor",
+  "015_gmail_sensor", "016_calibration",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -216,6 +216,47 @@ describe("migration files (fs only)", () => {
     expect(gmail!.downSql).toMatch(/DROP TABLE IF EXISTS gmail_sync_state\b/);
   });
 
+  it("016 creates calibration_items + additive feedback targeting; down reverses", async () => {
+    const migrations = await listMigrations();
+    const cal = migrations.find((m) => m.name === "016_calibration");
+    expect(cal).toBeDefined();
+    expect(cal!.sql).toMatch(/CREATE TABLE calibration_items\b/);
+    for (const column of [
+      "principal_id", "period_date", "surface", "status", "summary",
+      "prompt_sent_at", "rated_at", "rating",
+    ]) {
+      expect(cal!.sql).toMatch(new RegExp(`\\b${column}\\s`));
+    }
+    expect(cal!.sql).toMatch(/CHECK \(status IN \('open', 'superseded'\)\)/);
+    expect(cal!.sql).toMatch(/rating\s+smallint CHECK \(rating BETWEEN 1 AND 5\)/);
+    // One OPEN item per (principal, period, surface) — partial unique.
+    expect(cal!.sql).toMatch(
+      /CREATE UNIQUE INDEX calibration_items_open_unique\s+ON calibration_items \(principal_id, period_date, surface\)\s+WHERE status = 'open'/,
+    );
+    // feedback: item_type CHECK widened ('missed' verdict existed since 008).
+    expect(cal!.sql).toMatch(
+      /CHECK \(item_type IN \('notification', 'attention_item', 'review_item', 'brief_section', 'event', 'calibration'\)\)/,
+    );
+    expect(cal!.sql).toMatch(
+      /CHECK \(target_type IN \('whole_day', 'specific_item', 'source', 'inference', 'brief', 'attention_item'\)\)/,
+    );
+    expect(cal!.sql).toMatch(/ADD COLUMN calibration_item_id uuid REFERENCES calibration_items\(id\)/);
+    // All feedback columns additive-nullable (no NOT NULL added).
+    expect(cal!.sql).not.toMatch(/ADD COLUMN \w+ text NOT NULL/);
+    // Notification vocabulary widened (009 precedent).
+    expect(cal!.sql).toMatch(
+      /CHECK \(kind IN \('brief', 'escalation', 'custom', 'calendar-change', 'reply', 'calibration'\)\)/,
+    );
+    // Down: purge widened rows BEFORE narrowing; drop columns + table.
+    expect(cal!.downSql).toMatch(/DELETE FROM notifications WHERE kind = 'calibration'/);
+    expect(cal!.downSql).toMatch(/DELETE FROM feedback WHERE item_type = 'calibration'/);
+    expect(cal!.downSql).toMatch(/DROP COLUMN IF EXISTS calibration_item_id/);
+    expect(cal!.downSql).toMatch(
+      /CHECK \(item_type IN \('notification', 'attention_item', 'review_item', 'brief_section', 'event'\)\)/,
+    );
+    expect(cal!.downSql).toMatch(/DROP TABLE IF EXISTS calibration_items\b/);
+  });
+
   it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {
     const migrations = await listMigrations();
     const guard = migrations.find((m) => m.name === "002_action_transition_guard");
@@ -278,6 +319,7 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate up/down (integration)", () => {
     expect(afterUp.has("imessage_sensor_state")).toBe(true);
     expect(afterUp.has("review_refs")).toBe(true);
     expect(afterUp.has("gmail_sync_state")).toBe(true);
+    expect(afterUp.has("calibration_items")).toBe(true);
 
     const records = await pool.query<{ name: string }>("SELECT name FROM schema_migrations");
     expect(records.rows.map((r) => r.name)).toEqual([...ALL_MIGRATIONS]);
@@ -289,7 +331,7 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate up/down (integration)", () => {
     for (const table of [
       ...TABLES_001, "principals",
       "imessage_transport_events", "sent_message_fingerprints", "imessage_sensor_state",
-      "review_refs", "gmail_sync_state",
+      "review_refs", "gmail_sync_state", "calibration_items",
     ]) {
       expect(afterDown.has(table)).toBe(false);
     }

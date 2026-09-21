@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   ACTION_TYPES,
   AUTONOMY_LEVELS,
+  DEFAULT_CALIBRATION_POLICY,
   DEFAULT_GMAIL_SENSOR_POLICY,
+  calibrationPolicyOf,
   decideAutonomy,
   gmailSensorPolicyOf,
   loadPolicyFile,
@@ -484,5 +486,64 @@ describe("policy sensors.gmail (GMAIL §5/§10.3)", () => {
     expect(fromDisk.sensors?.gmail).toBeDefined();
     expect(fromDisk.sensors?.gmail?.enabled).toBe(true); // owner ratified + consented 2026-09-20
     expect(gmailSensorPolicyOf(fromDisk).maxCandidatesPerDay).toBe(20);
+  });
+});
+
+describe("policy calibration (Lane C1 — the daily accuracy check)", () => {
+  const ENTRY = "  daily: { enabled: true, principals: [josctl], prompt_local_hour: 19 }";
+
+  it("parses the strict ordered shape", () => {
+    const policy = parsePolicyV1(`${VALID}\ncalibration:\n${ENTRY}\n`);
+    expect(policy.calibration).toEqual({
+      enabled: true,
+      principals: ["josctl"],
+      promptLocalHour: 19,
+    });
+  });
+
+  it("hour 0 is legal; hour 24 is not", () => {
+    expect(
+      parsePolicyV1(`${VALID}\ncalibration:\n  daily: { enabled: false, principals: [], prompt_local_hour: 0 }\n`).calibration,
+    ).toEqual({ enabled: false, principals: [], promptLocalHour: 0 });
+    expect(() =>
+      parsePolicyV1(`${VALID}\ncalibration:\n  daily: { enabled: true, principals: [josctl], prompt_local_hour: 24 }\n`),
+    ).toThrow(/0-23/);
+  });
+
+  it("absent section → fail-safe defaults (disabled, no principals)", () => {
+    const policy = parsePolicyV1(VALID);
+    expect(policy.calibration).toBeUndefined();
+    expect(calibrationPolicyOf(policy)).toEqual(DEFAULT_CALIBRATION_POLICY);
+    expect(DEFAULT_CALIBRATION_POLICY.enabled).toBe(false);
+    expect(DEFAULT_CALIBRATION_POLICY.principals).toEqual([]);
+  });
+
+  it("malformed entries fail closed (shape, order, unknown keys, duplicates)", () => {
+    const cases = [
+      "  daily: { enabled: true }",
+      "  daily: { principals: [josctl], enabled: true, prompt_local_hour: 19 }",
+      "  daily: { enabled: maybe, principals: [josctl], prompt_local_hour: 19 }",
+      "  daily: { enabled: true, principals: [josctl], prompt_local_hour: 19, extra: 1 }",
+      "  daily: { enabled: true, principals: [josctl], prompt_local_hour: -1 }",
+      "  daily: { enabled: true, principals: [josctl], prompt_local_hour: 1.5 }",
+      "  daily: just a string",
+      "  weekly: { enabled: true, principals: [], prompt_local_hour: 19 }",
+    ];
+    for (const entry of cases) {
+      expect(() => parsePolicyV1(`${VALID}\ncalibration:\n${entry}\n`), entry).toThrow();
+    }
+    expect(() => parsePolicyV1(`${VALID}\ncalibration:\n${ENTRY}\n${ENTRY}\n`)).toThrow(/duplicate calibration.daily/);
+    expect(() => parsePolicyV1(`${VALID}\ncalibration:\ncalibration:\n${ENTRY}\n`)).toThrow(/duplicate calibration/);
+  });
+
+  it("duplicate principals collapse; the repo-root policy.yaml parses with the disabled section", async () => {
+    const policy = parsePolicyV1(
+      `${VALID}\ncalibration:\n  daily: { enabled: true, principals: [josctl, josctl], prompt_local_hour: 8 }\n`,
+    );
+    expect(policy.calibration?.principals).toEqual(["josctl"]);
+
+    const fromDisk = await loadPolicyFile(new URL("../../../../policy.yaml", import.meta.url));
+    expect(fromDisk.calibration).toEqual({ enabled: false, principals: [], promptLocalHour: 19 });
+    expect(calibrationPolicyOf(fromDisk).enabled).toBe(false); // ships fail-safe
   });
 });

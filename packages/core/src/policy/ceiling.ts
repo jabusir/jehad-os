@@ -39,6 +39,12 @@ export interface PolicyV1 {
    * until the owner ratifies the section).
    */
   sensors?: SensorsPolicyV1;
+  /**
+   * Calibration domain config (Lane C1 — the daily accuracy check). Absent
+   * → module default with enabled:false + no principals (fail-safe: no
+   * daily check until the owner ratifies the section).
+   */
+  calibration?: CalibrationPolicy;
 }
 
 /**
@@ -83,6 +89,54 @@ export const DEFAULT_GMAIL_SENSOR_POLICY: GmailSensorPolicy = {
   maxMessagesPerPoll: 50,
   maxCandidatesPerDay: 20,
 };
+
+/**
+ * The `calibration:` section (Lane C1): `{ enabled: <bool>, principals:
+ * [name, …], prompt_local_hour: <int 0-23> }` — whether the daily accuracy
+ * check runs, for whom, and at what owner-local hour the prompt is sent.
+ * Copy (prompt text) lives in code, deliberately not in policy. Defaults
+ * are fail-safe: disabled, no principals (the kill switch holds until the
+ * owner ratifies the section).
+ */
+export interface CalibrationPolicy {
+  readonly enabled: boolean;
+  readonly principals: readonly string[];
+  /** Owner-local hour (0-23, BRIEF_TIMEZONE) the daily prompt is sent. */
+  readonly promptLocalHour: number;
+}
+
+/** Fail-safe defaults — disabled + empty principals. */
+export const DEFAULT_CALIBRATION_POLICY: CalibrationPolicy = {
+  enabled: false,
+  principals: [],
+  promptLocalHour: 19,
+};
+
+/**
+ * `calibration.daily` flow-mapping parse — exactly
+ * `{ enabled: <bool>, principals: [name, …], prompt_local_hour: <int> }`
+ * in that key order (strict shape; the gateway.capture pattern). The hour
+ * must land in 0-23; anything else throws (fail closed).
+ */
+export function parseCalibrationEntry(value: string): CalibrationPolicy {
+  const m = value.match(
+    /^\{\s*enabled:\s*(true|false),\s*principals:\s*\[([A-Za-z0-9_,\s]*)\],\s*prompt_local_hour:\s*(\d+)\s*\}$/,
+  );
+  if (m === null) {
+    throw new Error(
+      `policy: calibration.daily must be "{ enabled: <bool>, principals: [name, …], prompt_local_hour: <int 0-23> }" (got '${value}')`,
+    );
+  }
+  const promptLocalHour = Number(m[3]);
+  if (promptLocalHour > 23) {
+    throw new Error("policy: calibration.daily prompt_local_hour must be an integer 0-23");
+  }
+  return {
+    enabled: m[1] === "true",
+    principals: [...new Set((m[2] ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0))],
+    promptLocalHour,
+  };
+}
 
 /** One extraction-sender glob: exactly one `@`, structured chars, `*` wild. */
 const EXTRACT_SENDER_RE = /^[A-Za-z0-9_.%+-]*\*[A-Za-z0-9_.%+-]*@[A-Za-z0-9.*-]+|[A-Za-z0-9_.%+-]+@[A-Za-z0-9.*-]*\*[A-Za-z0-9.*-]*$/;
@@ -507,11 +561,12 @@ function stripComment(line: string): string {
 export function parsePolicyV1(text: string): PolicyV1 {
   const ceiling: Partial<Record<ActionType, AutonomyLevel>> = {};
   let version: number | undefined;
-  let section: "autonomy_ceiling" | "notifications" | "gateway" | "sensors" | null = null;
+  let section: "autonomy_ceiling" | "notifications" | "gateway" | "sensors" | "calibration" | null = null;
   let sawCeiling = false;
   let sawNotifications = false;
   let sawGateway = false;
   let sawSensors = false;
+  let sawCalibration = false;
   let inGatewayPrincipals = false;
   const notificationEntries: Array<{ key: string; value: string }> = [];
   const gatewayPrincipals: Record<string, GatewayPrincipalPolicy> = {};
@@ -520,6 +575,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const gatewayActions: { value: GatewayActionsPolicy | null } = { value: null };
   const gatewayPasses: { value: GatewayPassesPolicy | null } = { value: null };
   const sensorsGmail: { value: GmailSensorPolicy | null } = { value: null };
+  const calibrationDaily: { value: CalibrationPolicy | null } = { value: null };
 
   for (const rawLine of text.split("\n")) {
     const line = stripComment(rawLine);
@@ -557,6 +613,11 @@ export function parsePolicyV1(text: string): PolicyV1 {
         if (sawSensors) throw new Error("policy: duplicate sensors key");
         sawSensors = true;
         section = "sensors";
+      } else if (key === "calibration") {
+        if (value !== "") throw new Error("policy: calibration must be a mapping");
+        if (sawCalibration) throw new Error("policy: duplicate calibration key");
+        sawCalibration = true;
+        section = "calibration";
       } else {
         throw new Error(`policy: unknown top-level key '${key}'`);
       }
@@ -577,6 +638,14 @@ export function parsePolicyV1(text: string): PolicyV1 {
         continue;
       }
       throw new Error(`policy: unknown sensors key '${key}'`);
+    }
+    if (section === "calibration") {
+      if (key === "daily") {
+        if (calibrationDaily.value !== null) throw new Error("policy: duplicate calibration.daily key");
+        calibrationDaily.value = parseCalibrationEntry(value);
+        continue;
+      }
+      throw new Error(`policy: unknown calibration key '${key}'`);
     }
     if (section === "gateway") {
       if (inGatewayPrincipals) {
@@ -645,6 +714,9 @@ export function parsePolicyV1(text: string): PolicyV1 {
   if (sawSensors && sensorsGmail.value !== null) {
     policy.sensors = { gmail: sensorsGmail.value };
   }
+  if (sawCalibration && calibrationDaily.value !== null) {
+    policy.calibration = calibrationDaily.value;
+  }
   return policy;
 }
 
@@ -659,6 +731,15 @@ export async function loadPolicyFile(path: string | URL): Promise<PolicyV1> {
  */
 export function gmailSensorPolicyOf(policy: PolicyV1): GmailSensorPolicy {
   return policy.sensors?.gmail ?? DEFAULT_GMAIL_SENSOR_POLICY;
+}
+
+/**
+ * The effective calibration policy: the parsed section when present, else
+ * the fail-safe defaults (enabled:false, no principals — the daily check
+ * never runs until the owner ratifies the section).
+ */
+export function calibrationPolicyOf(policy: PolicyV1): CalibrationPolicy {
+  return policy.calibration ?? DEFAULT_CALIBRATION_POLICY;
 }
 
 /** The configured ceiling for an action type. Unknown types throw. */
