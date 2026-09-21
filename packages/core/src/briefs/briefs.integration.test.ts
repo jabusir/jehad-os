@@ -2,8 +2,10 @@
 // an isolated migrated database seeded with the M6A fixture world (including
 // the review §25 leverage graph: Decision A blocks B/C/D + depth chain,
 // overdue/due-soon i_owe variants, blocked/stalled sets) plus fresh
-// "today" rows and open escalations. Needs PostgreSQL 16 — skipped unless
-// TEST_DATABASE_URL is set.
+// "today" rows and open escalations. Also W5(d): the evening close's
+// plan-divergence section after real calendar churn (sync pass 1 plans the
+// day, pass 2 moves + cancels same-day). Needs PostgreSQL 16 — skipped
+// unless TEST_DATABASE_URL is set.
 
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -257,5 +259,54 @@ describe.skipIf(!TEST_DATABASE_URL)("briefs (integration)", () => {
     expect(outcome).toMatchObject({ kind: "close", suppressed: true, content: null, artifactId: null });
     const count = await emptyDb.pool.query(`SELECT count(*)::int AS n FROM artifacts`);
     expect(count.rows[0].n).toBe(0);
+  });
+
+  it("W5(d): same-day calendar churn renders the plan-divergence section (and un-suppresses a quiet close)", async () => {
+    // Own world: plan the day at 8am PDT, churn it at 11am PDT, close at 8:30pm PDT.
+    const churnDb = await createIsolatedTestDb(TEST_DATABASE_URL!, "w5cchurn");
+    try {
+      await migrateUp(churnDb.pool);
+      await seedDomains(churnDb.pool);
+      const EVENING = new Date("2026-09-18T03:30:00.000Z"); // 8:30 PM PDT Sep 17
+      const T1 = new Date("2026-09-17T15:00:00.000Z"); // 8 AM PDT
+      const T2 = new Date("2026-09-17T18:00:00.000Z"); // 11 AM PDT
+
+      const planned = [
+        { id: "churn-a", iCalUID: "churn-a@google.com", status: "confirmed", summary: "Henna sync",
+          start: { dateTime: "2026-09-17T23:00:00Z", timeZone: "UTC" }, end: { dateTime: "2026-09-18T00:00:00Z", timeZone: "UTC" } },
+        { id: "churn-b", iCalUID: "churn-b@google.com", status: "confirmed", summary: "Venue tour",
+          start: { dateTime: "2026-09-18T01:00:00Z", timeZone: "UTC" }, end: { dateTime: "2026-09-18T02:00:00Z", timeZone: "UTC" } },
+        { id: "churn-c", iCalUID: "churn-c@google.com", status: "confirmed", summary: "Gym block",
+          start: { dateTime: "2026-09-18T00:00:00Z", timeZone: "UTC" }, end: { dateTime: "2026-09-18T01:00:00Z", timeZone: "UTC" } },
+      ].map((e) => ({ ...e, updated: T1.toISOString() }));
+      const source = (events: typeof planned, token: string): CalendarSourcePort => ({
+        id: "adapter:google-calendar",
+        calendarId: "churn-cal",
+        listEvents: async () => ({ events, nextPageToken: null, nextSyncToken: token }),
+      });
+      // Pass 1: the day is planned (created observations — not churn).
+      await syncCalendar(churnDb.pool, source(planned, "t1"), { now: () => T1 });
+
+      // Pass 2: Henna sync moves 4→5:30 PM; Venue tour cancels; Gym unchanged.
+      const churned = planned.map((e) => ({ ...e, updated: T2.toISOString() }));
+      churned[0] = { ...churned[0]!, start: { dateTime: "2026-09-18T00:30:00Z", timeZone: "UTC" }, end: { dateTime: "2026-09-18T01:30:00Z", timeZone: "UTC" } };
+      churned[1] = { ...churned[1]!, status: "cancelled" };
+      await syncCalendar(churnDb.pool, source(churned, "t2"), { now: () => T2 });
+
+      const outcome = await renderEveningClose(churnDb.pool, { now: () => EVENING });
+      expect(outcome.suppressed).toBe(false);
+      const content = outcome.content!;
+      expect(content).toContain("Plan churn");
+      expect(content).toContain(
+        "- 2 of 3 blocks moved or cancelled same-day. That's plan divergence — what actually happened is unverified.",
+      );
+      expect(content).toContain("- Henna sync — moved");
+      expect(content).toContain("- Venue tour — cancelled");
+      // Plan churn only — never a claim about what actually happened.
+      expect(content).not.toContain("You missed");
+      expect(content).not.toContain("attended");
+    } finally {
+      await dropIsolatedTestDb(TEST_DATABASE_URL!, churnDb);
+    }
   });
 });

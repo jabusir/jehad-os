@@ -16,6 +16,7 @@ import {
   type MorningBriefData,
 } from "./data.js";
 import { renderEveningCloseText, renderMorningBriefText } from "./render.js";
+import type { DivergenceResult } from "./divergence.js";
 
 const NOW = "2026-09-17T12:00:00.000Z";
 const SINCE = "2026-09-16T20:00:00.000Z";
@@ -302,6 +303,7 @@ const EVENING_FULL: EveningCloseData = {
   stalled: [MORNING_FULL.stalled[0]!],
   newBlockedEdgeIds: ["r-old"],
   unlock: MORNING_FULL.unlock,
+  divergence: null,
 };
 
 const EVENING_EMPTY: EveningCloseData = {
@@ -314,6 +316,18 @@ const EVENING_EMPTY: EveningCloseData = {
   stalled: [],
   newBlockedEdgeIds: [],
   unlock: null,
+  divergence: null,
+};
+
+/** W5(d): 2 of 3 blocks churned same-day (plan divergence — unverified). */
+const DIVERGENCE: DivergenceResult = {
+  day: "2026-09-17",
+  churnedCount: 2,
+  plannedCount: 3,
+  items: [
+    { googleEventId: "evt-1", title: "Henna sync", changeKind: "moved" },
+    { googleEventId: "evt-2", title: "Venue tour", changeKind: "cancelled" },
+  ],
 };
 
 describe("renderMorningBriefText (golden)", () => {
@@ -441,6 +455,28 @@ Still waiting: 1
 - Vendor owes the audit report — due 2026-09-27T12:00:00.000Z (owes_me Vendor Ltd)
 `);
   });
+
+  it("W5(d): same-day plan churn renders as its own honesty-pinned last section", () => {
+    expect(
+      renderEveningCloseText({
+        ...EVENING_EMPTY,
+        stillWaiting: [],
+        divergence: DIVERGENCE,
+      }),
+    ).toBe(`Evening close — Thu, Sep 17
+
+Plan churn
+- 2 of 3 blocks moved or cancelled same-day. That's plan divergence — what actually happened is unverified.
+- Henna sync — moved
+- Venue tour — cancelled
+`);
+  });
+
+  it("W5(d): quiet day renders no plan-churn section (divergence null)", () => {
+    const content = renderEveningCloseText(EVENING_EMPTY);
+    expect(content).not.toContain("Plan churn");
+    expect(content).not.toContain("unverified");
+  });
 });
 
 describe("suppression predicates (§31 nothing-meaningful-changed)", () => {
@@ -472,6 +508,9 @@ describe("suppression predicates (§31 nothing-meaningful-changed)", () => {
     expect(isEveningCloseMeaningful({ ...EVENING_EMPTY, blocked: [MORNING_FULL.blocked[0]!] })).toBe(true);
     expect(isEveningCloseMeaningful({ ...EVENING_EMPTY, stalled: [MORNING_FULL.stalled[0]!] })).toBe(true);
     expect(isEveningCloseMeaningful({ ...EVENING_EMPTY, unlock: MORNING_FULL.unlock })).toBe(true);
+    // W5(d): same-day plan churn alone makes the close meaningful — churn
+    // is real attention about the day (honesty-pinned as plan divergence).
+    expect(isEveningCloseMeaningful({ ...EVENING_EMPTY, stillWaiting: [], divergence: DIVERGENCE })).toBe(true);
 
     // A calm, future-dated wait alone stays suppressed.
     expect(isEveningCloseMeaningful({ ...EVENING_EMPTY, stillWaiting: EVENING_EMPTY.stillWaiting })).toBe(false);

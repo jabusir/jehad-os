@@ -8,6 +8,7 @@ import type { BlockedItem, StalledItem } from "../queries/blocked.js";
 import { BRIEF_TIMEZONE } from "./timezone.js";
 import type { TodayScheduleItem } from "../calendar/projection.js";
 import type { EveningCloseData, MorningBriefData } from "./data.js";
+import { renderDivergenceBlock } from "./divergence.js";
 
 function blank(): string {
   return "";
@@ -283,6 +284,9 @@ export function renderEveningCloseText(data: EveningCloseData): string {
           `- ${data.unlock.question} (unblocks ${data.unlock.transitiveDownstreamCount} downstream items)`,
         ]
       : [],
+    // W5(d): plan churn renders LAST as its own honesty-pinned section;
+    // suppressed entirely on quiet days (divergence === null).
+    data.divergence !== null ? renderDivergenceBlock(data.divergence) : [],
   ].filter((section) => section.length > 0);
 
   const quiet = sections.length === 0;

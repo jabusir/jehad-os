@@ -11,6 +11,7 @@ export * from "./review/index.js";
 export * from "./escalations/index.js";
 export * from "./metrics/index.js";
 export * from "./queries/index.js";
+export * from "./commitments/index.js";
 export * from "./briefs/index.js";
 export * from "./notifications/index.js";
 export * from "./feedback/index.js";

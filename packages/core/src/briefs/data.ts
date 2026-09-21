@@ -31,6 +31,7 @@ import {
   localDayBounds,
   type TodayScheduleItem,
 } from "../calendar/projection.js";
+import { planDivergence, type DivergenceResult } from "./divergence.js";
 import {
   DEFAULT_REVIEW_POLICY,
   refsForBrief,
@@ -116,6 +117,12 @@ export interface EveningCloseData {
   /** blocked_by edge ids created/updated inside the window → "new" markers. */
   readonly newBlockedEdgeIds: readonly string[];
   readonly unlock: LeverageDecision | null;
+  /**
+   * W5(d) plan divergence: same-day calendar churn (moved/cancelled
+   * within the day), null on quiet days (§31 suppression). Plan churn
+   * only — never a claim about what actually happened.
+   */
+  readonly divergence: DivergenceResult | null;
 }
 
 const OPEN_ESCALATIONS_SQL = `
@@ -280,6 +287,12 @@ export async function collectEveningCloseData(
   const { now, since } = resolveWindow(opts);
   const nowFn = (): Date => now;
 
+  // W5(d): same-day plan churn — mutations observed inside the civil day
+  // being closed (window starts at the owner-local day start, not the
+  // 16h delta window: a 6am change to a 3pm block is same-day churn).
+  const { dayStart } = localDayBounds(now, BRIEF_TIMEZONE);
+  const divergence = await planDivergence(db, { now, windowStart: dayStart });
+
   const [changed, waiting, blockedResult, ranked] = await Promise.all([
     whatChanged(db, { since, domainId: BRIEF_DOMAIN_KEY }),
     whatAmIWaitingFor(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
@@ -302,6 +315,7 @@ export async function collectEveningCloseData(
       .filter((r) => r.relation === "blocked_by")
       .map((r) => r.id),
     unlock: pickUnlock(ranked),
+    divergence,
   };
 }
 
@@ -339,9 +353,11 @@ export function isMorningBriefMeaningful(data: MorningBriefData): boolean {
 /**
  * Evening renders iff the day's delta is non-empty OR a standing risk needs
  * attention: a decision made, a commitment changed, something completed, an
- * OVERDUE external wait, anything blocked/stalled, or a real unlock for
- * tomorrow. Calm future-dated waits alone do not make a close meaningful
- * (§31: no summary when nothing meaningful changed).
+ * OVERDUE external wait, anything blocked/stalled, a real unlock for
+ * tomorrow, or same-day plan churn (W5(d) — churn is real attention about
+ * the day, honesty-pinned as plan divergence). Calm future-dated waits
+ * alone do not make a close meaningful (§31: no summary when nothing
+ * meaningful changed).
  */
 export function isEveningCloseMeaningful(data: EveningCloseData): boolean {
   return (
@@ -351,6 +367,7 @@ export function isEveningCloseMeaningful(data: EveningCloseData): boolean {
     data.stillWaiting.some((c) => c.overdue) ||
     data.blocked.length > 0 ||
     data.stalled.length > 0 ||
-    data.unlock !== null
+    data.unlock !== null ||
+    data.divergence !== null
   );
 }
