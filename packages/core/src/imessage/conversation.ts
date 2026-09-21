@@ -1084,7 +1084,7 @@ async function converseTurn(
             (b): TurnReferentArtifact => ({
               kind: "read",
               ref: b.tool,
-              label: `${b.tool}: ${b.serialized.slice(0, 120)}`,
+              label: `${b.tool}: ${(b.serialized ?? JSON.stringify(b.data)).slice(0, 120)}`,
             }),
           ),
           stance: { kind: "answer", summary: replyText.slice(0, 400) },
