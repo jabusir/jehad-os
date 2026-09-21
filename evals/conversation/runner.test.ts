@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { loadScenarioFile, parseScenarioFile } from "./scenarios.js";
 import type { Scenario } from "./scenarios.js";
-import { checkExpectations, evaluatePins, runConversationEval } from "./runner.js";
+import {
+  checkExpectations,
+  evaluatePins,
+  passKindOf,
+  runConversationEval,
+  scriptedDispatch,
+} from "./runner.js";
 import type { TurnObservation } from "./runner.js";
+import type { ModelRequest } from "@jehad/adapters";
 import { probeCoreCapabilities } from "./run.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -19,10 +26,52 @@ function turn(overrides: Partial<TurnObservation> = {}): TurnObservation {
     reply: "ok",
     routedTools: [],
     passes: ["route", "answer"],
+    interpretation: { audits: 0, payloads: [] },
     scriptIssues: [],
     ...overrides,
   };
 }
+
+const INTERPRET_PROMPT =
+  "You are the turn interpreter for a personal assistant message gateway. Extract typed proposals.";
+const ROUTE_PROMPT =
+  "You are the query router for a personal assistant message gateway. Classify the user's message.";
+const ANSWER_PROMPT = "You are a helpful, concise assistant chatting over iMessage.";
+
+const req = (prompt: string): ModelRequest => ({ prompt }) as ModelRequest;
+
+describe("passKindOf (W6(a) interpret pass marker)", () => {
+  it("recognizes the interpret prompt marker and keeps route/answer detection intact", () => {
+    expect(passKindOf(INTERPRET_PROMPT)).toBe("interpret");
+    expect(passKindOf(ROUTE_PROMPT)).toBe("route");
+    expect(passKindOf(ANSWER_PROMPT)).toBe("answer");
+  });
+
+  it("interpret wins when a prompt carries both markers (route-class pass)", () => {
+    expect(passKindOf(`${INTERPRET_PROMPT} ${ROUTE_PROMPT}`)).toBe("interpret");
+  });
+});
+
+describe("scriptedDispatch (interpret scripting)", () => {
+  it("dispatches interpret → route → answer in scripted order with no mismatches", () => {
+    const dispatch = scriptedDispatch([
+      { pass: "interpret", output: '{"proposals":[]}' },
+      { pass: "route", output: '{"tool":"none"}' },
+      { pass: "answer", output: "ok" },
+    ]);
+    expect(dispatch.responder(req(INTERPRET_PROMPT))).toEqual({ text: '{"proposals":[]}' });
+    expect(dispatch.responder(req(ROUTE_PROMPT))).toEqual({ text: '{"tool":"none"}' });
+    expect(dispatch.responder(req(ANSWER_PROMPT))).toEqual({ text: "ok" });
+    expect(dispatch.mismatches()).toEqual([]);
+    expect(dispatch.consumed()).toBe(3);
+  });
+
+  it("records a pass mismatch when the dispatched kind differs from the script", () => {
+    const dispatch = scriptedDispatch([{ pass: "interpret", output: '{"proposals":[]}' }]);
+    expect(dispatch.responder(req(ANSWER_PROMPT))).toEqual({ text: '{"proposals":[]}' });
+    expect(dispatch.mismatches()).toEqual(["pass mismatch — scripted interpret, dispatched answer"]);
+  });
+});
 
 describe("checkExpectations (pure)", () => {
   it("passes when every expected tool was routed", () => {
@@ -54,6 +103,33 @@ describe("checkExpectations (pure)", () => {
   it("fails a final turn that produced no reply", () => {
     const failures = checkExpectations({ routedNone: true }, turn({ replied: false, replyReason: "model-error", reply: null }));
     expect(failures).toEqual(["final turn produced no reply (model-error)"]);
+  });
+
+  it("no_persistence_claim_without_write: a claim fails without write evidence and passes with it", () => {
+    const expectations = { noPersistenceClaimWithoutWrite: true };
+    const hallucinating = turn({ reply: "Got it — I've noted all 8 tasks." });
+    expect(checkExpectations(expectations, hallucinating)).toEqual([
+      'persistence claim "I\'ve noted" without a durable write (no db write pin passed)',
+    ]);
+    expect(checkExpectations(expectations, hallucinating, { writeEvidence: true })).toEqual([]);
+  });
+
+  it("no_persistence_claim_without_write: honest no-write wording passes with no write evidence", () => {
+    const expectations = { noPersistenceClaimWithoutWrite: true };
+    const honest = turn({ reply: "I see it in our conversation, but I'm not tracking it yet." });
+    expect(checkExpectations(expectations, honest)).toEqual([]);
+    expect(checkExpectations(expectations, honest, { writeEvidence: false })).toEqual([]);
+  });
+
+  it("interpret_audits pins the exact interpret audit row count on the final turn", () => {
+    const observed = turn({ interpretation: { audits: 1, payloads: [{ proposals: [] }] } });
+    expect(checkExpectations({ interpretAudits: 1 }, observed)).toEqual([]);
+    expect(checkExpectations({ interpretAudits: 2 }, observed)).toEqual([
+      "expected 2 interpret audit row(s) on the final turn, got 1",
+    ]);
+    expect(checkExpectations({ interpretAudits: 1 }, turn())).toEqual([
+      "expected 1 interpret audit row(s) on the final turn, got 0",
+    ]);
   });
 });
 
@@ -226,5 +302,77 @@ describe.skipIf(!TEST_DATABASE_URL)("conversation eval runner (integration, herm
     const continuity = byId.get("referent-continuity-01")!;
     expect(continuity.turns[1]!.routedTools).toEqual(["calendar.day"]);
     expect(continuity.turns[1]!.reply).toContain("4–5 PM");
+  });
+
+  it("no_persistence_claim_without_write: synthetic hallucination scenario fails end-to-end, honest twin passes", async () => {
+    const base = (id: string, reply: string, expectations: Record<string, unknown>) =>
+      scenario({
+        id,
+        description: "synthetic persistence-truth scenario",
+        principal: "jehad",
+        turns: [
+          {
+            user: "adding a task — build the console table",
+            modelScript: [
+              { pass: "route", output: '{"tool":"none"}' },
+              { pass: "answer", output: reply },
+            ],
+          },
+        ],
+        expectations,
+      });
+    const run = await runConversationEval({
+      databaseUrl: TEST_DATABASE_URL!,
+      dbTag: "conveval6",
+      capabilityProbes: {},
+      scenarios: [
+        base("synthetic-persistence-hallucination-01", "Noted — I've saved that task for you.", {
+          no_persistence_claim_without_write: true,
+        }),
+        base("synthetic-persistence-honest-01", "I see it in our conversation, but I'm not tracking it yet.", {
+          no_persistence_claim_without_write: true,
+        }),
+        base("synthetic-persistence-licensed-01", "I've added it — one commitment now in the world model.", {
+          no_persistence_claim_without_write: true,
+          db_pins: [{ sql: "SELECT 1 FROM interaction_threads WHERE status = 'active'", expect_one: true }],
+        }),
+      ],
+    });
+    expect(run.counts).toEqual({ pass: 2, fail: 1, skip: 0 });
+    const byId = new Map(run.results.map((result) => [result.id, result]));
+    expect(byId.get("synthetic-persistence-hallucination-01")!.failures).toEqual([
+      'persistence claim "I\'ve saved" without a durable write (no db write pin passed)',
+    ]);
+    expect(byId.get("synthetic-persistence-honest-01")!.status).toBe("pass");
+    expect(byId.get("synthetic-persistence-licensed-01")!.status).toBe("pass");
+  });
+
+  it("interpret audit observation is captured (zero rows today) alongside route/answer passes", async () => {
+    const run = await runConversationEval({
+      databaseUrl: TEST_DATABASE_URL!,
+      dbTag: "conveval7",
+      capabilityProbes: {},
+      scenarios: [
+        scenario({
+          id: "synthetic-interpret-observation-01",
+          description: "interpret audit capture",
+          principal: "jehad",
+          turns: [
+            {
+              user: "hello there",
+              modelScript: [
+                { pass: "route", output: '{"tool":"none"}' },
+                { pass: "answer", output: "hi" },
+              ],
+            },
+          ],
+          expectations: { routed_none: true },
+        }),
+      ],
+    });
+    expect(run.counts).toEqual({ pass: 1, fail: 0, skip: 0 });
+    const observed = run.results[0]!.turns[0]!;
+    expect(observed.passes).toEqual(["route", "answer"]);
+    expect(observed.interpretation).toEqual({ audits: 0, payloads: [] });
   });
 });

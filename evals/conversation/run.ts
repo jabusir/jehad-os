@@ -10,6 +10,12 @@ const CAPABILITY_EXPORT_PATTERNS: Readonly<Record<string, RegExp>> = {
   staleness: /staleness|freshness|last[_-]?synced/i,
   "memory.recall": /memory[\s_.-]?recall|recallMemory/i,
   "system.state": /system[\s_.-]?state|collectSystemState/i,
+  // W6(a) Turn Interpreter (R8): matches once core exports the interpreter
+  // (e.g. interpretTurn / TURN_INTERPRETER_*). TRUTHFUL_UX_RULES deliberately
+  // does not match either pattern.
+  turn_interpreter: /turn[\s_.-]?interpreter|interpretTurn/i,
+  // W6(b) live self-model (R9): matches once system.self_brief lands.
+  self_brief: /self[\s_.-]?brief/i,
 };
 
 export async function probeCoreCapabilities(capabilities: readonly string[]): Promise<Record<string, boolean>> {
