@@ -73,3 +73,29 @@ export {
   renderMemoryRecallBlock,
   splitQueryTerms,
 } from "./memory-recall.js";
+export {
+  freshnessLines,
+  imessageFreshness,
+  sourceFreshness,
+  STALE_AFTER_HOURS,
+} from "./staleness.js";
+
+export type {
+  CollectSystemStateInput,
+  SystemStateCapabilities,
+  SystemStateCost,
+  SystemStateCoverageGap,
+  SystemStateData,
+  SystemStateGrants,
+  SystemStateModelUsage,
+  SystemStateSourceName,
+  SystemStateSourceStatus,
+  SystemStateVersion,
+} from "./system-state.js";
+export {
+  collectSystemState,
+  renderSystemStateText,
+  SYSTEM_STATE_COVERAGE,
+  SYSTEM_STATE_LIMITATIONS,
+  SYSTEM_STATE_LIMITATIONS_VERSION,
+} from "./system-state.js";

@@ -11,6 +11,7 @@ import {
 
 describe("modelBudgetFromEnv", () => {
   it("defaults to the proving-phase envelope ($40 soft / $90 hard)", () => {
+  it("defaults to the ratified V1 proving-phase envelope ($40 soft / $90 hard)", () => {
     expect(modelBudgetFromEnv({})).toEqual({
       softUsd: DEFAULT_MODEL_BUDGET_SOFT_USD,
       hardUsd: DEFAULT_MODEL_BUDGET_HARD_USD,
