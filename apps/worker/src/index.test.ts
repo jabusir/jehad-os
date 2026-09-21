@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createWorkflowWorkerServer,
   gmailSyncWorkflow,
+  calendarOccurrenceSweepWorkflow,
   calibrationWorkflows,
 } from "@jehad/workflow";
 import { main } from "./index.js";
@@ -27,6 +28,15 @@ describe("@jehad/worker", () => {
     const gmail = workflows.filter((workflow) => workflow.name === "gmail-sync");
     expect(gmail).toHaveLength(1);
     expect(gmail[0]).toMatchObject({ kind: "cron", cron: "*/5 * * * *" });
+    const names = workflows.map((workflow) => workflow.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("registers calendar-occurrence-sweep exactly once (W5b hourly sweep)", () => {
+    expect(workflows).toContain(calendarOccurrenceSweepWorkflow);
+    const sweeps = workflows.filter((workflow) => workflow.name === "calendar-occurrence-sweep");
+    expect(sweeps).toHaveLength(1);
+    expect(sweeps[0]).toMatchObject({ kind: "cron", cron: "0 * * * *" });
     const names = workflows.map((workflow) => workflow.name);
     expect(new Set(names).size).toBe(names.length);
   });
