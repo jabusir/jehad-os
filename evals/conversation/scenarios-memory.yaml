@@ -1,0 +1,60 @@
+version: 1
+scenarios:
+  - id: memory-recall-01
+    description: >-
+      Recall relevance — a question about a previously promoted decision routes
+      memory.recall and the reply attributes the memory (source, date,
+      assertion-kind label) instead of presenting it as fresh knowledge.
+      Requires the memory.recall capability (lane W2); skipped until the
+      orchestrator wires it into the read set.
+    principal: jehad
+    requires:
+      - memory.recall
+    turns:
+      - user: What did I decide about the venue for the dinner?
+        modelScript:
+          - pass: route
+            output: '{"tool":"memory.recall"}'
+          - pass: answer
+            output: >-
+              Per your decision on Sep 12 (user_declared): the anniversary
+              dinner venue is The River Café, and you asked to confirm it by
+              Friday. That is from memory, not from today's calendar.
+    expectations:
+      routed_tools:
+        - memory.recall
+      reply_contains:
+        - Sep 12
+        - user_declared
+      db_pins:
+        - sql: SELECT 1 FROM memory_candidates
+          expect_zero: true
+
+  - id: memory-recall-none-01
+    description: >-
+      Must-return-none — a recall-shaped question about something never
+      captured must not fabricate memory: no attribution marker, no invented
+      decision, and no memory writes from the recall path.
+    principal: jehad
+    requires:
+      - memory.recall
+    turns:
+      - user: Remind me what I decided about the Portugal house rental?
+        modelScript:
+          - pass: route
+            output: '{"tool":"none"}'
+          - pass: answer
+            output: >-
+              I don't have anything in memory about a Portugal house rental —
+              nothing was captured or promoted on that topic.
+    expectations:
+      routed_none: true
+      reply_contains:
+        - I don't have anything in memory
+      reply_not_contains:
+        - per your decision
+        - per your commitment
+        - Portugal, you decided
+      db_pins:
+        - sql: SELECT 1 FROM memory_candidates
+          expect_zero: true

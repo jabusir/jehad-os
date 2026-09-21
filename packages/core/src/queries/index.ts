@@ -54,3 +54,22 @@ export type {
   SourceFreshnessOptions,
 } from "./staleness.js";
 export { freshnessLines, sourceFreshness, STALE_AFTER_HOURS } from "./staleness.js";
+
+export type {
+  CommitmentRecallItem,
+  DecisionRecallItem,
+  EvidenceRecallItem,
+  MemoryRecallInput,
+  MemoryRecallItemBase,
+  MemoryRecallKind,
+  MemoryRecallResult,
+  ProcedureRecallItem,
+} from "./memory-recall.js";
+export {
+  MEMORY_RECALL_COVERAGE,
+  recallMemory,
+  rankRecallResults,
+  recallItemDate,
+  renderMemoryRecallBlock,
+  splitQueryTerms,
+} from "./memory-recall.js";

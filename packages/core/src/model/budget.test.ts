@@ -10,13 +10,13 @@ import {
 } from "./budget.js";
 
 describe("modelBudgetFromEnv", () => {
-  it("defaults to the A13 caps ($20 soft / $50 hard)", () => {
+  it("defaults to the proving-phase envelope ($40 soft / $90 hard)", () => {
     expect(modelBudgetFromEnv({})).toEqual({
       softUsd: DEFAULT_MODEL_BUDGET_SOFT_USD,
       hardUsd: DEFAULT_MODEL_BUDGET_HARD_USD,
     });
-    expect(DEFAULT_MODEL_BUDGET_SOFT_USD).toBe(20);
-    expect(DEFAULT_MODEL_BUDGET_HARD_USD).toBe(50);
+    expect(DEFAULT_MODEL_BUDGET_SOFT_USD).toBe(40);
+    expect(DEFAULT_MODEL_BUDGET_HARD_USD).toBe(90);
   });
 
   it("reads MODEL_BUDGET_SOFT_USD / MODEL_BUDGET_HARD_USD overrides", () => {
@@ -27,8 +27,8 @@ describe("modelBudgetFromEnv", () => {
 
   it("blank values fall back to defaults", () => {
     expect(modelBudgetFromEnv({ MODEL_BUDGET_SOFT_USD: "  ", MODEL_BUDGET_HARD_USD: "" })).toEqual({
-      softUsd: 20,
-      hardUsd: 50,
+      softUsd: 40,
+      hardUsd: 90,
     });
   });
 
@@ -39,7 +39,7 @@ describe("modelBudgetFromEnv", () => {
   });
 
   it("rejects soft above hard", () => {
-    expect(() => modelBudgetFromEnv({ MODEL_BUDGET_SOFT_USD: "60" })).toThrow(ModelBudgetConfigError);
+    expect(() => modelBudgetFromEnv({ MODEL_BUDGET_SOFT_USD: "100" })).toThrow(ModelBudgetConfigError);
     expect(() => modelBudgetFromEnv({ MODEL_BUDGET_SOFT_USD: "50", MODEL_BUDGET_HARD_USD: "49" })).toThrow(
       ModelBudgetConfigError,
     );
