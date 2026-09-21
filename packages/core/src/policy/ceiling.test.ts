@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { answerModelForTier } from "../imessage/model-selection.js";
 import {
   ACTION_TYPES,
   AUTONOMY_LEVELS,
@@ -410,15 +411,109 @@ describe("policy gateway.passes (Lane R1 model routing)", () => {
     ).toThrow(/duplicate gateway.passes/);
   });
 
-  it("the repo-root policy.yaml parses with the live per-pass routing pinned", async () => {
+  it("the repo-root policy.yaml parses with the live W3 per-pass routing pinned", async () => {
     const policy = await loadPolicyFile(
       new URL("../../../../policy.yaml", import.meta.url),
     );
     expect(policy.gateway).toBeDefined();
     expect(policy.gateway?.passes).toEqual({
       route: { model: "openai/gpt-4.1-mini" },
+      answer_fast: { model: "openai/gpt-4o-mini" },
+      answer_standard: { model: "anthropic/claude-sonnet-4.5" },
+      answer_fallback: { model: "google/gemini-3.8-flash" },
       route_fallback: { model: "google/gemini-3.8-flash" },
     });
+    // W3 resolution over the LIVE policy: DEEP falls back to answer_standard.
+    expect(answerModelForTier(policy.gateway?.passes ?? null, "openai/gpt-4o-mini", "deep")).toBe(
+      "anthropic/claude-sonnet-4.5",
+    );
+    expect(answerModelForTier(policy.gateway?.passes ?? null, "openai/gpt-4o-mini", "fast")).toBe(
+      "openai/gpt-4o-mini",
+    );
+  });
+});
+
+describe("policy gateway.passes W3 tier keys (answer_fast/standard/deep/fallback)", () => {
+  const BASE = [
+    "version: 1",
+    "autonomy_ceiling:",
+    "  read: autonomous",
+    "  propose: autonomous",
+    "  write_canonical: gated",
+    "  external_side_effect: approval_required",
+    "  money_and_contracts: prohibited",
+  ].join("\n");
+
+  it("parses the full seven-key override set in the legal order", () => {
+    const policy = parsePolicyV1(
+      BASE +
+        "\ngateway:\n  passes: { route: { model: m-r }, answer: { model: m-a }, answer_fast: { model: m-f }, answer_standard: { model: m-s }, answer_deep: { model: m-d }, answer_fallback: { model: m-af }, route_fallback: { model: m-rf } }\n",
+    );
+    expect(policy.gateway?.passes).toEqual({
+      route: { model: "m-r" },
+      answer: { model: "m-a" },
+      answer_fast: { model: "m-f" },
+      answer_standard: { model: "m-s" },
+      answer_deep: { model: "m-d" },
+      answer_fallback: { model: "m-af" },
+      route_fallback: { model: "m-rf" },
+    });
+  });
+
+  it("parses each tier subset on its own and in combinations", () => {
+    expect(
+      parsePolicyV1(BASE + "\ngateway:\n  passes: { answer_fast: { model: m-f } }\n").gateway?.passes,
+    ).toEqual({ answer_fast: { model: "m-f" } });
+    expect(
+      parsePolicyV1(
+        BASE + "\ngateway:\n  passes: { answer_standard: { model: m-s }, answer_deep: { model: m-d } }\n",
+      ).gateway?.passes,
+    ).toEqual({ answer_standard: { model: "m-s" }, answer_deep: { model: "m-d" } });
+    expect(
+      parsePolicyV1(
+        BASE + "\ngateway:\n  passes: { answer_deep: { model: m-d }, answer_fallback: { model: m-af } }\n",
+      ).gateway?.passes,
+    ).toEqual({ answer_deep: { model: "m-d" }, answer_fallback: { model: "m-af" } });
+    expect(
+      parsePolicyV1(
+        BASE +
+          "\ngateway:\n  passes: { answer: { model: m-a }, answer_fast: { model: m-f }, answer_standard: { model: m-s } }\n",
+      ).gateway?.passes,
+    ).toEqual({
+      answer: { model: "m-a" },
+      answer_fast: { model: "m-f" },
+      answer_standard: { model: "m-s" },
+    });
+    expect(
+      parsePolicyV1(
+        BASE + "\ngateway:\n  passes: { answer_fast: { model: m-f }, route_fallback: { model: m-rf } }\n",
+      ).gateway?.passes,
+    ).toEqual({ answer_fast: { model: "m-f" }, route_fallback: { model: "m-rf" } });
+  });
+
+  it("absent tier keys are simply undefined — resolution falls back to the principal model (answerModelForTier)", () => {
+    const passes = parsePolicyV1(BASE + "\ngateway:\n  passes: { route: { model: m-r } }\n").gateway?.passes ?? null;
+    expect(answerModelForTier(passes, "p/model", "fast")).toBe("p/model");
+    expect(answerModelForTier(passes, "p/model", "standard")).toBe("p/model");
+    expect(answerModelForTier(passes, "p/model", "deep")).toBe("p/model");
+    expect(answerModelForTier(null, "p/model", "standard")).toBe("p/model");
+  });
+
+  it("malformed tier entries fail closed (unknown key, order, duplicates, shape)", () => {
+    const cases = [
+      "  passes: { answer_fast: { model: m-f }, answer turbo: { model: m-t } }",
+      "  passes: { answer_standard: { model: m-s }, answer_fast: { model: m-f } }",
+      "  passes: { answer_deep: { model: m-d }, answer_standard: { model: m-s } }",
+      "  passes: { answer_fallback: { model: m-af }, answer_deep: { model: m-d } }",
+      "  passes: { answer_fast: { model: m-f }, answer_fast: { model: m-f2 } }",
+      "  passes: { answer_fast: m-f }",
+      "  passes: { answer_fast: { model: } }",
+      "  passes: { answer_ultra: { model: m-u } }",
+      "  passes: { answerdeep: { model: m-d } }",
+    ];
+    for (const entry of cases) {
+      expect(() => parsePolicyV1(`${BASE}\ngateway:\n${entry}\n`), entry).toThrow();
+    }
   });
 });
 

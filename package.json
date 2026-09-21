@@ -14,6 +14,7 @@
     "eval:live": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/live.ts",
     "eval:compare": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/compare.ts",
     "eval:models": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/model-routing.ts",
+    "eval:answers": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/answer-quality/run.ts",
     "eval:conversation": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/conversation/run.ts",
     "lint": "eslint .",
     "dev": "pnpm run build && pnpm -r --parallel --if-present run dev",
