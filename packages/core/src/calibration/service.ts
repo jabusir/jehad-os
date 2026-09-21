@@ -19,6 +19,7 @@ import { redactContent } from "../imessage/redact.js";
 import { getGmailSyncState } from "../gmail/sync.js";
 import { BRIEF_TIMEZONE } from "../briefs/timezone.js";
 import { localDayBounds } from "../calendar/projection.js";
+import { planDivergence } from "../briefs/divergence.js";
 import { createNotification } from "../notifications/service.js";
 import type { QueryExecutor } from "../queries/executor.js";
 
@@ -104,7 +105,7 @@ async function countRows(db: CalibrationDb, sql: string, values: readonly unknow
  */
 export async function collectCalibrationSummary(
   db: CalibrationDb,
-  opts: { readonly principalId: string; readonly day: string },
+  opts: { readonly principalId: string; readonly day: string; readonly now?: () => Date },
 ): Promise<CalibrationSummary> {
   const { dayStart, dayEnd } = civilDayBounds(opts.day);
   const startIso = dayStart.toISOString();
@@ -122,12 +123,21 @@ export async function collectCalibrationSummary(
         WHERE status <> 'cancelled' AND start_time >= $1::timestamptz AND start_time < $2::timestamptz`,
       [startIso, endIso],
     );
-    if (n > 0) {
-      entries.push({
-        sourceKey: "calendar",
-        label: "Calendar",
-        lines: [`${plural(n, "planned calendar item")}`],
-      });
+    // W5(d) calibration context: same-day plan churn as a count line —
+    // plan churn only, never a claim about the day (divergence wording
+    // rules). Only when the summary is collected for the CURRENT civil
+    // day (the live 20:00 path); later re-collection of a past day skips
+    // it (the churn scan is same-day by definition).
+    const now = opts.now?.() ?? new Date();
+    const divergence =
+      civilDateOf(now) === opts.day ? await planDivergence(db, { now, windowStart: dayStart }) : null;
+    if (n > 0 || divergence !== null) {
+      const lines: string[] = [];
+      if (n > 0) lines.push(`${plural(n, "planned calendar item")}`);
+      if (divergence !== null) {
+        lines.push(`${plural(divergence.churnedCount, "block")} moved or cancelled same-day (plan churn)`);
+      }
+      entries.push({ sourceKey: "calendar", label: "Calendar", lines });
     }
   }
 

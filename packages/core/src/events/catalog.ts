@@ -36,6 +36,11 @@ export const EVENT_CATALOG_V1 = [
   // never body text, snippet, subject, or full addresses). Additive name
   // only (ADR-0006); schemaVersion stays 1.
   "gmail.message.received",
+  // W5(c) additive (commitment verbs): ONE observation type per applied
+  // commitment transition; payload carries ids/statuses/verb + the
+  // REDACTED principal note (capture.recorded precedent for content).
+  // Additive name only (ADR-0006); schemaVersion stays 1.
+  "commitment.transitioned",
 ] as const;
 
 export type EventTypeName = (typeof EVENT_CATALOG_V1)[number];

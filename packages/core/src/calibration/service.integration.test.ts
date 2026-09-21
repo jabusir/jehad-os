@@ -167,6 +167,45 @@ describe.skipIf(!TEST_DATABASE_URL)("calibration service (integration)", () => {
     expect(isQuietCalibrationDay(summary)).toBe(true);
   });
 
+  it("W5(d): same-day plan churn reaches the summary as a count line (same-day collection only)", async () => {
+    // One more in-day event that moved same-day: projection row + the
+    // calendar.event.updated observation (sync payload shape).
+    const sourceEventId = randomUUID();
+    await db.pool.query(
+      `INSERT INTO events (id, type, source, occurred_at, recorded_at, idempotency_key, domain_id, payload, sensitivity, schema_version)
+       VALUES ($1, 'calendar.event.updated', 'adapter:google-calendar', $2::timestamptz, $2::timestamptz, $3, $4::uuid, $5::jsonb, 'normal', 1)`,
+      [
+        sourceEventId,
+        "2026-09-20T18:00:00.000Z",
+        randomUUID(),
+        domainId,
+        JSON.stringify({
+          changeClass: "start_end_changed",
+          googleEventId: "evt-churn",
+          summary: "Churned sync",
+          start: "2026-09-20T22:30:00.000Z",
+          previousStart: "2026-09-20T22:00:00.000Z",
+        }),
+      ],
+    );
+    await db.pool.query(
+      `INSERT INTO calendar_events
+         (google_event_id, google_calendar_id, status, summary, start_time, end_time,
+          timezone, attendees, location, metadata, source_event_id, content_hash)
+       VALUES ('evt-churn', 'primary', 'confirmed', 'Churned sync', $1::timestamptz, $2::timestamptz, NULL, '[]', NULL, '{}', $3::uuid, 'y')`,
+      ["2026-09-20T22:30:00.000Z", "2026-09-20T23:30:00.000Z", sourceEventId],
+    );
+
+    // Same-day collection (the live 20:00 path): churn line present, counts only.
+    const summary = await collectCalibrationSummary(db.pool, { principalId, day: DAY, now: () => T0 });
+    const calendar = summary.entries.find((e) => e.sourceKey === "calendar");
+    expect(calendar?.lines).toEqual([
+      "3 planned calendar items",
+      "1 block moved or cancelled same-day (plan churn)",
+    ]);
+    expect(JSON.stringify(summary)).not.toContain("Churned sync");
+  });
+
   // --------------------------------------------------------------- open item
 
   it("opens idempotently: one open row per (principal, day, surface), one prompt_sent audit, enqueue on notify", async () => {
