@@ -37,10 +37,12 @@
 
 import { Pool } from "pg";
 import {
+  civilDateOf,
+  collectCalibrationSummary,
   createNotification,
-  openDailyCalibration,
+  openCalibrationItem,
   parsePolicyV1,
-  runWeeklyCalibrationRollup,
+  weeklyRollup,
   type SqlExecutor,
 } from "@jehad/core";
 import { BRIEF_LOCAL_TZ, isLocalHour } from "./brief-workflows.js";
@@ -265,7 +267,15 @@ export async function runDailyCalibrationTick(
       outcomes.push({ principal: name, skipped: "principal-not-found" });
       continue;
     }
-    const opened = await openDailyCalibration(db, { principalId, now: now() });
+    // C1 reconciliation: collect the source-aware summary, then open the
+    // period item (idempotent; notify=true enqueues the calibration
+    // notification on the core side).
+    const summary = await collectCalibrationSummary(db, { principalId, day: civilDateOf(now()) });
+    const opened = await openCalibrationItem(
+      db,
+      { principalId, periodDate: civilDateOf(now()), summary, surface: "imessage", now },
+      { notify: true },
+    );
     if (!opened.created) {
       // Idempotent replay (executor retry / double fire): the item already
       // exists, the send is skipped — no duplicate notification.
@@ -273,13 +283,6 @@ export async function runDailyCalibrationTick(
       outcomes.push({ principal: name, created: false });
       continue;
     }
-    await sendCalibrationNotification(db, {
-      title: "Daily calibration",
-      principal: name,
-      itemId: opened.itemId,
-      content: opened.prompt,
-      now,
-    });
     console.log(JSON.stringify({ workflow: "calibration-daily", principal: name, created: true }));
     outcomes.push({ principal: name, created: true, sent: true });
   }
@@ -311,8 +314,9 @@ export async function runWeeklyCalibrationTick(
       outcomes.push({ principal: name, skipped: "principal-not-found" });
       continue;
     }
-    const rollup = await runWeeklyCalibrationRollup(db, { principalId, now: now() });
-    if (rollup.content === null) {
+    const weekStart = civilDateOf(new Date(now().getTime() - 6 * 24 * 60 * 60 * 1000));
+    const rollup = await weeklyRollup(db, { principalId, weekStart });
+    if (rollup.daysRated === 0) {
       console.log(
         JSON.stringify({
           workflow: "calibration-weekly",
@@ -327,7 +331,7 @@ export async function runWeeklyCalibrationTick(
     await sendCalibrationNotification(db, {
       title: "Weekly calibration rollup",
       principal: name,
-      content: rollup.content,
+      content: rollup.text,
       now,
     });
     console.log(

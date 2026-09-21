@@ -72,14 +72,12 @@ gateway:
 # owner ratifies the default and the list). enabled:false is the kill
 # switch (§9.4): the sync grant fails closed and the sensor halts without
 # touching the Google credential. Absent section = same fail-safe defaults.
+# calibration — proactive world-model feedback loop (owner spec 2026-09-21):
+# one compact daily prompt per principal during active soak, independent of
+# evening-close suppression; bare 1-5 / "rate N" rate the day's picture;
+# prose replies to an open prompt record as missed-feedback evidence.
+calibration:
+  daily: { enabled: true, principals: [josctl], prompt_local_hour: 20 }
+
 sensors:
   gmail: { enabled: true, poll_cron: "*/5 * * *", bootstrap_window_days: 30, extract_senders: [billing@*, statements@*, *@stripe.com], max_messages_per_poll: 40, max_candidates_per_day: 20 }
-
-# calibration — the daily accuracy check (Lane C1). One 1-5 rating per
-# owner-local day plus optional "what did I miss" verdicts; weekly rollup.
-# Ships DISABLED with no principals (fail-safe): nothing runs until the
-# owner ratifies. Prompt copy lives in code, not policy. Delivery rides the
-# notifications queue — "calibration" joins autoApproveKinds when the owner
-# enables the section (same self-authored-structured-output class as briefs).
-calibration:
-  daily: { enabled: false, principals: [], prompt_local_hour: 19 }

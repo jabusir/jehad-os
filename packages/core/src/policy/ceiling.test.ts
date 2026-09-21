@@ -543,7 +543,7 @@ describe("policy calibration (Lane C1 — the daily accuracy check)", () => {
     expect(policy.calibration?.principals).toEqual(["josctl"]);
 
     const fromDisk = await loadPolicyFile(new URL("../../../../policy.yaml", import.meta.url));
-    expect(fromDisk.calibration).toEqual({ enabled: false, principals: [], promptLocalHour: 19 });
-    expect(calibrationPolicyOf(fromDisk).enabled).toBe(false); // ships fail-safe
+    expect(fromDisk.calibration).toEqual({ enabled: true, principals: ["josctl"], promptLocalHour: 20 });
+    expect(calibrationPolicyOf(fromDisk).enabled).toBe(true); // owner ratified 2026-09-21
   });
 });

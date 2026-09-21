@@ -29,6 +29,18 @@ import {
 } from "../policy/ceiling.js";
 import { createNotification } from "../notifications/service.js";
 import { canonicalizeHandle } from "./pairing.js";
+import {
+  eligibleCalibrationItem,
+  storeCalibrationRating,
+  storeMissedFeedback,
+} from "../calibration/service.js";
+import {
+  missEligibility,
+  parseCalibrationRating,
+  renderAmbiguousCalibration,
+  renderCalibrationAck,
+  renderMissedAck,
+} from "./calibration-verbs.js";
 import { resolvePassModels, shouldEscalateRoute } from "./model-selection.js";
 import {
   executeReadTool,
@@ -547,6 +559,35 @@ async function converseTurn(
     });
   }
 
+  // Calibration rating (owner spec §7/§17): bare 1-5 or "rate N" scores
+  // the SOLE open calibration item; ambiguity clarifies; no open item →
+  // normal chat (a bare "4" is only calibration when we asked).
+  const calRating = parseCalibrationRating(input.text);
+  if (calRating !== null) {
+    const eligible = await eligibleCalibrationItem(db, { principalId: input.principalId, now });
+    if (eligible.kind === "sole") {
+      await storeCalibrationRating(db, {
+        principalId: input.principalId,
+        itemId: eligible.item.id,
+        rating: calRating.rating,
+        surface: "imessage",
+      });
+      return deterministicReply(deps, input, ctx, {
+        content: renderCalibrationAck(calRating.rating),
+        outboundTrust: "system_generated",
+        marker: "calibration-rated",
+      });
+    }
+    if (eligible.kind === "ambiguous") {
+      return deterministicReply(deps, input, ctx, {
+        content: renderAmbiguousCalibration(),
+        outboundTrust: "system_generated",
+        marker: "calibration-ambiguous",
+      });
+    }
+    // none → fall through to chat
+  }
+
   if (RESET_COMMANDS.has(input.text.trim().toLowerCase())) {
     return deterministicReply(deps, input, ctx, {
       content: THREAD_RESET_REPLY,
@@ -783,6 +824,41 @@ async function converseTurn(
           outboundTrust: "system_generated",
           marker: `action-propose-${proposal.status}`,
         });
+      }
+      const parsedRouteNone =
+        parseRouteJson(route.result.text) === null &&
+        parseActionRouteJson(route.result.text) === null &&
+        isRouteNoneJson(route.result.text);
+      if (parsedRouteNone) {
+        // Calibration miss (§8): a prose reply routed to "none" while a
+        // calibration prompt is open + fresh is an answer to "anything I
+        // missed?" — record it as first-class missed feedback (never
+        // memory). Tool/action routes are NEVER misses.
+        const eligible = await eligibleCalibrationItem(db, { principalId: input.principalId, now });
+        const withinWindow =
+          eligible.kind === "sole" &&
+          now.getTime() - Date.parse(eligible.item.promptSentAt) < 2 * 60 * 60 * 1000;
+        if (
+          missEligibility({
+            openItem: eligible.kind === "sole",
+            rated: eligible.kind === "sole" ? eligible.item.rating !== null : false,
+            withinPeriod: withinWindow,
+            isOtherCommand: false,
+          }) === "eligible" &&
+          input.text.trim().length >= 15
+        ) {
+          await storeMissedFeedback(db, {
+            principalId: input.principalId,
+            itemId: eligible.kind === "sole" ? eligible.item.id : null,
+            text: input.text,
+            surface: "imessage",
+          });
+          return deterministicReply(deps, input, ctx, {
+            content: renderMissedAck(),
+            outboundTrust: "system_generated",
+            marker: "calibration-missed",
+          });
+        }
       }
       const parsed = parseRouteJson(route.result.text);
       const results: ReadToolResult[] = [];

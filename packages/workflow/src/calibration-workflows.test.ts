@@ -18,8 +18,9 @@ import { migrateUp, seedDomains } from "@jehad/db";
 import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../tests/isolated-db.js";
 
 const mocks = vi.hoisted(() => ({
-  openDailyCalibration: vi.fn(),
-  runWeeklyCalibrationRollup: vi.fn(),
+  openCalibrationItem: vi.fn(),
+  collectCalibrationSummary: vi.fn(),
+  weeklyRollup: vi.fn(),
   createNotification: vi.fn(),
 }));
 
@@ -27,8 +28,9 @@ vi.mock("@jehad/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@jehad/core")>();
   return {
     ...actual,
-    openDailyCalibration: mocks.openDailyCalibration,
-    runWeeklyCalibrationRollup: mocks.runWeeklyCalibrationRollup,
+    openCalibrationItem: mocks.openCalibrationItem,
+    collectCalibrationSummary: mocks.collectCalibrationSummary,
+    weeklyRollup: mocks.weeklyRollup,
     createNotification: mocks.createNotification,
   };
 });
@@ -116,8 +118,10 @@ function fakeDb(opts: { principalIds?: Record<string, string> } = {}) {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  mocks.openDailyCalibration.mockReset();
-  mocks.runWeeklyCalibrationRollup.mockReset();
+  mocks.openCalibrationItem.mockReset();
+  mocks.collectCalibrationSummary.mockReset();
+  mocks.weeklyRollup.mockReset();
+  mocks.collectCalibrationSummary.mockResolvedValue({ day: "2026-09-21", entries: [] });
   mocks.createNotification.mockReset();
   delete process.env.POLICY_YAML_PATH;
 });
@@ -193,7 +197,7 @@ describe("window guards (hourly no-op outside the window)", () => {
       vi.setSystemTime(new Date("2026-09-17T04:30:00.000Z")); // 21:30 PDT — outside
       const result = await calibrationPromptWorkflow.fn(blockedContext());
       expect(result).toEqual({ skippedWindow: true });
-      expect(mocks.openDailyCalibration).not.toHaveBeenCalled();
+      expect(mocks.openCalibrationItem).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -217,7 +221,7 @@ describe("window guards (hourly no-op outside the window)", () => {
       expect(await calibrationWeeklyWorkflow.fn(blockedContext())).toEqual({
         skippedWindow: true,
       });
-      expect(mocks.runWeeklyCalibrationRollup).not.toHaveBeenCalled();
+      expect(mocks.weeklyRollup).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -225,20 +229,27 @@ describe("window guards (hourly no-op outside the window)", () => {
 
   it("daily runs its tick step inside the window (disabled default → clean no-op log)", async () => {
     vi.useFakeTimers();
+    const prevPath = process.env.POLICY_YAML_PATH;
+    process.env.POLICY_YAML_PATH = new URL(
+      "./calibration-workflows.test.fixture.yaml",
+      import.meta.url,
+    ).pathname;
     const logs = captureLogs();
     try {
       vi.setSystemTime(NOW); // 20:30 PDT — inside
-      // Repo policy.yaml carries no calibration section on this branch →
-      // the loader's fail-safe disabled default applies end-to-end.
+      // Fixture policy with no calibration section → fail-safe disabled
+      // default applies end-to-end (the live repo policy is ratified ON).
       const steps: string[] = [];
       const result = await calibrationPromptWorkflow.fn(fakeContext((id) => steps.push(id)));
       expect(steps).toEqual(["calibration-daily-tick"]);
       expect(result).toEqual({ status: "disabled" });
       expect(logs).toEqual([JSON.stringify({ workflow: "calibration-daily", status: "disabled" })]);
-      expect(mocks.openDailyCalibration).not.toHaveBeenCalled();
+      expect(mocks.openCalibrationItem).not.toHaveBeenCalled();
       expect(mocks.createNotification).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
+      if (prevPath === undefined) delete process.env.POLICY_YAML_PATH;
+      else process.env.POLICY_YAML_PATH = prevPath;
     }
   });
 });
@@ -246,11 +257,11 @@ describe("window guards (hourly no-op outside the window)", () => {
 // ------------------------------------------------------------- policy
 
 describe("calibration policy (loader + accessor)", () => {
-  it("loadCalibrationPolicy reads the module-relative repo policy (absent section → disabled)", async () => {
+  it("loadCalibrationPolicy reads the module-relative repo policy (owner-ratified section)", async () => {
     // No POLICY_YAML_PATH: exercises the module-relative default (three
     // ups from packages/workflow/src = repo root).
     const policy = await loadCalibrationPolicy();
-    expect(policy).toEqual(DEFAULT_CALIBRATION_POLICY);
+    expect(policy).toEqual({ enabled: true, principals: ["josctl"], promptLocalHour: 20 });
   });
 
   it("loadCalibrationPolicy honors POLICY_YAML_PATH (parsable, no section → disabled)", async () => {
@@ -281,8 +292,8 @@ describe("calibration policy (loader + accessor)", () => {
 describe("runDailyCalibrationTick (hermetic: C1 seam faked)", () => {
   it("opens the item and enqueues the prompt; tick log keys are workflow/principal/created only", async () => {
     const prompt = "SECRET-PROMPT-CONTENT";
-    mocks.openDailyCalibration.mockResolvedValue({
-      itemId: "00000000-0000-4000-8000-0000000000aa",
+    mocks.openCalibrationItem.mockResolvedValue({
+      item: { id: "00000000-0000-4000-8000-0000000000aa" },
       created: true,
       prompt,
     });
@@ -291,25 +302,16 @@ describe("runDailyCalibrationTick (hermetic: C1 seam faked)", () => {
 
     const result = await runDailyCalibrationTick(fakeDb(), { policy: ENABLED, now: NOW });
 
-    expect(mocks.openDailyCalibration).toHaveBeenCalledWith(
+    expect(mocks.openCalibrationItem).toHaveBeenCalledWith(
       expect.anything(),
-      { principalId: "00000000-0000-4000-8000-000000000001", now: NOW },
+      expect.objectContaining({
+        principalId: "00000000-0000-4000-8000-000000000001",
+        surface: "imessage",
+      }),
+      { notify: true },
     );
-    expect(mocks.createNotification).toHaveBeenCalledTimes(1);
-    const [dbArg, input] = mocks.createNotification.mock.calls[0]!;
-    expect(dbArg).toBeTypeOf("object");
-    expect(input).toMatchObject({
-      kind: "custom",
-      title: "Daily calibration",
-      sourceType: "run",
-      sourceId: "00000000-0000-4000-8000-0000000000aa",
-      createdBy: "00000000-0000-4000-8000-0000000000ff",
-    });
-    expect(input.payload).toEqual({
-      principal: "josctl",
-      itemId: "00000000-0000-4000-8000-0000000000aa",
-      content: prompt,
-    });
+    // notify=true → core enqueues the calibration notification itself.
+    expect(mocks.createNotification).toHaveBeenCalledTimes(0);
     // Content NEVER logged: assert on JSON keys only.
     expect(parsedLogs(logs)).toEqual([
       { workflow: "calibration-daily", principal: "josctl", created: true },
@@ -321,8 +323,8 @@ describe("runDailyCalibrationTick (hermetic: C1 seam faked)", () => {
   });
 
   it("skips the send when the item already exists (created=false — idempotent)", async () => {
-    mocks.openDailyCalibration.mockResolvedValue({
-      itemId: "00000000-0000-4000-8000-0000000000aa",
+    mocks.openCalibrationItem.mockResolvedValue({
+      item: { id: "00000000-0000-4000-8000-0000000000aa" },
       created: false,
       prompt: "SECRET-PROMPT-CONTENT",
     });
@@ -347,14 +349,14 @@ describe("runDailyCalibrationTick (hermetic: C1 seam faked)", () => {
       const result = await runDailyCalibrationTick(fakeDb(), { policy, now: NOW });
       expect(result).toEqual({ status: "disabled" });
       expect(logs).toEqual([JSON.stringify({ workflow: "calibration-daily", status: "disabled" })]);
-      expect(mocks.openDailyCalibration).not.toHaveBeenCalled();
+      expect(mocks.openCalibrationItem).not.toHaveBeenCalled();
       expect(mocks.createNotification).not.toHaveBeenCalled();
     }
   });
 
   it("unknown principal → skipped, other principals still run", async () => {
-    mocks.openDailyCalibration.mockResolvedValue({
-      itemId: "00000000-0000-4000-8000-0000000000ab",
+    mocks.openCalibrationItem.mockResolvedValue({
+      item: { id: "00000000-0000-4000-8000-0000000000ab" },
       created: true,
       prompt: "p2",
     });
@@ -369,8 +371,7 @@ describe("runDailyCalibrationTick (hermetic: C1 seam faked)", () => {
       now: NOW,
     });
 
-    expect(mocks.openDailyCalibration).toHaveBeenCalledTimes(1);
-    expect(mocks.createNotification).toHaveBeenCalledTimes(1);
+    expect(mocks.openCalibrationItem).toHaveBeenCalledTimes(1);
     expect(parsedLogs(logs)).toEqual([
       { workflow: "calibration-daily", principal: "ghost", skipped: "principal-not-found" },
       { workflow: "calibration-daily", principal: "second", created: true },
@@ -386,7 +387,7 @@ describe("runDailyCalibrationTick (hermetic: C1 seam faked)", () => {
 
 describe("runWeeklyCalibrationTick (hermetic: C1 seam faked)", () => {
   it("skips the send on null content (too little data) and tick-logs the shortfall", async () => {
-    mocks.runWeeklyCalibrationRollup.mockResolvedValue({ content: null, daysRated: 2 });
+    mocks.weeklyRollup.mockResolvedValue({ weekStart: "2026-09-14", avgRating: null, daysRated: 0, missCount: 0, missCategories: {}, feedbackCounts: {}, text: null });
     const logs = captureLogs();
 
     const result = await runWeeklyCalibrationTick(fakeDb(), { policy: ENABLED, now: NOW });
@@ -396,28 +397,33 @@ describe("runWeeklyCalibrationTick (hermetic: C1 seam faked)", () => {
       {
         workflow: "calibration-weekly",
         principal: "josctl",
-        daysRated: 2,
+        daysRated: 0,
         skipped: "insufficient-data",
       },
     ]);
     expect(result).toEqual({
-      outcomes: [{ principal: "josctl", daysRated: 2, skipped: "insufficient-data" }],
+      outcomes: [{ principal: "josctl", daysRated: 0, skipped: "insufficient-data" }],
     });
   });
 
   it("enqueues the rollup when content renders; log keys carry counts only", async () => {
-    mocks.runWeeklyCalibrationRollup.mockResolvedValue({
-      content: "SECRET-ROLLUP-CONTENT",
+    mocks.weeklyRollup.mockResolvedValue({
+      weekStart: "2026-09-14",
+      avgRating: 3.2,
       daysRated: 6,
+      missCount: 1,
+      missCategories: {},
+      feedbackCounts: {},
+      text: "SECRET-ROLLUP-CONTENT",
     });
     mocks.createNotification.mockResolvedValue({ id: "notif-3" });
     const logs = captureLogs();
 
     const result = await runWeeklyCalibrationTick(fakeDb(), { policy: ENABLED, now: NOW });
 
-    expect(mocks.runWeeklyCalibrationRollup).toHaveBeenCalledWith(
+    expect(mocks.weeklyRollup).toHaveBeenCalledWith(
       expect.anything(),
-      { principalId: "00000000-0000-4000-8000-000000000001", now: NOW },
+      expect.objectContaining({ principalId: "00000000-0000-4000-8000-000000000001" }),
     );
     const input = mocks.createNotification.mock.calls[0]![1]!;
     expect(input).toMatchObject({
@@ -444,7 +450,7 @@ describe("runWeeklyCalibrationTick (hermetic: C1 seam faked)", () => {
     });
     expect(result).toEqual({ status: "disabled" });
     expect(logs).toEqual([JSON.stringify({ workflow: "calibration-weekly", status: "disabled" })]);
-    expect(mocks.runWeeklyCalibrationRollup).not.toHaveBeenCalled();
+    expect(mocks.weeklyRollup).not.toHaveBeenCalled();
   });
 });
 
@@ -477,8 +483,8 @@ describe.skipIf(!TEST_DATABASE_URL)("calibration daily tick (integration: real n
        ) SELECT id FROM ins UNION ALL SELECT id FROM principals WHERE name = 'josctl' LIMIT 1`,
     );
     const principalId = String(principal.rows[0].id);
-    mocks.openDailyCalibration.mockResolvedValue({
-      itemId,
+    mocks.openCalibrationItem.mockResolvedValue({
+      item: { id: itemId },
       created: true,
       prompt: "integration-prompt-content",
     });
@@ -486,41 +492,34 @@ describe.skipIf(!TEST_DATABASE_URL)("calibration daily tick (integration: real n
 
     const result = await runDailyCalibrationTick(db.pool, { policy: ENABLED, now: NOW });
 
-    expect(mocks.openDailyCalibration).toHaveBeenCalledWith(db.pool, { principalId, now: NOW });
+    expect(mocks.openCalibrationItem).toHaveBeenCalledWith(
+      db.pool,
+      expect.objectContaining({ principalId, surface: "imessage" }),
+      { notify: true },
+    );
     expect(parsedLogs(logs)).toEqual([
       { workflow: "calibration-daily", principal: "josctl", created: true },
     ]);
 
-    // The notification row: kind=custom (review queue — not auto-approved),
-    // source-linked to the calibration item, prompt verbatim in the payload.
-    const notifications = await db.pool.query(
-      "SELECT kind, title, status, source_type, source_id, payload->>'content' AS content, created_by FROM notifications",
-    );
-    expect(notifications.rows).toHaveLength(1);
-    const row = notifications.rows[0]!;
-    expect(row).toMatchObject({
-      kind: "custom",
-      title: "Daily calibration",
-      status: "pending",
-      source_type: "run",
-      source_id: itemId,
-      content: "integration-prompt-content",
-    });
-    const service = await db.pool.query(
-      "SELECT id FROM principals WHERE name = 'service/calibration' AND type = 'service'",
-    );
-    expect(service.rows).toHaveLength(1);
-    expect(String(row.created_by)).toBe(String(service.rows[0].id));
+    // notify=true → the REAL openCalibrationItem enqueues the calibration
+    // notification on the core side (pinned in C1's suite); this suite
+    // mocks it, so we assert the tick contract: principal resolution,
+    // created flags, and tick logs.
     expect(result).toEqual({ outcomes: [{ principal: "josctl", created: true, sent: true }] });
+    expect(mocks.openCalibrationItem).toHaveBeenCalledWith(
+      db.pool,
+      expect.objectContaining({ principalId, surface: "imessage" }),
+      { notify: true },
+    );
 
-    // Idempotent replay: created=false → no second notification row.
-    mocks.openDailyCalibration.mockResolvedValue({
-      itemId,
+    // Idempotent replay: created=false → skipped, no second open call.
+    mocks.openCalibrationItem.mockClear();
+    mocks.openCalibrationItem.mockResolvedValue({
+      item: { id: itemId },
       created: false,
       prompt: "integration-prompt-content",
     });
-    await runDailyCalibrationTick(db.pool, { policy: ENABLED, now: NOW });
-    const after = await db.pool.query("SELECT id FROM notifications");
-    expect(after.rows).toHaveLength(1);
+    const replay = await runDailyCalibrationTick(db.pool, { policy: ENABLED, now: NOW });
+    expect(replay).toEqual({ outcomes: [{ principal: "josctl", created: false }] });
   });
 });

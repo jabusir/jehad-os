@@ -7,6 +7,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { migrateUp, seedDomains } from "@jehad/db";
 import { FakeModelProvider } from "@jehad/adapters";
+import {
+  civilDateOf,
+  openCalibrationItem,
+} from "@jehad/core";
 import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../../../db/tests/test-db";
 import { ModelEgressPolicyRegistry } from "../egress/index.js";
 import { issueGrant } from "../policy/grants.js";
@@ -107,6 +111,7 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
 
   afterEach(async () => {
     await db.pool.query(`
+      DELETE FROM feedback; DELETE FROM calibration_items;
       DELETE FROM interaction_messages; DELETE FROM interaction_threads;
       DELETE FROM audit_log; DELETE FROM review_refs; DELETE FROM action_attempts; DELETE FROM action_intents;
       DELETE FROM model_calls; DELETE FROM runs; DELETE FROM notifications;
@@ -540,6 +545,67 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     ).rows[0]!.payload;
     expect(payload.description).toBe("bring snacks");
     expect(payload.attendees).toEqual(["sam@example.com", "lea@example.com"]);
+  });
+
+  it("CALIBRATION: bare '4' rates the open item deterministically (no model)", async () => {
+    await grant(jehadId);
+    await openCalibrationItem(db.pool, {
+      principalId: jehadId,
+      periodDate: civilDateOf(now),
+      summary: { day: civilDateOf(now), entries: [{ sourceKey: "calendar", label: "Calendar", lines: ["3 planned events"] }] },
+      surface: "imessage",
+    });
+    const callsBefore = provider.requests.length;
+    const outcome = await turn(jehadId, JEHAD, "4");
+    expect(outcome.replied).toBe(true);
+    expect(provider.requests.length).toBe(callsBefore); // zero model calls
+    const reply = (
+      await db.pool.query(
+        "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
+      )
+    ).rows[0]!.c as string;
+    expect(reply).toContain("4/5");
+    const item = (
+      await db.pool.query("SELECT rating FROM calibration_items WHERE status = 'open' ORDER BY created_at DESC LIMIT 1")
+    ).rows[0]!;
+    expect(item.rating).toBe(4);
+  });
+
+  it("CALIBRATION: prose during an open prompt records as missed feedback; tool questions NEVER do", async () => {
+    await grant(jehadId);
+    await openCalibrationItem(db.pool, {
+      principalId: jehadId,
+      periodDate: civilDateOf(now),
+      summary: { day: civilDateOf(now), entries: [] },
+      surface: "imessage",
+    });
+    now = new Date(now.getTime() + 10 * 60_000); // inside the 2h window
+    queue = [{ text: '{"tool":"none"}' }];
+    await turn(jehadId, JEHAD, "I actually spent most of the afternoon dealing with the Plaid security review");
+    const missed = (
+      await db.pool.query("SELECT verdict, note AS c FROM feedback WHERE verdict = 'missed' AND item_type = 'calibration' ORDER BY created_at DESC LIMIT 1")
+    ).rows[0];
+    expect(missed).toBeDefined();
+    expect(missed!.c).toContain("Plaid");
+    // no memory candidates were created (memory boundary)
+    const cands = await db.pool.query("SELECT count(*)::int AS n FROM memory_candidates");
+    expect(cands.rows[0]!.n).toBe(0);
+    // a tool question during the same window is NOT a miss
+    now = new Date(now.getTime() + 60_000);
+    queue = [{ text: '{"tool":"calendar.day","day":"today"}' }, { text: "you have 2 events" }];
+    await turn(jehadId, JEHAD, "what is on my calendar today");
+    const missedCount = (
+      await db.pool.query("SELECT count(*)::int AS n FROM feedback WHERE verdict = 'missed' AND item_type = 'calibration'")
+    ).rows[0]!.n;
+    expect(missedCount).toBe(1); // unchanged
+  });
+
+  it("CALIBRATION: bare '4' with no open item is normal chat (falls through to the model)", async () => {
+    await grant(jehadId);
+    queue = [{ text: '{"tool":"none"}' }, { text: "four you say" }];
+    const outcome = await turn(jehadId, JEHAD, "4");
+    expect(outcome.replied).toBe(true);
+    expect(provider.requests.length).toBeGreaterThanOrEqual(1);
   });
 
   it("MODEL ROUTING: route pass uses the passes.route model; answer keeps the principal model", async () => {
