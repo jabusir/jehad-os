@@ -40,3 +40,17 @@ export type {
   LeverageOptions,
 } from "./leverage.js";
 export { highestLeverageDecision } from "./leverage.js";
+
+export type {
+  DayStateData,
+  DayStateEscalationSummary,
+  DayStateOptions,
+} from "./day-state.js";
+export { collectDayState, DAY_STATE_COVERAGE, renderDayStateText } from "./day-state.js";
+
+export type {
+  FreshnessSource,
+  SourceFreshness,
+  SourceFreshnessOptions,
+} from "./staleness.js";
+export { freshnessLines, sourceFreshness, STALE_AFTER_HOURS } from "./staleness.js";

@@ -19,14 +19,21 @@ import {
 import { whatWaitsOnMe } from "../queries/waiting.js";
 import { BRIEF_DOMAIN_KEY } from "../briefs/data.js";
 import { BRIEF_TIMEZONE } from "../briefs/timezone.js";
+import {
+  collectDayState,
+  DAY_STATE_COVERAGE,
+  renderDayStateText,
+} from "../queries/day-state.js";
+import { freshnessLines } from "../queries/staleness.js";
 
 export type ReadToolCall =
   | { readonly tool: "calendar.day"; readonly day: "today" | "tomorrow" }
   | { readonly tool: "calendar.next" }
   | { readonly tool: "commitments.waiting" }
-  | { readonly tool: "gmail.recent" };
+  | { readonly tool: "gmail.recent" }
+  | { readonly tool: "day.state" };
 
-export type ReadSource = "calendar" | "commitments" | "gmail";
+export type ReadSource = "calendar" | "commitments" | "gmail" | "state";
 
 export interface ReadToolResult {
   readonly tool: string;
@@ -50,6 +57,7 @@ const CAP_GMAIL_DOMAIN = 80;
 const CAP_GMAIL_DOMAIN_ROWS = 25;
 const CAP_GMAIL_LATEST = 5;
 const GMAIL_WINDOW_MS = 24 * 60 * 60 * 1000;
+const CAP_DAY_STATE_TEXT = 4000;
 
 const CALENDAR_COVERAGE =
   "calendar events only; email, chat, and notes are not connected";
@@ -65,6 +73,7 @@ const GMAIL_NO_SENSOR_COVERAGE =
 export function readToolSource(tool: ReadToolCall["tool"]): ReadSource {
   if (tool === "commitments.waiting") return "commitments";
   if (tool === "gmail.recent") return "gmail";
+  if (tool === "day.state") return "state";
   return "calendar";
 }
 
@@ -91,7 +100,7 @@ export function parseRouteJson(text: string): ReadToolCall | null {
     if (obj["day"] !== "today" && obj["day"] !== "tomorrow") return null;
     return { tool: "calendar.day", day: obj["day"] };
   }
-  if (obj["tool"] === "calendar.next" || obj["tool"] === "commitments.waiting" || obj["tool"] === "gmail.recent") {
+  if (obj["tool"] === "calendar.next" || obj["tool"] === "commitments.waiting" || obj["tool"] === "gmail.recent" || obj["tool"] === "day.state") {
     if (keys.length !== 1) return null;
     return { tool: obj["tool"] } as ReadToolCall;
   }
@@ -121,6 +130,116 @@ export function isRouteNoneJson(text: string): boolean {
  */
 export function gmailRoutingLine(): string {
   return '{"tool":"gmail.recent"} — asks what email arrived recently / what came in over email / inbox today';
+}
+
+export const READ_SET_TOOLS = [
+  "calendar.next",
+  "commitments.waiting",
+  "gmail.recent",
+  "day.state",
+] as const;
+
+export type ReadSetTool = (typeof READ_SET_TOOLS)[number];
+
+export const READ_SET_MAX_TOOLS = 3;
+
+export const READ_BLOCK_CHAR_BUDGET = 1500;
+
+const READ_SET_TOOL_NAMES: ReadonlySet<string> = new Set(READ_SET_TOOLS);
+
+export function parseRouteReadSet(text: string): readonly ReadToolCall[] | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const obj = parsed as Record<string, unknown>;
+  if (obj["tools"] !== undefined) {
+    if (Object.keys(obj).length !== 1) return null;
+    if (!Array.isArray(obj["tools"])) return null;
+    const names: unknown[] = obj["tools"];
+    if (names.length < 1 || names.length > READ_SET_MAX_TOOLS) return null;
+    const seen = new Set<string>();
+    const calls: ReadToolCall[] = [];
+    for (const name of names) {
+      if (typeof name !== "string" || !READ_SET_TOOL_NAMES.has(name)) return null;
+      if (seen.has(name)) return null;
+      seen.add(name);
+      calls.push({ tool: name as ReadSetTool });
+    }
+    return calls;
+  }
+  const single = parseRouteJson(trimmed);
+  return single === null ? null : [single];
+}
+
+export interface ReadSetBlock {
+  readonly tool: string;
+  readonly source: ReadSource;
+  readonly coverage: string;
+  readonly data: unknown;
+  readonly truncated: boolean;
+  readonly charBudget: number;
+}
+
+export interface ReadSetOptions {
+  readonly now?: () => Date;
+  readonly blockCharBudget?: number;
+}
+
+export async function runReadSet(
+  db: SqlExecutor,
+  principalId: string,
+  tools: readonly string[],
+  opts: ReadSetOptions = {},
+): Promise<readonly ReadSetBlock[]> {
+  if (tools.length < 1 || tools.length > READ_SET_MAX_TOOLS) {
+    throw new RangeError(`read set must carry 1 to ${READ_SET_MAX_TOOLS} tools, got ${tools.length}`);
+  }
+  const seen = new Set<string>();
+  for (const tool of tools) {
+    if (typeof tool !== "string" || !READ_SET_TOOL_NAMES.has(tool)) {
+      throw new RangeError(`read set tool '${String(tool)}' is not allowlisted`);
+    }
+    if (seen.has(tool)) {
+      throw new RangeError(`read set tool '${tool}' appears more than once`);
+    }
+    seen.add(tool);
+  }
+  const charBudget = opts.blockCharBudget ?? READ_BLOCK_CHAR_BUDGET;
+  if (!Number.isFinite(charBudget) || charBudget < 1) {
+    throw new RangeError(`blockCharBudget must be a positive number, got ${String(opts.blockCharBudget)}`);
+  }
+  const calls: ReadToolCall[] = tools.map((tool) => ({ tool: tool as ReadSetTool }));
+  const results = await Promise.all(
+    calls.map((call) => executeReadTool(db, call, { now: opts.now, principalId })),
+  );
+  return results.map((result) => {
+    const serialized = JSON.stringify(result.data);
+    if (serialized.length <= charBudget) {
+      return { ...result, truncated: false, charBudget };
+    }
+    return {
+      tool: result.tool,
+      source: result.source,
+      coverage: result.coverage,
+      data: truncate(serialized, charBudget),
+      truncated: true,
+      charBudget,
+    };
+  });
+}
+
+export function dayStateRoutingLine(): string {
+  return '{"tool":"day.state"} — asks what is going on / for an overview of today and where things stand overall';
+}
+
+export function multiReadRoutingLine(): string {
+  return '{"tools":["calendar.next","commitments.waiting","gmail.recent","day.state"]} — a composite question that clearly needs 2 or 3 of the lookups at once; 1 to 3 names, no repeats, names only (calendar.day keeps its single-tool shape)';
 }
 
 function truncate(text: string, max: number): string {
@@ -233,7 +352,7 @@ function dayIso(d: Date): string {
 export async function executeReadTool(
   db: SqlExecutor,
   call: ReadToolCall,
-  opts: { readonly now?: () => Date } = {},
+  opts: { readonly now?: () => Date; readonly principalId?: string } = {},
 ): Promise<ReadToolResult> {
   const now = opts.now?.() ?? new Date();
   const query = db as unknown as QueryExecutor;
@@ -337,6 +456,23 @@ export async function executeReadTool(
           latestTimes: latest.rows
             .slice(0, CAP_GMAIL_LATEST)
             .map((row) => hhmm(new Date(row.occurred_at as string))),
+        },
+      };
+    }
+    case "day.state": {
+      if (opts.principalId === undefined) {
+        throw new Error("day.state requires principalId (escalations are principal-scoped)");
+      }
+      const state = await collectDayState(query, opts.principalId, { now: () => now });
+      return {
+        tool: call.tool,
+        source: "state",
+        coverage: DAY_STATE_COVERAGE,
+        data: {
+          timezone: BRIEF_TIMEZONE,
+          date: dayIso(localDayBounds(now, BRIEF_TIMEZONE).dayStart),
+          stale: freshnessLines(state.freshness.filter((f) => f.source === "calendar")),
+          text: truncate(renderDayStateText(state), CAP_DAY_STATE_TEXT),
         },
       };
     }
