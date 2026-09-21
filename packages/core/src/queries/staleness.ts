@@ -4,7 +4,7 @@ export const STALE_AFTER_HOURS = 6;
 
 const MS_PER_HOUR = 3_600_000;
 
-export type FreshnessSource = "calendar" | "gmail";
+export type FreshnessSource = "calendar" | "gmail" | "imessage";
 
 export interface SourceFreshness {
   readonly source: FreshnessSource;
@@ -24,6 +24,10 @@ const CALENDAR_FRESHNESS_SQL = `
 
 const GMAIL_FRESHNESS_SQL = `
   SELECT last_tick_at AS last_synced_at FROM gmail_sync_state WHERE id = 'singleton'
+`;
+
+const IMESSAGE_FRESHNESS_SQL = `
+  SELECT updated_at AS last_synced_at FROM imessage_sensor_state WHERE singleton = true
 `;
 
 function parseStaleAfterHours(value: number | undefined): number {
@@ -68,6 +72,16 @@ export async function sourceFreshness(
     toFreshness("calendar", calendar.rows[0], now, staleAfterHours),
     toFreshness("gmail", gmail.rows[0], now, staleAfterHours),
   ];
+}
+
+export async function imessageFreshness(
+  db: QueryExecutor,
+  opts: SourceFreshnessOptions = {},
+): Promise<SourceFreshness> {
+  const now = opts.now?.() ?? new Date();
+  const staleAfterHours = parseStaleAfterHours(opts.staleAfterHours);
+  const result = await db.query(IMESSAGE_FRESHNESS_SQL);
+  return toFreshness("imessage", result.rows[0], now, staleAfterHours);
 }
 
 export function freshnessLines(freshness: readonly SourceFreshness[]): string[] {
