@@ -118,3 +118,23 @@ export {
   SYSTEM_STATE_LIMITATIONS,
   SYSTEM_STATE_LIMITATIONS_VERSION,
 } from "./system-state.js";
+
+export type {
+  CollectSelfBriefInput,
+  SelfBriefActions,
+  SelfBriefCalendarStatus,
+  SelfBriefConversation,
+  SelfBriefData,
+  SelfBriefGmailStatus,
+  SelfBriefMemory,
+  SelfBriefPersona,
+  SelfBriefSources,
+} from "./system-self-brief.js";
+export {
+  collectSelfBrief,
+  renderSelfBrief,
+  SELF_BRIEF_COVERAGE,
+  SELF_BRIEF_HONESTY_RULES,
+  SELF_BRIEF_LIMITATIONS_VERSION,
+  SELF_BRIEF_MAX_LINES,
+} from "./system-self-brief.js";
