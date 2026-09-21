@@ -1,0 +1,12 @@
+# Test fixture (lane C2): a VALID policy.yaml whose calibration section is
+# absent — the loader must fall back to the fail-safe disabled default.
+# A fixture WITH a `calibration:` key cannot parse until lane C1's parser
+# extension lands (parsePolicyV1 fails closed on unknown top-level keys);
+# the enabled-path hermetic tests therefore inject policy objects directly.
+version: 1
+autonomy_ceiling:
+  read: autonomous
+  propose: autonomous
+  write_canonical: gated
+  external_side_effect: approval_required
+  money_and_contracts: prohibited

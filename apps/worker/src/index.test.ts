@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { createWorkflowWorkerServer, gmailSyncWorkflow } from "@jehad/workflow";
+import {
+  createWorkflowWorkerServer,
+  gmailSyncWorkflow,
+  calibrationWorkflows,
+} from "@jehad/workflow";
 import { main } from "./index.js";
 import { workflows } from "./workflows.js";
 
@@ -23,6 +27,21 @@ describe("@jehad/worker", () => {
     const gmail = workflows.filter((workflow) => workflow.name === "gmail-sync");
     expect(gmail).toHaveLength(1);
     expect(gmail[0]).toMatchObject({ kind: "cron", cron: "*/5 * * * *" });
+    const names = workflows.map((workflow) => workflow.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("registers both calibration workflows exactly once (idempotent registration)", () => {
+    for (const def of calibrationWorkflows) {
+      expect(workflows).toContain(def);
+      expect(workflows.filter((workflow) => workflow.name === def.name)).toHaveLength(1);
+    }
+    expect(workflows).toContainEqual(
+      expect.objectContaining({ kind: "cron", name: "calibration-daily", cron: "30 * * * *" }),
+    );
+    expect(workflows).toContainEqual(
+      expect.objectContaining({ kind: "cron", name: "calibration-weekly", cron: "0 * * * *" }),
+    );
     const names = workflows.map((workflow) => workflow.name);
     expect(new Set(names).size).toBe(names.length);
   });

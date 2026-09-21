@@ -54,6 +54,25 @@ export {
   threadRetentionWorkflow,
   type ThreadRetentionResult,
 } from "./thread-workflows.js";
+export {
+  calibrationPromptWorkflow,
+  calibrationWeeklyWorkflow,
+  calibrationWorkflows,
+  CALIBRATION_LOCAL_TZ,
+  CALIBRATION_PROMPT_CRON_MINUTE,
+  CALIBRATION_PROMPT_LOCAL_HOUR_DEFAULT,
+  CALIBRATION_WEEKLY_LOCAL_HOUR,
+  CALIBRATION_WEEKLY_LOCAL_WEEKDAY,
+  calibrationPolicyOf,
+  DEFAULT_CALIBRATION_POLICY,
+  isLocalWeekdayHour,
+  loadCalibrationPolicy,
+  runDailyCalibrationTick,
+  runWeeklyCalibrationTick,
+  type CalibrationPolicy,
+  type CalibrationPrincipalOutcome,
+  type CalibrationTickResult,
+} from "./calibration-workflows.js";
 
 export {
   APPROVE_SIGNAL_PREFIX,
