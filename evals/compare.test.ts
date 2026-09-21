@@ -52,7 +52,6 @@ const SYNTHETIC_ITEMS: readonly GoldenItem[] = [
     temporal_expression: null,
     resolved_due_date: null,
     resolution_status: "none",
-    commitment_state: null,
   }),
 ];
 
