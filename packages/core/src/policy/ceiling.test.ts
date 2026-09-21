@@ -806,9 +806,8 @@ describe("policy personas (W4 interaction-profile flag — security/default laye
     expect(policy.calibration?.enabled).toBe(true);
   });
 
-  it("the repo-root policy.yaml ships the section DISABLED pending owner seed approval (§18-2)", async () => {
-    const fromDisk = await loadPolicyFile(new URL("../../../../policy.yaml", import.meta.url));
-    expect(fromDisk.personas).toEqual({ enabled: false, principals: [] });
-    expect(personasPolicyOf(fromDisk).enabled).toBe(false);
+  it("the repo-root policy.yaml ships personas enabled for josctl (owner direction 2026-09-21)", async () => {
+    const policy = await loadPolicyFile(new URL("../../../../policy.yaml", import.meta.url));
+    expect(personasPolicyOf(policy)).toEqual({ enabled: true, principals: ["josctl"] });
   });
 });

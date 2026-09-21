@@ -34,7 +34,7 @@ autonomy_ceiling:
 #                           expires_at; past it a row is expired and can never
 #                           be claimed or delivered.
 notifications:
-  autoApproveKinds: ["brief", "calendar-change", "calibration"]
+  autoApproveKinds: ["brief", "calendar-change", "calibration", "grant-reminder"]
   escalationMinUrgency: high
   defaultTtlMinutes: 240
 
@@ -82,7 +82,7 @@ gateway:
 # active = max version) and can never alter reads, tools, budgets, egress,
 # or authorization. Disabled until the owner approves the initial josctl
 # seed profile (§18-2); flip to enabled + principals: [josctl] then.
-personas: { enabled: false, principals: [] }
+personas: { enabled: true, principals: [josctl] }
 
 # sensors — cloud sensor policy (GMAIL; gmail-sensor-contracts.md §5/§10.3).
 # sensors.gmail: metadata ingest for ALL senders; deterministic extraction

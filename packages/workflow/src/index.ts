@@ -44,7 +44,7 @@ export {
   calendarOccurrenceSweepWorkflow,
   type CalendarOccurrenceSweepResult,
 } from "./occurrence-workflows.js";
-export {
+export { grantReminderWorkflow } from "./grant-workflows.js";export {
   gmailSyncWorkflow,
   GMAIL_INGEST_CAPABILITY,
   GMAIL_INGEST_RESOURCE,
@@ -128,3 +128,5 @@ export {
   type FetchLike,
   type FetchResponseLike,
 } from "./executor-api.js";
+
+export type { GrantReminderOutcome, GrantReminderResult } from "./grant-workflows.js";
