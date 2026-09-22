@@ -42,6 +42,17 @@ function stalledLine(item: StalledItem): string {
   return `- ${item.itemLabel} — stalled ${item.stalledForDays.toFixed(1)}d (threshold ${item.thresholdDays}d)`;
 }
 
+/** W6-phase-2: parked reminders surface once, here — terse, no follow-up promised. */
+function renderStoppedReminders(data: EveningCloseData): string[] {
+  if (data.stoppedReminders.length === 0) {
+    return []; // suppression rule
+  }
+  return [
+    "Stopped reminders",
+    ...data.stoppedReminders.map((r) => `- Stopped texting about: ${r.title} — still open.`),
+  ];
+}
+
 function renderWaitingOnYou(data: MorningBriefData): string[] {
   const w = data.waitingOnYou;
   if (w.overdue.length === 0 && w.dueSoon.length === 0 && w.otherOpenCount === 0) {
@@ -278,6 +289,7 @@ export function renderEveningCloseText(data: EveningCloseData): string {
           ...data.stalled.map((s) => stalledLine(s)),
         ]
       : [],
+    renderStoppedReminders(data),
     data.unlock !== null
       ? [
           "Tomorrow's best unlock",

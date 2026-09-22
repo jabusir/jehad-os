@@ -17,6 +17,7 @@ import {
   type TodayScheduleItem,
 } from "../calendar/projection.js";
 import { freshnessLines, sourceFreshness, type SourceFreshness } from "./staleness.js";
+import { countArmedReminders } from "../reminders/queries.js";
 
 export const DAY_STATE_COVERAGE =
   "assembled from your calendar, captured commitments and decisions, and open escalations on your runs; email, chat, and notes are not connected";
@@ -50,6 +51,8 @@ export interface DayStateData {
   readonly freshness: readonly SourceFreshness[];
   /** The one-thing priority result; null in a quiet world (no line rendered). */
   readonly priority: PriorityResult | null;
+  /** W6-phase-2: armed reminders for this principal (rendered only when > 0). */
+  readonly armedReminders: number;
 }
 
 const OPEN_ESCALATIONS_SQL = `
@@ -151,7 +154,7 @@ export async function collectDayState(
   const { now, since } = resolveWindow(opts);
   const nowFn = (): Date => now;
 
-  const [waitsOnMe, waitingOnOthers, blockedResult, ranked, changed, todaySchedule, nextUpcoming, escalations, freshness, priority] =
+  const [waitsOnMe, waitingOnOthers, blockedResult, ranked, changed, todaySchedule, nextUpcoming, escalations, freshness, priority, armedReminders] =
     await Promise.all([
       whatWaitsOnMe(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
       whatAmIWaitingFor(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
@@ -163,6 +166,7 @@ export async function collectDayState(
       escalationSummary(db, principalId),
       sourceFreshness(db, principalId, { now: nowFn }),
       theOneThing(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
+      countArmedReminders(db, principalId),
     ]);
 
   const overdue = waitsOnMe.filter((c) => c.overdue);
@@ -191,6 +195,7 @@ export async function collectDayState(
     escalations,
     freshness,
     priority,
+    armedReminders,
   };
 }
 
@@ -437,6 +442,14 @@ function priorityLines(data: DayStateData): string[] {
   return lines;
 }
 
+// Count-only (w6-phase-2 R5): the queries module has no next-touch read
+// (dueTouches is past-due only) and this lane consumes it as-is, so the
+// "next check-in" clause stays out until such a read exists.
+function remindersLines(data: DayStateData): string[] {
+  if (data.armedReminders === 0) return [];
+  return [`Reminders armed: ${data.armedReminders}.`];
+}
+
 export function renderDayStateText(data: DayStateData): string {
   const sections = [
     priorityLines(data),
@@ -446,6 +459,7 @@ export function renderDayStateText(data: DayStateData): string {
     unlockLines(data),
     overnightLines(data),
     escalationsLines(data),
+    remindersLines(data),
   ].filter((section) => section.length > 0);
 
   const lines: string[] = [
