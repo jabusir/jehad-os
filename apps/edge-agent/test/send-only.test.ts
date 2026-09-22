@@ -54,7 +54,19 @@ describe("send-only structural pins (grep over apps/edge-agent/src)", () => {
       const sendCount = (source.match(/tell application "Messages" to send /g) ?? []).length;
       if (name === "imessage-transport.ts") {
         expect(sendCount, "exactly one send template").toBe(1);
-        expect(tellCount, "no other tell blocks").toBe(1);
+        // Wave T allowlist: the send template + typing simulation
+        // (Messages activate + System Events keystrokes — activation and
+        // input injection only, ZERO reads; the banned-pattern pin above
+        // still scans every file).
+        expect(
+          (source.match(/tell application "System Events"/g) ?? []).length,
+          "exactly one System Events block",
+        ).toBe(1);
+        expect(
+          (source.match(/tell application "Messages" to activate/g) ?? []).length,
+          "exactly one activate",
+        ).toBe(1);
+        expect(tellCount, "no other tell blocks").toBe(3);
       } else {
         expect(tellCount, `${name} must contain no AppleScript`).toBe(0);
       }

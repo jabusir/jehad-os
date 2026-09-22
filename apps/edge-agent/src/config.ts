@@ -19,6 +19,10 @@
 // │ EDGE_IMESSAGE_TARGET     │ iMessage target override (email or +E.164     │
 // │                          │ phone). When unset, read from Keychain        │
 // │                          │ service `jehad-imessage-target`.              │
+// │ EDGE_TYPING_SIMULATION   │ "1" = UI-scripted typing bubbles before send  │
+// │                          │ (Wave T). Needs Accessibility for the agent;  │
+// │                          │ auto-falls-back to direct send on failure.    │
+// │                          │ Default off.                                  │
 // └──────────────────────────┴───────────────────────────────────────────────┘
 //
 // CLI: `--once` runs exactly one claim/deliver cycle (testing); the default
@@ -28,6 +32,9 @@ export interface EdgeAgentConfig {
   readonly apiUrl: string;
   readonly pollSeconds: number;
   readonly principal: string;
+  /** Wave T: UI-scripted typing bubbles (Accessibility + focus-steal on the
+   *  dedicated Mac). DEFAULT OFF — enable with EDGE_TYPING_SIMULATION=1. */
+  readonly typingSimulation: boolean;
   readonly once: boolean;
 }
 
@@ -54,5 +61,11 @@ export function loadConfig(
   if (principal.trim().length === 0) {
     throw new Error("config: EDGE_PRINCIPAL must not be blank");
   }
-  return { apiUrl, pollSeconds, principal, once: argv.includes("--once") };
+  return {
+    apiUrl,
+    pollSeconds,
+    principal,
+    typingSimulation: env["EDGE_TYPING_SIMULATION"] === "1",
+    once: argv.includes("--once"),
+  };
 }
