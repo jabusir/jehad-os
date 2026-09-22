@@ -25,6 +25,7 @@ import os from "node:os";
 import { loadConfig } from "./config.js";
 import { readKeychainPassword } from "./keychain.js";
 import { makeTypingAwareTransport, sendImessage } from "./imessage-transport.js";
+import { imsgPlusSetTyping } from "./imsg-plus-client.js";
 import { runLoop, type EdgeAgentCredentials } from "./agent.js";
 
 function log(message: string): void {
@@ -87,6 +88,9 @@ async function main(): Promise<void> {
       transport: config.typingSimulation
         ? makeTypingAwareTransport()
         : (target, text) => sendImessage(target, text),
+      typing: config.typingIndicator
+        ? (handle, state) => imsgPlusSetTyping(handle, state)
+        : undefined,
       resolveCredentials: () => resolveCredentials(config.principal),
       log,
     },

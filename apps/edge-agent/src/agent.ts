@@ -26,8 +26,51 @@ export interface AgentDeps {
   /** The ONLY privileged operation: send one iMessage (send-only transport). */
   readonly transport: (target: string, text: string) => Promise<void>;
   readonly resolveCredentials: () => Promise<EdgeAgentCredentials>;
+  /** Wave T: protocol typing indicator (imsg-plus IPC). Absent/undefined =
+   *  typing disabled — everything degrades to the plain send. */
+  readonly typing?: (handle: string, state: boolean) => Promise<void>;
   /** stderr logger; must never receive secret-shaped values. */
   readonly log?: (message: string) => void;
+}
+
+/** Typing bubbles auto-clear if no reply claims them (budget death, crash,
+ *  TTL race) — the protocol bubble must never outlive its reason. */
+const TYPING_SELF_OFF_MS = 45_000;
+const typingSelfOffTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function setTypingSafely(
+  deps: AgentDeps,
+  handle: string,
+  state: boolean,
+): Promise<void> {
+  if (deps.typing === undefined) return;
+  try {
+    await deps.typing(handle, state);
+    const existing = typingSelfOffTimers.get(handle);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+      typingSelfOffTimers.delete(handle);
+    }
+    if (state) {
+      typingSelfOffTimers.set(
+        handle,
+        setTimeout(() => {
+          typingSelfOffTimers.delete(handle);
+          deps.typing?.(handle, false).catch(() => {});
+        }, TYPING_SELF_OFF_MS),
+      );
+    }
+  } catch (err) {
+    deps.log?.(
+      `edge-agent: typing ${state ? "on" : "off"} failed for ${handle}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 export interface CycleResult {
@@ -120,6 +163,25 @@ export async function runOnce(deps: AgentDeps, config: EdgeAgentConfig): Promise
   }
   if (notification === null) return none;
 
+  // Wave T control plane: kind=typing is NEVER rendered as a message — it
+  // turns the protocol bubble ON for the think-time window and is handled
+  // (not "delivered" in the human sense).
+  if (notification.kind === "typing") {
+    const handle = notification.payload?.["handle"];
+    if (typeof handle === "string" && handle.length > 0) {
+      await setTypingSafely(deps, handle, true);
+    }
+    try {
+      await deps.fetchFn(
+        `${config.apiUrl}/harness/notifications/${notification.id}/delivered`,
+        { method: "POST", headers: authHeaders(credentials) },
+      );
+    } catch {
+      // control-plane close-out is best-effort; TTL covers it
+    }
+    return { claimed: true, delivered: true };
+  }
+
   // Lane P: reply rows carry their own recipient (validated); everything
   // else delivers to the configured default target, ignoring any recipient.
   const target = resolveDeliveryTarget(notification, credentials.target);
@@ -131,9 +193,18 @@ export async function runOnce(deps: AgentDeps, config: EdgeAgentConfig): Promise
   }
 
   const text = renderNotificationText(notification);
+  // Wave T: show the bubble while the reply "is being typed" — on before
+  // the send, off immediately after (the inbound-time bubble from the
+  // typing control notification may already be showing; this refreshes it).
+  if (deps.typing !== undefined) {
+    await setTypingSafely(deps, target, true);
+    await sleep(900 + Math.min(1800, Math.round(text.length * 6)));
+  }
   try {
     await deps.transport(target, text);
+    await setTypingSafely(deps, target, false);
   } catch (err) {
+    await setTypingSafely(deps, target, false).catch(() => {});
     // Documented failure path: NOT delivered → the row expires via its TTL
     // (expires_at); Jehad OS never records a false delivery.
     log(

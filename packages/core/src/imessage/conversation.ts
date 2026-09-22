@@ -87,6 +87,7 @@ import {
   quietShiftedAck,
   resolveWhenWords,
 } from "../reminders/lifecycle.js";
+import { workflowNotificationsConfig } from "../notifications/config.js";
 import {
   cancelReminder,
   completeReminder,
@@ -1467,6 +1468,31 @@ async function converseTurn(
     }
     // No reply (shouldn't happen) — fall through to normal chat.
   }
+  // Wave T: presence for the think-time window — a short-TTL control
+  // notification the edge turns into a REAL protocol typing bubble (imsg-plus
+  // IPC, no message sent). Best-effort: never blocks, never lies (it fires
+  // only when a model answer is actually about to be attempted).
+  try {
+    const notifConfig = await workflowNotificationsConfig();
+    if (notifConfig.autoApproveKinds.includes("typing")) {
+      const createdBy = await resolveGatewayServicePrincipal(db);
+      await createNotification(db, {
+        kind: "typing",
+        title: "Typing",
+        payload: { handle },
+        sourceType: "run",
+        sourceId: null,
+        createdBy,
+        surface: CONVERSATION_SURFACE,
+        requestingPrincipalId: input.principalId,
+        conversationPrincipalId: input.principalId,
+        expiresAt: new Date(now.getTime() + 90_000),
+      }, { actor, now: () => now, config: notifConfig });
+    }
+  } catch {
+    // presence is best-effort
+  }
+
   const usage = await conversationUsage(db, input.principalId, { now: () => now });
   if (usage.requestsLastHour >= policy.requestsPerHour) {
     await audit(db, actor, "imessage.converse.denied", {

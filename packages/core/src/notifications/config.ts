@@ -11,7 +11,7 @@ import { loadPolicyFile } from "../policy/ceiling.js";
 
 export const NOTIFICATION_KINDS = [
   "brief", "escalation", "custom", "calendar-change", "reply", "calibration",
-"grant-reminder",
+"grant-reminder", "typing",
 ] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 

@@ -378,7 +378,7 @@ describe.skipIf(!TEST_DATABASE_URL)("notification service (integration)", () => 
     const config = await loadNotificationsConfig();
     expect(config).toEqual({
       ...DEFAULT_NOTIFICATIONS_CONFIG,
-      autoApproveKinds: ["brief", "calendar-change", "calibration", "grant-reminder"], // E4-S: calendar-change joins the auto-approve list
+      autoApproveKinds: ["brief", "calendar-change", "calibration", "grant-reminder", "typing"], // E4-S list + Wave T typing control plane
     });
     expect(config.escalationMinUrgency).toBe("high"); // escalations keep the >= high threshold
   });

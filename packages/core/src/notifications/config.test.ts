@@ -76,7 +76,7 @@ describe("notifications policy section (policy.yaml)", () => {
     const { loadNotificationsConfig } = await import("./config.js");
     const config = await loadNotificationsConfig();
     expect(config).toEqual({
-      autoApproveKinds: ["brief", "calendar-change", "calibration", "grant-reminder"],
+      autoApproveKinds: ["brief", "calendar-change", "calibration", "grant-reminder", "typing"],
       escalationMinUrgency: "high",
       defaultTtlMinutes: 240,
     });

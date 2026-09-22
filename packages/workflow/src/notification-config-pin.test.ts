@@ -61,6 +61,21 @@ describe("F0 pin: workflow notification producers pass the policy config", () =>
   it("the do-not-convert set never loads a notification config", async () => {
     for (const rel of DO_NOT_CONVERT_FILES) {
       const content = await readFile(join(REPO_ROOT, rel), "utf8");
+      // Wave T carve-out: conversation.ts hosts the kind=typing control
+      // producer, which is policy-governed by design (it is NOT the reply
+      // path). The REPLY producer itself must stay default-config: assert
+      // the reply-kind createNotification block passes no config.
+      if (rel === "packages/core/src/imessage/conversation.ts") {
+        const replyBlock = content.slice(
+          content.indexOf('kind: "reply"'),
+          content.indexOf("sourceType", content.indexOf('kind: "reply"')),
+        );
+        expect(
+          replyBlock.includes("config"),
+          "the reply producer must stay default-config (conjunction governs it)",
+        ).toBe(false);
+        continue;
+      }
       expect(
         content.includes("workflowNotificationsConfig") || content.includes("loadNotificationsConfig"),
         `${rel} must stay policy-config-free (do-not-convert set)`,

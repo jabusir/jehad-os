@@ -34,7 +34,7 @@ autonomy_ceiling:
 #                           expires_at; past it a row is expired and can never
 #                           be claimed or delivered.
 notifications:
-  autoApproveKinds: ["brief", "calendar-change", "calibration", "grant-reminder"]
+  autoApproveKinds: ["brief", "calendar-change", "calibration", "grant-reminder", "typing"]
   escalationMinUrgency: high
   defaultTtlMinutes: 240
 

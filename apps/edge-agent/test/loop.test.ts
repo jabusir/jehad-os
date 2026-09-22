@@ -405,3 +405,54 @@ describe("canonical normalization + rendered-text sha256 (binding hash spec)", (
     );
   });
 });
+
+describe("Wave T: typing control plane", () => {
+  const TYPING_NOTIFICATION = {
+    id: "b7d4b1a2-0000-4000-8000-000000000010",
+    kind: "typing",
+    title: "Typing",
+    payload: { handle: "+15551234567" },
+    claimedAt: "2026-09-18T07:00:05.000Z",
+    expiresAt: "2026-09-18T07:01:35.000Z",
+  };
+
+  it("kind=typing turns the bubble on and is handled — NEVER rendered as a message", async () => {
+    const h = makeHarness({ notification: TYPING_NOTIFICATION });
+    const typingCalls: Array<[string, boolean]> = [];
+    const deps: AgentDeps = {
+      ...h.deps,
+      typing: async (handle, state) => {
+        typingCalls.push([handle, state]);
+      },
+    };
+    const result = await runOnce(deps, CONFIG);
+    expect(result).toEqual({ claimed: true, delivered: true });
+    expect(typingCalls).toEqual([["+15551234567", true]]);
+    expect(h.sent).toHaveLength(0);
+    // close-out: the delivered endpoint was hit for the control row
+    expect(h.calls.at(-1)?.url).toContain(`/harness/notifications/${TYPING_NOTIFICATION.id}/delivered`);
+  });
+
+  it("reply sends wrap the transport with typing on → off (when enabled)", async () => {
+    const h = makeHarness({ notification: NOTIFICATION });
+    const typingCalls: Array<[string, boolean]> = [];
+    const deps: AgentDeps = {
+      ...h.deps,
+      typing: async (handle, state) => {
+        typingCalls.push([handle, state]);
+      },
+    };
+    const result = await runOnce(deps, CONFIG);
+    expect(result).toEqual({ claimed: true, delivered: true });
+    expect(typingCalls[0]).toEqual([CREDENTIALS.target, true]);
+    expect(typingCalls[typingCalls.length - 1]).toEqual([CREDENTIALS.target, false]);
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it("typing hook absent (disabled) → plain behavior, zero typing calls", async () => {
+    const h = makeHarness({ notification: NOTIFICATION });
+    const result = await runOnce(h.deps, CONFIG);
+    expect(result).toEqual({ claimed: true, delivered: true });
+    expect(h.sent).toHaveLength(1);
+  });
+});

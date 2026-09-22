@@ -35,6 +35,10 @@ export interface EdgeAgentConfig {
   /** Wave T: UI-scripted typing bubbles (Accessibility + focus-steal on the
    *  dedicated Mac). DEFAULT OFF — enable with EDGE_TYPING_SIMULATION=1. */
   readonly typingSimulation: boolean;
+  /** Wave T (preferred): REAL protocol typing bubbles via the imsg-plus
+   *  dylib IPC. Requires the one-time host decision (SIP off + injected
+   *  Messages relaunch). DEFAULT OFF — enable with EDGE_TYPING_INDICATOR=1. */
+  readonly typingIndicator: boolean;
   readonly once: boolean;
 }
 
@@ -66,6 +70,7 @@ export function loadConfig(
     pollSeconds,
     principal,
     typingSimulation: env["EDGE_TYPING_SIMULATION"] === "1",
+    typingIndicator: env["EDGE_TYPING_INDICATOR"] === "1",
     once: argv.includes("--once"),
   };
 }
