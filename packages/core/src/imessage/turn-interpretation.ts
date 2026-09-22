@@ -569,6 +569,66 @@ export function parseProbeReply(text: string): ProbeReply | null {
 }
 
 // ---------------------------------------------------------------------------
+// W6-phase-2-fix (00:09 transcript): affirmative confirmations. The exact
+// verb grammar (parseProposalConfirm) bounced "yes capture as commitments…"
+// at the wall while the model invented its own vocabulary. An unambiguous
+// affirmative now applies whatever is pending — dispatched by pending TYPE,
+// not by phrase — and a residue rule ("anything not specified → thursday")
+// rides the same confirm, deterministically.
+// ---------------------------------------------------------------------------
+
+export interface ProposalAffirmation {
+  /** Non-affirmative remainder of the utterance ("" when bare). */
+  readonly residue: string;
+  /** A rest/default due rule found in the residue ("thursday"), else null. */
+  readonly defaultDue: string | null;
+}
+
+const AFFIRM_LEAD_RE =
+  /^(?:ok(?:ay)?[,.! ]+|please[,.! ]+|well[,.! ]+)*(?:confirm|approved?|yes|yeah|yep|yup|sure|do it|go ahead|track (?:them|it)|log it|log them|remember it|capture (?:them|it)|commit (?:them|it)|apply (?:it|that))\b[,.!]?\s*(.*)$/i;
+const AFFIRM_FILLER_RE = /^(?:please|thanks|thank you|sir|that'?s all|appreciate it|plz)[.!, ]*$/i;
+const AFFIRM_QUESTIONISH_RE =
+  /\b(?:what|when|where|why|who|how|which|can|could|would|should|does|did|is|are)\b/i;
+
+/**
+ * A default-due rule in a confirmation residue: "anything that isn't
+ * specified for wednesday, assign thursday as a deadline". The date NEAREST
+ * AFTER an assign/set/default verb wins (never the exclusion date).
+ */
+const DEFAULT_DUE_RULE_RES: ReadonlyArray<{ re: RegExp; group: number }> = [
+  { re: /\b(?:assign|set|give|make|put|use|default)\b[^.,;!?]{0,60}?\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|tonight|today)\b/i, group: 1 },
+  { re: /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b[^.,;!?]{0,40}?\b(?:for|as) (?:the )?(?:rest|default|everything else|anything else|others?)\b/i, group: 1 },
+  { re: /\b(?:anything|everything|all|the rest|rest|whichever|items?|tasks?)\b[^.,;!?]{0,80}?\b(?:not|n't|never)? ?(?:been )?(?:specified|listed|mentioned|dated)[^.,;!?]{0,40}?\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|tonight|today)\b/i, group: 1 },
+];
+
+export function parseDefaultDueRule(residue: string): string | null {
+  for (const { re, group } of DEFAULT_DUE_RULE_RES) {
+    const m = residue.match(re);
+    if (m !== null) return m[group]!.toLowerCase();
+  }
+  return null;
+}
+
+export function parseProposalAffirmation(text: string): ProposalAffirmation | null {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim().replace(/\s+/g, " ");
+  if (trimmed.length === 0 || trimmed.length > 200) return null;
+  const lead = trimmed.match(AFFIRM_LEAD_RE);
+  if (lead === null) return null;
+  const residue = (lead[1] ?? "").trim().replace(/[.!,?]+$/, "");
+  if (residue.length === 0) return { residue: "", defaultDue: null };
+  const defaultDue = parseDefaultDueRule(residue);
+  if (defaultDue !== null) return { residue, defaultDue };
+  // Question-ish or substantial residue = a negotiation, not a confirm —
+  // fall through so the model sees the whole turn.
+  if (AFFIRM_QUESTIONISH_RE.test(residue)) return null;
+  if (residue.length <= 32 && AFFIRM_FILLER_RE.test(residue)) {
+    return { residue: "", defaultDue: null };
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 
 /** Bridge results carry an honest reply for EVERY outcome (R10). */
 export interface BridgeOutcome {

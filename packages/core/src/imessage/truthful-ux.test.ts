@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   COVERAGE_LIMIT_FIRST_RULE,
+  NO_ACCESS_OVERCLAIM_RULE,
+  NO_INVENTED_COMMANDS_RULE,
   PERSISTENCE_TRUTH_RULE,
   SELF_MODEL_RULE,
   TRUTHFUL_UX_RULES,
+  isMachinerySentence,
+  stripMachineryLines,
 } from "./truthful-ux.js";
 
 describe("TRUTHFUL_UX_RULES (W6(c) artifact pin — pure strings, exact)", () => {
@@ -12,8 +16,10 @@ describe("TRUTHFUL_UX_RULES (W6(c) artifact pin — pure strings, exact)", () =>
       PERSISTENCE_TRUTH_RULE,
       COVERAGE_LIMIT_FIRST_RULE,
       SELF_MODEL_RULE,
+      NO_INVENTED_COMMANDS_RULE,
+      NO_ACCESS_OVERCLAIM_RULE,
     ]);
-    expect(TRUTHFUL_UX_RULES).toHaveLength(3);
+    expect(TRUTHFUL_UX_RULES).toHaveLength(5);
   });
 
   it("rule (a) pins the §5-15 persistence invariant, including the no-write wording", () => {
@@ -45,5 +51,30 @@ describe("TRUTHFUL_UX_RULES (W6(c) artifact pin — pure strings, exact)", () =>
     }
     const joined = TRUTHFUL_UX_RULES.join("\n").toLowerCase();
     expect(joined).not.toMatch(/\bgpt-|claude|gemini|openrouter\b/);
+  });
+});
+
+describe("stripMachineryLines (00:09 transcript: the model invented 'confirm')", () => {
+  it("strips the exact fabricated line from the transcript", () => {
+    expect(
+      stripMachineryLines(
+        "Understood.\n\nI'll capture all 9 items: 3 due Wednesday, 6 due Thursday.\n\nReply 'confirm' to track them.",
+      ),
+    ).toBe("Understood.\n\nI'll capture all 9 items: 3 due Wednesday, 6 due Thursday.");
+  });
+  it("strips respond-with and say-the-word variants", () => {
+    expect(stripMachineryLines("Done. Respond with 'approve' to apply.")).toBe("Done.");
+    expect(stripMachineryLines("Okay. Say \"track them\" if you want that.")).toBe("Okay.");
+    expect(isMachinerySentence("Reply 'confirm' to track them.")).toBe(true);
+  });
+  it("never touches ordinary conversation", () => {
+    const t = "I can call the venue tomorrow to confirm the appointment details.";
+    expect(stripMachineryLines(t)).toBe(t);
+    const t2 = "What time works for you?";
+    expect(stripMachineryLines(t2)).toBe(t2);
+  });
+  it("long lines that merely quote a word are preserved", () => {
+    const long = "You asked me to reply 'confirm' " + "x".repeat(160) + " and that is the full story.";
+    expect(stripMachineryLines(long)).toBe(long);
   });
 });

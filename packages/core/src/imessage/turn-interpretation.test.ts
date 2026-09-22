@@ -16,8 +16,10 @@ import {
   applyTaskBatchResolution,
   buildInterpretationPrompt,
   dueDayWord,
+  parseDefaultDueRule,
   parseInterpretationJson,
   parseProbeReply,
+  parseProposalAffirmation,
   parseProposalConfirm,
   renderProposalOffer,
   type Proposal,
@@ -410,5 +412,34 @@ describe("applyTaskBatchResolution (pure due-date math, week boundaries)", () =>
     expect(applyTaskBatchResolution({ title: "t", due: null }, now).normalizedTime).toBeNull();
     expect(applyTaskBatchResolution({ title: "t", due: null }, now).status).toBe("none");
     expect(applyTaskBatchResolution({ title: "t", due: "sometime" }, now).status).toBe("ambiguous");
+  });
+});
+
+describe("parseProposalAffirmation (00:09 transcript: explicit consent bounced)", () => {
+  it("bare affirmatives confirm", () => {
+    expect(parseProposalAffirmation("confirm")).toEqual({ residue: "", defaultDue: null });
+    expect(parseProposalAffirmation("yes")).toEqual({ residue: "", defaultDue: null });
+    expect(parseProposalAffirmation("Yep!")).toEqual({ residue: "", defaultDue: null });
+    expect(parseProposalAffirmation("Do it.")).toEqual({ residue: "", defaultDue: null });
+    expect(parseProposalAffirmation("go ahead")).toEqual({ residue: "", defaultDue: null });
+  });
+  it("affirmative + default-due residue carries the rule", () => {
+    const a = parseProposalAffirmation(
+      "yes capture as committments anything that isnt specified for wednesday assign thursday as a deadline",
+    );
+    expect(a).not.toBeNull();
+    expect(a!.defaultDue).toBe("thursday");
+  });
+  it("the assign-verb date wins over the exclusion date", () => {
+    expect(parseDefaultDueRule("anything that isnt specified for wednesday assign thursday as a deadline")).toBe("thursday");
+  });
+  it("question-ish residue is a negotiation, not a confirm", () => {
+    expect(parseProposalAffirmation("yes and also what's on my calendar tomorrow")).toBeNull();
+    expect(parseProposalAffirmation("yes but can you move the first one")).toBeNull();
+  });
+  it("non-affirmatives never match", () => {
+    expect(parseProposalAffirmation("what commitments are open")).toBeNull();
+    expect(parseProposalAffirmation("no")).toBeNull();
+    expect(parseProposalAffirmation("")).toBeNull();
   });
 });

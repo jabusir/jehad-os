@@ -73,7 +73,7 @@ gateway:
   interpret: { enabled: true }
   principals:
     yusra: { model: openai/gpt-4o-mini, requests_per_hour: 20, cost_per_day: 2.0 }
-    josctl: { model: openai/gpt-4o-mini, requests_per_hour: 30, cost_per_day: 5.0, reads: [calendar, commitments, gmail, state, memory, system] }
+    josctl: { model: openai/gpt-4o-mini, requests_per_hour: 60, cost_per_day: 5.0, reads: [calendar, commitments, gmail, state, memory, system] }
 
 # personas — W4 interaction-profile switch (jarvis-v1.md §7 W4 rev2 R2;
 # §5 invariant 2). SECURITY/DEFAULT LAYER ONLY: the on/off flag plus the

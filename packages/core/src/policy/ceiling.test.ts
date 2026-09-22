@@ -232,7 +232,7 @@ describe("policy gateway section (multi-principal Lane P)", () => {
     });
     expect(policy.gateway?.principals.josctl).toEqual({
       model: "openai/gpt-4o-mini",
-      requestsPerHour: 30,
+      requestsPerHour: 60, // answer-pass calls only (route/interpret don't count)
       costPerDay: 5,
       reads: ["calendar", "commitments", "gmail", "state", "memory", "system"], // state/memory/system: W1-W7
     });

@@ -726,15 +726,23 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation phase E (integration)
     expect(second.reason).toBe("over-requests-hour");
   });
 
-  it("budget: a grounded turn consumes 2 requests; cap 2 denies the next turn", async () => {
+  it("budget: a grounded turn consumes 1 request (answer pass only — route/interpret are plumbing); cap 1 denies the next turn", async () => {
     const tightDeps: ConversationDeps = {
       ...deps,
-      principalPolicy: () => ({ ...OWNER_POLICY, requestsPerHour: 2 }),
+      principalPolicy: () => ({ ...OWNER_POLICY, requestsPerHour: 1 }),
     };
     await grantConverse(jehadId);
     queue = [{ text: '{"tool":"calendar.next"}' }, { text: "next up: interview" }, { text: "unused" }];
     const first = await handleInbound(tightDeps, { principalId: jehadId, handle: JEHAD_HANDLE, text: "what's next?" });
     expect(first.replied).toBe(true);
+    // three model_calls happened (route + interpret + answer) but only the
+    // answer pass spends the user-facing budget (00:12 transcript: the old
+    // all-calls counter killed real conversations at ~10 messages/hour).
+    const calls = await db.pool.query(
+      "SELECT count(*)::int AS n FROM model_calls WHERE principal_id = $1::uuid AND surface = 'imessage'",
+      [jehadId],
+    );
+    expect(Number(calls.rows[0].n)).toBe(3);
     const second = await handleInbound(tightDeps, { principalId: jehadId, handle: JEHAD_HANDLE, text: "what's next?" });
     expect(second.replied).toBe(false);
     expect(second.reason).toBe("over-requests-hour");
