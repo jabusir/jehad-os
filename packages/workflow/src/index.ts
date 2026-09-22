@@ -90,6 +90,30 @@ export {
 } from "./calibration-workflows.js";
 
 export {
+  aggregateClaimAudits,
+  aggregateExpiredRatified,
+  aggregateRateLimits,
+  CLAIM_DRIFT_SUBJECT_PREFIX,
+  CLAIM_MISMATCH_THRESHOLD,
+  EXPIRED_RATIFIED_SUBJECT,
+  EXPIRED_RATIFIED_THRESHOLD,
+  lessonHarvestWorkflow,
+  lessonHarvestWorkflows,
+  LESSON_HARVEST_CRON,
+  LESSON_HARVEST_LOCAL_HOUR,
+  LESSON_HARVEST_WINDOW_HOURS,
+  normalizeClaimType,
+  RATE_LIMIT_SUBJECT,
+  RATE_LIMIT_THRESHOLD,
+  RATIFIED_SENTINEL_KINDS,
+  runLessonHarvestTick,
+  SAFE_FALLBACK_THRESHOLD,
+  type ClaimTypeEvidence,
+  type LessonCandidate,
+  type LessonHarvestResult,
+} from "./lesson-harvest-workflows.js";
+
+export {
   APPROVE_SIGNAL_PREFIX,
   createWorkflowRuntime,
   type EventSender,
