@@ -44,6 +44,17 @@ export {
   calendarOccurrenceSweepWorkflow,
   type CalendarOccurrenceSweepResult,
 } from "./occurrence-workflows.js";
+export {
+  reminderSweepWorkflow,
+  REMINDER_SWEEP_ACTOR,
+  REMINDER_SWEEP_CRON,
+  REMINDER_SURFACE,
+  REMINDER_TOUCH_AUDIT_ACTION,
+  REMINDER_NOTIFICATION_TITLE,
+  runReminderSweepTick,
+  type PendingProbe,
+  type ReminderSweepResult,
+} from "./reminder-workflows.js";
 export { grantReminderWorkflow } from "./grant-workflows.js";export {
   gmailSyncWorkflow,
   GMAIL_INGEST_CAPABILITY,
