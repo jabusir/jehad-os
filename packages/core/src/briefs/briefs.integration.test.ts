@@ -14,6 +14,7 @@ import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../..
 import { seedQueryFixtureWorld, type FixtureIds } from "../queries/fixtures.js";
 import { raiseEscalation } from "../escalations/service.js";
 import { syncCalendar, type CalendarSourcePort } from "../calendar/sync.js";
+import { createReminder, parkReminder } from "../reminders/queries.js";
 import { renderEveningClose, renderMorningBrief } from "./service.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -308,5 +309,72 @@ describe.skipIf(!TEST_DATABASE_URL)("briefs (integration)", () => {
     } finally {
       await dropIsolatedTestDb(TEST_DATABASE_URL!, churnDb);
     }
+  });
+
+  it("W6-phase-2: reminders parked in the last 24h render as 'Stopped reminders'; older parks and armed rows do not", async () => {
+    const inserted = await db.pool.query(
+      `INSERT INTO principals (type, name) VALUES ('user', $1) RETURNING id`,
+      [`stopme-${randomUUID().slice(0, 8)}`],
+    );
+    const pid = String(inserted.rows[0]!.id);
+
+    const inWindow = await createReminder(db.pool, {
+      principal: pid,
+      title: "Text Sam back about the lease",
+      dueDate: "2026-09-18",
+      firstTouchAt: new Date(NOW.getTime() - 26 * HOUR),
+      firstTouchKind: "morning",
+    });
+    await parkReminder(db.pool, inWindow.id, new Date(NOW.getTime() - 2 * HOUR));
+
+    // Parked 30h ago — outside the 24h surface window.
+    const outside = await createReminder(db.pool, {
+      principal: pid,
+      title: "Book the gym trial",
+      dueDate: "2026-09-18",
+      firstTouchAt: new Date(NOW.getTime() - 40 * HOUR),
+      firstTouchKind: "morning",
+    });
+    await parkReminder(db.pool, outside.id, new Date(NOW.getTime() - 30 * HOUR));
+
+    // Still armed — never surfaces as stopped.
+    await createReminder(db.pool, {
+      principal: pid,
+      title: "Still armed",
+      dueDate: "2026-09-19",
+      firstTouchAt: NOW,
+      firstTouchKind: "morning",
+    });
+
+    const outcome = await renderEveningClose(db.pool, { now, reminderPrincipalId: pid });
+    expect(outcome.suppressed).toBe(false);
+    const content = outcome.content!;
+    expect(content).toContain("Stopped reminders");
+    expect(content).toContain("- Stopped texting about: Text Sam back about the lease — still open.");
+    expect(content).not.toContain("Book the gym trial");
+    expect(content).not.toContain("Still armed");
+
+    // Default resolution: no review-policy principal exists in this world → no section.
+    const fallback = await renderEveningClose(db.pool, { now });
+    expect(fallback.content).not.toContain("Stopped reminders");
+  });
+
+  it("W6-phase-2: parked reminders count against nothing — a parked-only close stays suppressed", async () => {
+    const inserted = await emptyDb.pool.query(
+      `INSERT INTO principals (type, name) VALUES ('user', $1) RETURNING id`,
+      [`parkonly-${randomUUID().slice(0, 8)}`],
+    );
+    const pid = String(inserted.rows[0]!.id);
+    const reminder = await createReminder(emptyDb.pool, {
+      principal: pid,
+      title: "Text Sam back about the lease",
+      dueDate: "2026-09-18",
+      firstTouchAt: new Date(NOW.getTime() - 2 * HOUR),
+      firstTouchKind: "morning",
+    });
+    await parkReminder(emptyDb.pool, reminder.id, new Date(NOW.getTime() - HOUR));
+
+    const outcome = await renderEveningClose(emptyDb.pool, { now, reminderPrincipalId: pid });
+    expect(outcome).toMatchObject({ kind: "close", suppressed: true, content: null, artifactId: null });
   });
 });

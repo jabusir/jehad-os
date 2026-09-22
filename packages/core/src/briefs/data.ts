@@ -37,12 +37,16 @@ import {
   refsForBrief,
   type ReviewDigest,
 } from "../imessage/review-commands.js";
+import { listParkedSince } from "../reminders/queries.js";
 
 /** Briefs are a personal-operations surface (plan §13); artifacts land here. */
 export const BRIEF_DOMAIN_KEY = "personal";
 
 /** Default delta window: 16h (evening close → next morning brief). */
 export const DEFAULT_BRIEF_WINDOW_MS = 16 * 60 * 60 * 1000;
+
+/** Parked-reminder surface window: parked within the last 24h (w6-phase-2). */
+export const PARKED_REMINDER_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export interface BriefOptions {
   readonly now?: () => Date;
@@ -57,6 +61,12 @@ export interface BriefOptions {
    * default policy; explicit null disables the section.
    */
   readonly reviewPrincipalId?: string | null;
+  /**
+   * W6-phase-2: the principal whose parked reminders feed the evening
+   * "Stopped reminders" section. Same single-tenant default as the review
+   * section; explicit null disables the section.
+   */
+  readonly reminderPrincipalId?: string | null;
 }
 
 export interface EscalationReasonCount {
@@ -103,6 +113,11 @@ export interface MorningBriefData {
   readonly review: ReviewDigest | null;
 }
 
+/** A reminder the system stopped texting about (parked) — evening surface only. */
+export interface StoppedReminderItem {
+  readonly title: string;
+}
+
 export interface EveningCloseData {
   readonly kind: "close";
   readonly domainId: string;
@@ -117,6 +132,12 @@ export interface EveningCloseData {
   /** blocked_by edge ids created/updated inside the window → "new" markers. */
   readonly newBlockedEdgeIds: readonly string[];
   readonly unlock: LeverageDecision | null;
+  /**
+   * W6-phase-2: reminders parked in the last 24h (parkReminder stops the
+   * texts; the evening brief is the only surface). Counts against nothing —
+   * it renders as its own section but never makes a close meaningful.
+   */
+  readonly stoppedReminders: readonly StoppedReminderItem[];
   /**
    * W5(d) plan divergence: same-day calendar churn (moved/cancelled
    * within the day), null on quiet days (§31 suppression). Plan churn
@@ -180,6 +201,22 @@ async function resolveReviewPrincipalId(
 ): Promise<string | null> {
   if (opts.reviewPrincipalId === null) return null;
   if (opts.reviewPrincipalId !== undefined) return opts.reviewPrincipalId;
+  const name = DEFAULT_REVIEW_POLICY.principals[0];
+  if (name === undefined) return null;
+  const result = await db.query(`SELECT id FROM principals WHERE name = $1 LIMIT 1`, [name]);
+  return result.rows[0] === undefined ? null : String(result.rows[0].id);
+}
+
+/**
+ * The evening "Stopped reminders" principal (w6-phase-2) — same single-tenant
+ * default as the review section; absent principal → no section (suppressed).
+ */
+async function resolveReminderPrincipalId(
+  db: QueryExecutor,
+  opts: BriefOptions,
+): Promise<string | null> {
+  if (opts.reminderPrincipalId === null) return null;
+  if (opts.reminderPrincipalId !== undefined) return opts.reminderPrincipalId;
   const name = DEFAULT_REVIEW_POLICY.principals[0];
   if (name === undefined) return null;
   const result = await db.query(`SELECT id FROM principals WHERE name = $1 LIMIT 1`, [name]);
@@ -300,6 +337,19 @@ export async function collectEveningCloseData(
     highestLeverageDecision(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
   ]);
 
+  // W6-phase-2: reminders parked in the last 24h surface here and only here
+  // (parkReminder stops the texts). Counts against nothing — see
+  // isEveningCloseMeaningful.
+  const reminderPrincipalId = await resolveReminderPrincipalId(db, opts);
+  const parked =
+    reminderPrincipalId === null
+      ? []
+      : await listParkedSince(
+          db,
+          reminderPrincipalId,
+          new Date(now.getTime() - PARKED_REMINDER_WINDOW_MS),
+        );
+
   return {
     kind: "close",
     domainId: BRIEF_DOMAIN_KEY,
@@ -316,6 +366,7 @@ export async function collectEveningCloseData(
       .map((r) => r.id),
     unlock: pickUnlock(ranked),
     divergence,
+    stoppedReminders: parked.map((r) => ({ title: r.title })),
   };
 }
 
@@ -357,7 +408,8 @@ export function isMorningBriefMeaningful(data: MorningBriefData): boolean {
  * tomorrow, or same-day plan churn (W5(d) — churn is real attention about
  * the day, honesty-pinned as plan divergence). Calm future-dated waits
  * alone do not make a close meaningful (§31: no summary when nothing
- * meaningful changed).
+ * meaningful changed). Parked ("stopped") reminders count against nothing
+ * (w6-phase-2): they are part of the brief itself and never un-suppress it.
  */
 export function isEveningCloseMeaningful(data: EveningCloseData): boolean {
   return (

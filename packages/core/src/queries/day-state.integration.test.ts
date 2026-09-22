@@ -8,6 +8,7 @@ import { syncCalendar, type CalendarSourcePort } from "../calendar/sync.js";
 import { upsertCalendarSyncState } from "../calendar/projection.js";
 import { collectDayState, DAY_STATE_COVERAGE, renderDayStateText } from "./day-state.js";
 import { executeReadTool, runReadSet } from "../imessage/read-tools.js";
+import { createReminder } from "../reminders/queries.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const NOW = new Date("2026-09-17T12:00:00.000Z");
@@ -464,5 +465,40 @@ describe.skipIf(!TEST_DATABASE_URL)("day.state (integration)", () => {
     const text = renderDayStateText(await collectDayState(db.pool, principalA, { now }));
     expect(text).toContain("- calendar sync: 21 upcoming events updated (bulk import)");
     expect(text).not.toContain("calendar.event.updated ×21");
+  });
+
+  it("armed reminders: count renders only when > 0, scoped per principal", async () => {
+    const inserted = await db.pool.query(
+      `INSERT INTO principals (type, name) VALUES ('user', $1) RETURNING id`,
+      [`reminder-${randomUUID().slice(0, 8)}`],
+    );
+    const principalC = String(inserted.rows[0]!.id);
+    await createReminder(db.pool, {
+      principal: principalC,
+      title: "Call the dentist",
+      dueDate: "2026-09-18",
+      firstTouchAt: NOW,
+      firstTouchKind: "morning",
+    });
+    await createReminder(db.pool, {
+      principal: principalC,
+      title: "Pay the parking ticket",
+      dueDate: "2026-09-18",
+      firstTouchAt: NOW,
+      firstTouchKind: "morning",
+    });
+
+    const data = await collectDayState(db.pool, principalC, { now });
+    expect(data.armedReminders).toBe(2);
+    expect(renderDayStateText(data)).toContain("Reminders armed: 2.");
+
+    // Zero → no line (and never leaked across principals).
+    const quietData = await collectDayState(db.pool, quietPrincipal, { now });
+    expect(quietData.armedReminders).toBe(0);
+    const quietText = renderDayStateText(quietData);
+    expect(quietText).not.toContain("Reminders armed");
+    const busyData = await collectDayState(db.pool, principalA, { now });
+    expect(busyData.armedReminders).toBe(0);
+    expect(renderDayStateText(busyData)).not.toContain("Reminders armed");
   });
 });

@@ -304,6 +304,7 @@ const EVENING_FULL: EveningCloseData = {
   newBlockedEdgeIds: ["r-old"],
   unlock: MORNING_FULL.unlock,
   divergence: null,
+  stoppedReminders: [],
 };
 
 const EVENING_EMPTY: EveningCloseData = {
@@ -317,6 +318,7 @@ const EVENING_EMPTY: EveningCloseData = {
   newBlockedEdgeIds: [],
   unlock: null,
   divergence: null,
+  stoppedReminders: [],
 };
 
 /** W5(d): 2 of 3 blocks churned same-day (plan divergence — unverified). */
@@ -477,6 +479,26 @@ Plan churn
     expect(content).not.toContain("Plan churn");
     expect(content).not.toContain("unverified");
   });
+
+  it("W6-phase-2: parked reminders render one terse line each under 'Stopped reminders'", () => {
+    const stopped: EveningCloseData = {
+      ...EVENING_EMPTY,
+      stillWaiting: [],
+      stoppedReminders: [{ title: "Text Sam back about the lease" }, { title: "Book the gym trial" }],
+    };
+    expect(renderEveningCloseText(stopped)).toBe(`Evening close — Thu, Sep 17
+
+Stopped reminders
+- Stopped texting about: Text Sam back about the lease — still open.
+- Stopped texting about: Book the gym trial — still open.
+`);
+  });
+
+  it("W6-phase-2: no parked reminders → no 'Stopped reminders' section", () => {
+    const content = renderEveningCloseText(EVENING_EMPTY);
+    expect(content).not.toContain("Stopped reminders");
+    expect(content).not.toContain("Stopped texting about");
+  });
 });
 
 describe("suppression predicates (§31 nothing-meaningful-changed)", () => {
@@ -511,6 +533,16 @@ describe("suppression predicates (§31 nothing-meaningful-changed)", () => {
     // W5(d): same-day plan churn alone makes the close meaningful — churn
     // is real attention about the day (honesty-pinned as plan divergence).
     expect(isEveningCloseMeaningful({ ...EVENING_EMPTY, stillWaiting: [], divergence: DIVERGENCE })).toBe(true);
+
+    // W6-phase-2: parked reminders count against nothing — a parked-only
+    // day stays suppressed (the section is part of the brief itself).
+    expect(
+      isEveningCloseMeaningful({
+        ...EVENING_EMPTY,
+        stillWaiting: [],
+        stoppedReminders: [{ title: "Text Sam back about the lease" }],
+      }),
+    ).toBe(false);
 
     // A calm, future-dated wait alone stays suppressed.
     expect(isEveningCloseMeaningful({ ...EVENING_EMPTY, stillWaiting: EVENING_EMPTY.stillWaiting })).toBe(false);
