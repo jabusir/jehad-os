@@ -350,11 +350,15 @@ describe.skipIf(!TEST_DATABASE_URL)("conversation eval runner (integration, herm
         }),
       ],
     });
-    expect(run.counts).toEqual({ pass: 2, fail: 1, skip: 0 });
+    // Wave SV1: the hallucinated claim never ships — the send-time claim
+    // audit replaces it with the truthful line, so the scenario PASSES and
+    // the delivered reply is the replacement, not the lie.
+    expect(run.counts).toEqual({ pass: 3, fail: 0, skip: 0 });
     const byId = new Map(run.results.map((result) => [result.id, result]));
-    expect(byId.get("synthetic-persistence-hallucination-01")!.failures).toEqual([
-      'persistence claim "I\'ve saved" without a durable write (no db write pin passed)',
-    ]);
+    const hallucination = byId.get("synthetic-persistence-hallucination-01")!;
+    expect(hallucination.status).toBe("pass");
+    expect(hallucination.turns[0]!.reply).not.toContain("I've saved");
+    expect(hallucination.turns[0]!.reply).toContain("nothing has been written yet");
     expect(byId.get("synthetic-persistence-honest-01")!.status).toBe("pass");
     expect(byId.get("synthetic-persistence-licensed-01")!.status).toBe("pass");
   });

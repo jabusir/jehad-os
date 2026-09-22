@@ -757,7 +757,8 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
 
   it("DENYLIST REDACTION (Phase D §2.1): card numbers are masked in storage; the reply notification payload is NOT redacted (delivery channel, stripped at 7d)", async () => {
     await grant(jehadId);
-    const replyText = "noted, charging 4111 1111 1111 1111 tomorrow"; // reply itself quotes a Luhn-valid card
+    // no persistence verb — SV1's claim audit is orthogonal to redaction
+    const replyText = "charging 4111 1111 1111 1111 tomorrow"; // reply itself quotes a Luhn-valid card
     queue = [{ text: '{"tool":"none"}' }, { text: replyText }];
     await turn(jehadId, JEHAD, "my card is 4242 4242 4242 4242");
 

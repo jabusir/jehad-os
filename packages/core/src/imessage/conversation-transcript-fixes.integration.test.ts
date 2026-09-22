@@ -279,6 +279,30 @@ describe.skipIf(!TEST_DATABASE_URL)("transcript autopsy fixes (integration)", ()
     expect(reply).toContain("Tracked 9 tasks");
   });
 
+  it("SV1 end-to-end: a lying model gets its claim replaced before send + ledgered", async () => {
+    // fresh world: earlier tests' captures would otherwise count as writes
+    await db.pool.query("DELETE FROM commitments");
+    const outcome = await handleInbound(
+      deps({
+        modelReply: "Done — I tracked all 8 commitments just now.",
+        requestsPerHour: 60,
+      }),
+      { principalId, handle, text: "did you track my list?" },
+    );
+    expect(outcome.replied).toBe(true);
+    const reply = (await replyOf(outcome)) ?? "";
+    expect(reply).not.toContain("tracked all 8");
+    expect(reply).toContain("nothing has been written yet");
+    const ledger = await db.pool.query(
+      `SELECT outputs_ref FROM audit_log WHERE action = 'converse.claim_audit'
+         ORDER BY created_at DESC LIMIT 1`,
+    );
+    const findings = JSON.parse(ledger.rows[0].outputs_ref).findings;
+    expect(findings.length).toBeGreaterThan(0);
+    expect(findings[0].claim_type).toBe("persistence_write");
+    expect(findings[0].remediation).toBe("deterministic_replace");
+  });
+
   it("fix 10 (pure): open-items asks with an empty route read-set get day.state", () => {
     expect(augmentReadSetForAsk([], "what open items do i have for tomorrow", ["state"])).toEqual([
       { tool: "day.state" },
