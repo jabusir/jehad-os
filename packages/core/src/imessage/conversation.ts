@@ -2011,6 +2011,8 @@ async function converseTurn(
   // canonical handle (row column + payload), requesting/conversation
   // principal = her, third_party=false, surface imessage. Built AFTER the
   // scrub + offer append — the delivered payload is the final text.
+  // No policy config (F0 do-not-convert): kind=reply is governed by the
+  // conjunction, never autoApproveKinds.
   const createdBy = await resolveGatewayServicePrincipal(db);
   const notification = await createNotification(
     db,
@@ -2204,6 +2206,8 @@ async function deterministicReply(
       receivedAt: now,
     });
   }
+  // No policy config (F0 do-not-convert): kind=reply is governed by the
+  // conjunction, never autoApproveKinds.
   const createdBy = await resolveGatewayServicePrincipal(db);
   const notification = await createNotification(
     db,

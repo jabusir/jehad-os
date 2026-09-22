@@ -4,7 +4,7 @@
 // once per grant at T-48h, at a sane local hour (never quiet hours).
 
 import { Pool } from "pg";
-import { createNotification } from "@jehad/core";
+import { createNotification, workflowNotificationsConfig } from "@jehad/core";
 import { defineScheduledWorkflow, type ScheduledWorkflowDefinition } from "./definition.js";
 import { isLocalHour } from "./brief-workflows.js";
 
@@ -76,7 +76,13 @@ export async function runGrantReminderTick(
       sourceId: grantId,
       createdBy: String(service.rows[0].id),
     },
-    { actor: opts.actor ?? "system:grant-reminder", now: () => now },
+    // Policy config explicit: the reminder must be born approved and
+    // claimable (Sep 26 deadline path) — never the default fallback.
+    {
+      actor: opts.actor ?? "system:grant-reminder",
+      now: () => now,
+      config: await workflowNotificationsConfig(),
+    },
   );
   return { status: "reminded", grantId, notificationId: notification.id };
 }

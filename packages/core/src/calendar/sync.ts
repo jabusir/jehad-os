@@ -138,7 +138,11 @@ export interface CalendarSyncOptions {
    * Default false — tests and non-notifying callers stay quiet.
    */
   readonly notify?: boolean;
-  /** Overrides the policy-file notification config (tests). */
+  /**
+   * Test-only override of the notification policy. Production never passes
+   * this — enqueueCalendarChangeNotification loads the repo-root policy.yaml
+   * itself, so the workflow path is always policy-governed.
+   */
   readonly notificationConfig?: NotificationsConfig;
 }
 

@@ -42,6 +42,7 @@ import {
   openCalibrationItem,
   parsePolicyV1,
   weeklyRollup,
+  workflowNotificationsConfig,
   type SqlExecutor,
 } from "@jehad/core";
 import { BRIEF_LOCAL_TZ, isLocalHour } from "./brief-workflows.js";
@@ -200,11 +201,13 @@ export interface CalibrationSendInput {
 
 /**
  * Enqueue the calibration notification through the existing core
- * notifications service: kind=custom (owner-review queue — calibration is
- * not on the auto-approve list), sourceType=run (workflow-produced),
- * sourceId=itemId on the daily path. RECONCILIATION POINT (lane C1):
- * if C1 ships a dedicated producer hook (enqueueCalibrationNotification
- * or similar), swap this body to it — one call site, two tests.
+ * notifications service: kind=calibration — the resolved labeled default
+ * (owner veto = change one line) — so the weekly rollup is auto-approvable
+ * under the ratified policy and dead-letter-visible exactly like the daily
+ * prompt. The repo-root policy config is passed explicitly (never the
+ * default fallback). RECONCILIATION POINT (lane C1): full consolidation
+ * into a dedicated core producer hook (enqueueCalibrationNotification or
+ * similar) stays with that lane — one call site, two tests.
  */
 export async function sendCalibrationNotification(
   db: SqlExecutor,
@@ -223,7 +226,7 @@ export async function sendCalibrationNotification(
   const notification = await createNotification(
     db,
     {
-      kind: "custom",
+      kind: "calibration",
       title: input.title,
       payload: {
         principal: input.principal,
@@ -235,7 +238,11 @@ export async function sendCalibrationNotification(
       sourceId: input.itemId ?? null,
       createdBy: String(createdBy),
     },
-    { actor: CALIBRATION_SERVICE_ACTOR, now },
+    {
+      actor: CALIBRATION_SERVICE_ACTOR,
+      now,
+      config: await workflowNotificationsConfig(),
+    },
   );
   return notification.id;
 }

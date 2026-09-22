@@ -362,6 +362,9 @@ async function notifyOwnerOfPairing(
   if (createdBy === undefined) {
     throw new Error("notifyOwnerOfPairing: could not resolve the gateway service principal");
   }
+  // No policy config (F0 do-not-convert): the pairing security notice rides
+  // kind=brief, auto-approved under BOTH default and ratified policy —
+  // intentional here, owner decision if that should ever be review-gated.
   await createNotification(
     db,
     {

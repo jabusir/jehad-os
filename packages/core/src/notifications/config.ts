@@ -81,6 +81,18 @@ export async function loadNotificationsConfig(
   return readConfig(resolved);
 }
 
+/**
+ * The workflow-path notification policy: the repo-root policy.yaml, through
+ * the memoized default load (malformed policy THROWS; only ENOENT falls back
+ * to the defaults). Every workflow-created notification MUST pass this to
+ * createNotification — DEFAULT_NOTIFICATIONS_CONFIG is a fail-safe, never a
+ * producer's policy (the Sep 16/21 calibration dead letters were exactly
+ * that fallback).
+ */
+export function workflowNotificationsConfig(): Promise<NotificationsConfig> {
+  return loadNotificationsConfig();
+}
+
 async function readConfig(resolved: string): Promise<NotificationsConfig> {
   try {
     return notificationsConfigFromPolicyV1(await loadPolicyFile(resolved));

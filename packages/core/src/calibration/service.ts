@@ -21,6 +21,7 @@ import { BRIEF_TIMEZONE } from "../briefs/timezone.js";
 import { localDayBounds } from "../calendar/projection.js";
 import { planDivergence } from "../briefs/divergence.js";
 import { createNotification } from "../notifications/service.js";
+import { workflowNotificationsConfig } from "../notifications/config.js";
 import type { QueryExecutor } from "../queries/executor.js";
 
 /** Everything this service needs from pg.Pool (structural subset). */
@@ -336,7 +337,10 @@ async function resolveCalibrationServicePrincipal(db: CalibrationDb): Promise<st
 /**
  * Notification enqueue — the briefs enqueue pattern (enqueueBriefNotification):
  * kind='calibration' next to the item, payload carries the rendered prompt
- * for the edge to deliver verbatim, provenance via sourceType/sourceId.
+ * for the edge to deliver verbatim, provenance via sourceType/sourceId. The
+ * repo-root policy config is loaded explicitly — the nightly prompt is born
+ * approved and claimable (the Sep 16/21 dead letters were the default-config
+ * fallback landing it pending).
  */
 async function enqueueCalibrationNotification(
   db: CalibrationDb,
@@ -368,7 +372,7 @@ async function enqueueCalibrationNotification(
       sourceId: input.item.id,
       createdBy,
     },
-    { actor: CALIBRATION_ACTOR, now: () => input.now },
+    { config: await workflowNotificationsConfig(), actor: CALIBRATION_ACTOR, now: () => input.now },
   );
 }
 

@@ -427,11 +427,14 @@ describe("runWeeklyCalibrationTick (hermetic: C1 seam faked)", () => {
     );
     const input = mocks.createNotification.mock.calls[0]![1]!;
     expect(input).toMatchObject({
-      kind: "custom",
+      kind: "calibration", // weekly rollup rides the ratified calibration kind (resolved labeled default)
       title: "Weekly calibration rollup",
       sourceType: "run",
       sourceId: null,
     });
+    const opts = mocks.createNotification.mock.calls[0]![2]!;
+    expect(opts).toMatchObject({ actor: "service:calibration" });
+    expect(opts.config).toBeDefined(); // policy config explicit — never the default fallback
     expect(input.payload).toEqual({ principal: "josctl", content: "SECRET-ROLLUP-CONTENT" });
     expect(parsedLogs(logs)).toEqual([
       { workflow: "calibration-weekly", principal: "josctl", daysRated: 6, sent: true },
@@ -521,5 +524,37 @@ describe.skipIf(!TEST_DATABASE_URL)("calibration daily tick (integration: real n
     });
     const replay = await runDailyCalibrationTick(db.pool, { policy: ENABLED, now: NOW });
     expect(replay).toEqual({ outcomes: [{ principal: "josctl", created: false }] });
+  });
+
+  it("weekly rollup path: kind=calibration, policy-approved (F1/F2 pin)", async () => {
+    // Restore the REAL createNotification (afterEach restores mocks), fake
+    // only the rollup render, and run the weekly tick against the real
+    // notification tables.
+    const actual = await vi.importActual<typeof import("@jehad/core")>("@jehad/core");
+    mocks.createNotification.mockImplementation(actual.createNotification);
+    await db.pool.query(
+      `WITH ins AS (
+         INSERT INTO principals (type, name) VALUES ('user', 'josctl') ON CONFLICT (name) DO NOTHING RETURNING id
+       ) SELECT id FROM ins UNION ALL SELECT id FROM principals WHERE name = 'josctl' LIMIT 1`,
+    );
+    mocks.weeklyRollup.mockResolvedValue({
+      weekStart: "2026-09-14",
+      avgRating: 3.2,
+      daysRated: 6,
+      missCount: 1,
+      missCategories: {},
+      feedbackCounts: {},
+      text: "integration-rollup-content",
+    });
+
+    const result = await runWeeklyCalibrationTick(db.pool, { policy: ENABLED, now: NOW });
+    expect(result).toEqual({ outcomes: [{ principal: "josctl", daysRated: 6, sent: true }] });
+
+    const row = (
+      await db.pool.query(
+        `SELECT kind, status FROM notifications WHERE payload->>'content' = 'integration-rollup-content'`,
+      )
+    ).rows[0];
+    expect(row).toMatchObject({ kind: "calibration", status: "approved" });
   });
 });

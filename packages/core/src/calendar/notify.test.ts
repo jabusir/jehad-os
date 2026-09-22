@@ -264,4 +264,22 @@ describe.skipIf(!TEST_DATABASE_URL)("calendar-change producer (integration)", ()
     expect(rows).toHaveLength(4); // unchanged — the dedupe held
     expect(rows.filter((r) => r.title.startsWith("Dentist"))).toHaveLength(1);
   });
+
+  it("production path (NO notificationConfig override): the repo-root policy auto-approves calendar-change", async () => {
+    // F1 pin: production never passes notificationConfig — the producer hook
+    // must load the ratified policy itself and land the row approved.
+    await db.pool.query("DELETE FROM calendar_events");
+    await db.pool.query("UPDATE calendar_sync_state SET sync_token = NULL");
+    const EVT_PROD = event({ id: "prodpath", summary: "ProductionPath", start: { dateTime: "2026-09-17T13:00:00Z", timeZone: "UTC" }, end: { dateTime: "2026-09-17T14:00:00Z", timeZone: "UTC" } });
+    await syncCalendar(db.pool, scriptedSource([{ events: [EVT_PROD], nextSyncToken: "p0" }]), { now: () => NOW, notify: true });
+    const moved = event({ ...EVT_PROD, start: { dateTime: "2026-09-17T15:00:00Z", timeZone: "UTC" }, end: { dateTime: "2026-09-17T16:00:00Z", timeZone: "UTC" }, updated: "2026-09-17T14:00:00.000Z" });
+    await syncCalendar(db.pool, scriptedSource([{ events: [moved], nextSyncToken: "p1" }]), { now: () => NOW, notify: true });
+    const row = (
+      await db.pool.query("SELECT kind, status FROM notifications WHERE title = $1", [
+        "ProductionPath: moved to 2026-09-17 15:00 UTC",
+      ])
+    ).rows[0];
+    expect(row).toBeDefined();
+    expect(row).toMatchObject({ kind: "calendar-change", status: "approved" });
+  });
 });

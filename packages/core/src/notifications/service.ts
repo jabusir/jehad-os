@@ -19,6 +19,7 @@ import {
   isNotificationKind,
   loadNotificationsConfig,
   REPLY_NOTIFICATION_KIND,
+  workflowNotificationsConfig,
   type NotificationKind,
   type NotificationsConfig,
 } from "./config.js";
@@ -524,29 +525,129 @@ async function assertExists(db: SqlExecutor, notificationId: string): Promise<ne
   throw new InvalidNotificationStatusError(notificationId, String(row.status));
 }
 
+// ------------------------------------------------------------- expiry writer
+
+const NOTIFICATIONS_PRINCIPAL_UPSERT = `
+  WITH ins AS (
+    INSERT INTO principals (type, name) VALUES ('service', $1)
+    ON CONFLICT (name) DO NOTHING
+    RETURNING id
+  )
+  SELECT id FROM ins
+  UNION ALL
+  SELECT id FROM principals WHERE name = $1
+  LIMIT 1
+`;
+
+async function resolveServicePrincipal(
+  db: SqlExecutor,
+  name: string,
+): Promise<string> {
+  const principal = await db.query(NOTIFICATIONS_PRINCIPAL_UPSERT, [name]);
+  const id = principal.rows[0]?.id;
+  if (id === undefined) {
+    throw new Error(`resolveServicePrincipal: could not resolve ${name}`);
+  }
+  return String(id);
+}
+
+/**
+ * Ratified auto-approve kinds whose undelivered expiry is a dead letter
+ * (plan Wave F3): the system promised a delivery and it never happened.
+ */
+const DEAD_LETTER_KINDS: ReadonlySet<NotificationKind> = new Set([
+  "calibration", "grant-reminder", "calendar-change",
+]);
+
+/**
+ * The F3 dead-letter sentinel: for a ratified kind that expired without ever
+ * being claimed, open one system_feedback review row (verdict 'bug') and emit
+ * ONE tick-log line. The feedback insert dedupes on item_id (exactly-once) —
+ * expired rows persist forever, so re-runs can never double-fire.
+ */
+async function recordDeadLetterSentinel(
+  db: SqlExecutor,
+  notification: NotificationRow,
+  now: Date,
+): Promise<void> {
+  const createdBy = await resolveServicePrincipal(db, "service/notifications");
+  const inserted = await db.query(
+    `INSERT INTO feedback (item_type, item_id, verdict, note, created_by, created_at)
+     SELECT 'system_feedback', $1, 'bug', $2, $3::uuid, $4::timestamptz
+     WHERE NOT EXISTS (
+       SELECT 1 FROM feedback WHERE item_type = 'system_feedback' AND item_id = $1
+     )
+     RETURNING id`,
+    [
+      notification.id,
+      `dead letter: ${notification.kind} notification ${notification.id} expired undelivered`,
+      createdBy,
+      now.toISOString(),
+    ],
+  );
+  if (inserted.rows[0] === undefined) return; // already recorded — exactly-once
+  console.log(JSON.stringify({
+    workflow: "dead-letter-sentinel",
+    sentinel: "dead-letter",
+    notificationId: notification.id,
+    kind: notification.kind,
+  }));
+}
+
+/**
+ * The ONE expiry writer — the housekeeping sweep, the markDelivered
+ * claim-race path, and the admin kill all funnel here. Flips
+ * pending/approved → expired, audits each transition, and fires the
+ * dead-letter sentinel for ratified kinds that were never claimed.
+ */
+async function expireNotificationRows(
+  db: SqlExecutor,
+  ids: readonly string[],
+  opts: { now: Date; actor?: string },
+): Promise<readonly NotificationRow[]> {
+  const expired: NotificationRow[] = [];
+  for (const id of ids) {
+    const flipped = await db.query(
+      `UPDATE notifications
+       SET status = 'expired', updated_at = $2::timestamptz
+       WHERE id = $1::uuid AND status IN ('pending', 'approved')
+       RETURNING ${NOTIFICATION_COLUMNS}`,
+      [id, opts.now.toISOString()],
+    );
+    const row = flipped.rows[0];
+    if (row === undefined) continue; // raced to a terminal status — not an expiry
+    const notification = rowToNotification(row);
+    expired.push(notification);
+    await recordAudit(db, {
+      actor: opts.actor ?? "system:notifications",
+      action: "notification.expired",
+      reversible: false,
+      outputsRef: JSON.stringify({ notificationId: notification.id }),
+    });
+    if (DEAD_LETTER_KINDS.has(notification.kind) && notification.claimedAt === null) {
+      await recordDeadLetterSentinel(db, notification, opts.now);
+    }
+  }
+  return expired;
+}
+
 /** Time-driven housekeeping: pending/approved rows past expires_at → expired. */
 export async function expireOverdueNotifications(
   db: SqlExecutor,
   opts: { now?: Date | (() => Date) } = {},
 ): Promise<readonly string[]> {
   const now = resolveNow(opts.now)();
-  const expired = await db.query(
-    `UPDATE notifications
-     SET status = 'expired', updated_at = $1::timestamptz
-     WHERE status IN ('pending', 'approved') AND expires_at <= $1::timestamptz
-     RETURNING id`,
+  const due = await db.query(
+    `SELECT id FROM notifications
+     WHERE status IN ('pending', 'approved') AND expires_at <= $1::timestamptz`,
     [now.toISOString()],
   );
-  const ids = expired.rows.map((row) => String(row.id));
-  for (const id of ids) {
-    await recordAudit(db, {
-      actor: "system:notifications",
-      action: "notification.expired",
-      reversible: false,
-      outputsRef: JSON.stringify({ notificationId: id }),
-    });
-  }
-  return ids;
+  const expired = await expireNotificationRows(
+    db,
+    due.rows.map((row) => String(row.id)),
+    { now },
+  );
+  return expired.map((row) => row.id);
 }
 
 export interface ClaimInput {
@@ -716,17 +817,9 @@ export async function markDelivered(
     const status = String(current.status);
     const expiredAt = toIso(current.expires_at);
     if (status === "approved" && new Date(expiredAt).getTime() <= now.getTime()) {
-      await db.query(
-        `UPDATE notifications SET status = 'expired', updated_at = $2::timestamptz
-         WHERE id = $1::uuid AND status = 'approved'`,
-        [notificationId, now.toISOString()],
-      );
-      await recordAudit(db, {
-        actor: "system:notifications",
-        action: "notification.expired",
-        reversible: false,
-        outputsRef: JSON.stringify({ notificationId }),
-      });
+      // Claim-race expiry: an already-late approved row the sweep can never
+      // match again once terminal — expired through the shared writer.
+      await expireNotificationRows(db, [notificationId], { now });
       throw new NotificationExpiredError(notificationId);
     }
     throw new InvalidNotificationStatusError(notificationId, status);
@@ -754,25 +847,15 @@ export async function expireNotification(
 ): Promise<NotificationRow> {
   if (!UUID_RE.test(notificationId)) throw new NotificationNotFoundError(notificationId);
   const now = input.now?.() ?? new Date();
-  const updated = await db.query(
-    `UPDATE notifications
-     SET status = 'expired', updated_at = $2::timestamptz
-     WHERE id = $1::uuid AND status IN ('pending', 'approved')
-     RETURNING ${NOTIFICATION_COLUMNS}`,
-    [notificationId, now.toISOString()],
-  );
-  const row = updated.rows[0];
-  if (row === undefined) {
+  const expired = await expireNotificationRows(db, [notificationId], {
+    now,
+    actor: input.actor,
+  });
+  const notification = expired[0];
+  if (notification === undefined) {
     await assertExists(db, notificationId);
   }
-  const notification = rowToNotification(row!);
-  await recordAudit(db, {
-    actor: input.actor ?? "system:notifications",
-    action: "notification.expired",
-    reversible: false,
-    outputsRef: JSON.stringify({ notificationId }),
-  });
-  return notification;
+  return notification!;
 }
 
 export interface ListNotificationsFilters {
@@ -819,30 +902,6 @@ export async function listNotifications(
 
 // ------------------------------------------------------------- producers
 
-const NOTIFICATIONS_PRINCIPAL_UPSERT = `
-  WITH ins AS (
-    INSERT INTO principals (type, name) VALUES ('service', $1)
-    ON CONFLICT (name) DO NOTHING
-    RETURNING id
-  )
-  SELECT id FROM ins
-  UNION ALL
-  SELECT id FROM principals WHERE name = $1
-  LIMIT 1
-`;
-
-async function resolveServicePrincipal(
-  db: SqlExecutor,
-  name: string,
-): Promise<string> {
-  const principal = await db.query(NOTIFICATIONS_PRINCIPAL_UPSERT, [name]);
-  const id = principal.rows[0]?.id;
-  if (id === undefined) {
-    throw new Error(`resolveServicePrincipal: could not resolve ${name}`);
-  }
-  return String(id);
-}
-
 export interface BriefNotificationInput {
   /** "Morning brief" | "Evening close" — the delivery title. */
   readonly title: string;
@@ -856,8 +915,10 @@ export interface BriefNotificationInput {
 
 /**
  * Producer hook for the briefs lane: persists a kind=brief notification next
- * to the artifact (auto-approved per policy). Called from
- * packages/core/src/briefs/service.ts behind opts.notify — one line there.
+ * to the artifact (auto-approved per policy — loaded here from the repo-root
+ * policy.yaml; input.config is a test override, never the production path).
+ * Called from packages/core/src/briefs/service.ts behind opts.notify — one
+ * line there.
  */
 export async function enqueueBriefNotification(
   db: SqlExecutor,
@@ -870,6 +931,7 @@ export async function enqueueBriefNotification(
     throw new NotificationInputError(`domain "${domainKey}" is not seeded`);
   }
   const createdBy = await resolveServicePrincipal(db, "service/briefs");
+  const config = input.config ?? (await workflowNotificationsConfig());
   return createNotification(
     db,
     {
@@ -881,7 +943,7 @@ export async function enqueueBriefNotification(
       sourceId: input.artifactId,
       createdBy,
     },
-    { config: input.config, actor: "service:briefs", now: resolveNow(input.now) },
+    { config, actor: "service:briefs", now: resolveNow(input.now) },
   );
 }
 
@@ -962,8 +1024,11 @@ export interface CalendarChangeNotificationInput {
  * Producer hook for the calendar lane (E4-S): persists a kind=calendar-change
  * notification for a DISRUPTIVE near-term change. The 48h filter lives in
  * the caller (calendar sync) — this hook records, never decides. The kind is
- * on the policy auto-approve list; that auto-approve plus the 48h filter IS
- * the noise gate (created/updated changes ride the morning brief instead).
+ * on the ratified policy auto-approve list and the hook loads that policy
+ * itself (the enqueueEscalationNotification pattern — production never rides
+ * the default fallback); input.config is a test override. That auto-approve
+ * plus the 48h filter IS the noise gate (created/updated changes ride the
+ * morning brief instead).
  */
 export async function enqueueCalendarChangeNotification(
   db: SqlExecutor,
@@ -976,6 +1041,7 @@ export async function enqueueCalendarChangeNotification(
     throw new NotificationInputError(`domain "${domainKey}" is not seeded`);
   }
   const createdBy = await resolveServicePrincipal(db, "service/calendar-sync");
+  const config = input.config ?? (await workflowNotificationsConfig());
   return createNotification(
     db,
     {
@@ -990,6 +1056,6 @@ export async function enqueueCalendarChangeNotification(
       sourceId: input.provenance.eventId,
       createdBy,
     },
-    { config: input.config, actor: "service:calendar-sync", now: resolveNow(input.now) },
+    { config, actor: "service:calendar-sync", now: resolveNow(input.now) },
   );
 }

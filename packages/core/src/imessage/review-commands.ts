@@ -555,6 +555,8 @@ async function notifyOwnerOfLockout(
   now: Date,
 ): Promise<void> {
   const createdBy = await resolveReviewServicePrincipal(db);
+  // No policy config (F0 do-not-convert): kind=custom lockout alert is
+  // review-governed by design — it must land pending for user review.
   await createNotification(
     db,
     {

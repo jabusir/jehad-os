@@ -7,12 +7,14 @@
 // transition.
 
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { migrateUp, seedDomains } from "@jehad/db";
 import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../../../db/tests/test-db";
 import { raiseEscalation } from "../escalations/service.js";
 import {
   DEFAULT_NOTIFICATIONS_CONFIG,
+  loadNotificationsConfig,
+  workflowNotificationsConfig,
   type NotificationsConfig,
 } from "./config.js";
 import {
@@ -24,7 +26,9 @@ import {
   claimNextApprovedNotification,
   createNotification,
   enqueueBriefNotification,
+  enqueueCalendarChangeNotification,
   expireNotification,
+  expireOverdueNotifications,
   listNotifications,
   markDelivered,
   rejectNotification,
@@ -371,12 +375,228 @@ describe.skipIf(!TEST_DATABASE_URL)("notification service (integration)", () => 
 
   it("defaults match the shipped policy.yaml (repo-root section)", async () => {
     // The repo-root policy.yaml is the artifact under test for defaults.
-    const { loadNotificationsConfig } = await import("./config.js");
     const config = await loadNotificationsConfig();
     expect(config).toEqual({
       ...DEFAULT_NOTIFICATIONS_CONFIG,
       autoApproveKinds: ["brief", "calendar-change", "calibration", "grant-reminder"], // E4-S: calendar-change joins the auto-approve list
     });
     expect(config.escalationMinUrgency).toBe("high"); // escalations keep the >= high threshold
+  });
+
+  // ------------------------------------------------ F2 pins (Wave F)
+
+  it("workflow path: every ratified kind lands approved under the loaded policy config", async () => {
+    const config = await workflowNotificationsConfig();
+    const created = await Promise.all([
+      createNotification(db.pool, {
+        kind: "calibration", title: "Daily calibration check", payload: { content: "rate the day" },
+        sourceType: "calibration", createdBy: userPrincipalId,
+      }, { config, now }),
+      createNotification(db.pool, {
+        kind: "grant-reminder", title: "Grant renewal needed", payload: { content: "renew" },
+        sourceType: "run", createdBy: userPrincipalId,
+      }, { config, now }),
+      createNotification(db.pool, {
+        kind: "calendar-change", title: "Dentist: moved to 2026-09-17 15:00 UTC",
+        payload: { change: { changeClass: "start_end_changed" } },
+        sourceType: "calendar", createdBy: userPrincipalId,
+      }, { config, now }),
+      createNotification(db.pool, {
+        kind: "brief", title: "Morning brief", payload: { content: "b" },
+        sourceType: "brief", createdBy: userPrincipalId,
+      }, { config, now }),
+    ]);
+    for (const notification of created) {
+      expect(notification.status).toBe("approved");
+      expect(notification.approvedAt).toBe(T0.toISOString());
+      expect(notification.approvedBy).toBeNull(); // the approval is policy, not a principal
+    }
+  });
+
+  it("workflow path: the producer hooks self-load the policy (brief + calendar-change)", async () => {
+    const brief = await enqueueBriefNotification(db.pool, {
+      title: "Morning brief",
+      content: "MORNING BRIEF — explicit policy config",
+      artifactId: randomUUID(),
+      now,
+    });
+    expect(brief.status).toBe("approved");
+
+    const calendarChange = await enqueueCalendarChangeNotification(db.pool, {
+      title: "Dentist: moved to 2026-09-17 15:00 UTC",
+      change: {
+        changeClass: "start_end_changed",
+        summary: "Dentist",
+        start: "2026-09-17T15:00:00.000Z",
+        end: "2026-09-17T16:00:00.000Z",
+        previousStart: "2026-09-17T13:00:00.000Z",
+        previousEnd: "2026-09-17T14:00:00.000Z",
+      },
+      provenance: {
+        eventId: randomUUID(),
+        googleEventId: "prodpath",
+        calendarId: "primary",
+      },
+      now,
+    });
+    expect(calendarChange.kind).toBe("calendar-change");
+    expect(calendarChange.status).toBe("approved");
+  });
+
+  it("a seeded approved calibration notification is claimable (the Sep 16/21 failure mode)", async () => {
+    await drainQueue();
+    const seeded = await createNotification(db.pool, {
+      kind: "calibration",
+      title: "Daily calibration check",
+      payload: { content: "rate the day" },
+      sourceType: "calibration",
+      createdBy: userPrincipalId,
+    }, { config: await workflowNotificationsConfig(), now });
+    const claimed = await claimNextApprovedNotification(db.pool, {
+      claimedBy: harnessPrincipalId,
+      now,
+    });
+    expect(claimed).not.toBeNull();
+    expect(claimed!.id).toBe(seeded.id);
+    expect(claimed!.kind).toBe("calibration");
+    await drainQueue();
+  });
+
+  // ------------------------------------------------ F3 sentinel (Wave F)
+
+  async function deadLetters(itemId?: string): Promise<Record<string, unknown>[]> {
+    const result = itemId === undefined
+      ? await db.pool.query(
+          `SELECT item_id, verdict, note, created_by FROM feedback WHERE item_type = 'system_feedback'`,
+        )
+      : await db.pool.query(
+          `SELECT item_id, verdict, note, created_by FROM feedback
+           WHERE item_type = 'system_feedback' AND item_id = $1`,
+          [itemId],
+        );
+    return result.rows as Record<string, unknown>[];
+  }
+
+  /** Ratified-kind row: approved at T0, claimable, swept by any sweep after T0+60s. */
+  async function seedRatified(kind: "calibration" | "grant-reminder" | "calendar-change"): Promise<NotificationRow> {
+    return createNotification(db.pool, {
+      kind,
+      title: `sentinel-${kind}`,
+      payload: { content: "x" },
+      sourceType: kind === "calibration" ? "calibration" : kind === "calendar-change" ? "calendar" : "run",
+      createdBy: userPrincipalId,
+      expiresAt: new Date(T0.getTime() + 60_000),
+    }, { config: await workflowNotificationsConfig(), now });
+  }
+
+  it("dead-letter sentinel: the housekeeping sweep records exactly one review row per undelivered ratified expiry, idempotent on re-run", async () => {
+    await drainQueue();
+    const logs: string[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((line: string) => {
+      logs.push(line);
+    });
+    const stale = await seedRatified("calibration");
+
+    const ids = await expireOverdueNotifications(db.pool, {
+      now: () => new Date(T0.getTime() + 60 * 60_000),
+    });
+    expect(ids).toContain(stale.id);
+
+    const rows = await deadLetters(stale.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      item_id: stale.id,
+      verdict: "bug",
+      note: `dead letter: calibration notification ${stale.id} expired undelivered`,
+    });
+    const creator = (
+      await db.pool.query("SELECT type, name FROM principals WHERE id = $1::uuid", [
+        String(rows[0]!.created_by),
+      ])
+    ).rows[0];
+    expect(creator).toMatchObject({ type: "service", name: "service/notifications" });
+
+    const sentinelLines = logs
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((line) => line["sentinel"] === "dead-letter");
+    expect(sentinelLines).toEqual([
+      {
+        workflow: "dead-letter-sentinel",
+        sentinel: "dead-letter",
+        notificationId: stale.id,
+        kind: "calibration",
+      },
+    ]);
+
+    // Re-run: expired rows persist forever — no duplicate row, no second line.
+    logs.length = 0; // mockClear resets calls, not the capture array
+    await expireOverdueNotifications(db.pool, {
+      now: () => new Date(T0.getTime() + 2 * 60 * 60_000),
+    });
+    expect(await deadLetters(stale.id)).toHaveLength(1);
+    expect(
+      logs.map((line) => JSON.parse(line)).filter((line) => line["sentinel"] === "dead-letter"),
+    ).toEqual([]);
+    logSpy.mockRestore();
+  });
+
+  it("dead-letter sentinel: the markDelivered claim-race expiry records exactly one review row", async () => {
+    const late = await createNotification(db.pool, {
+      kind: "grant-reminder",
+      title: "late grant reminder",
+      payload: { content: "renew" },
+      sourceType: "run",
+      createdBy: userPrincipalId,
+      expiresAt: new Date(T0.getTime() - 60_000),
+    }, { config: await workflowNotificationsConfig(), now });
+    await expect(
+      markDelivered(db.pool, late.id, { deliveredBy: harnessPrincipalId, now }),
+    ).rejects.toBeInstanceOf(NotificationExpiredError);
+    expect(await deadLetters(late.id)).toHaveLength(1);
+  });
+
+  it("dead-letter sentinel: the admin expire path records exactly one review row", async () => {
+    const notification = await seedRatified("calendar-change");
+    const expired = await expireNotification(db.pool, notification.id, { actor: "user:owner", now });
+    expect(expired.status).toBe("expired");
+    const rows = await deadLetters(notification.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.note).toContain("calendar-change");
+  });
+
+  it("dead-letter sentinel: non-ratified kinds (brief, reply) expire silently", async () => {
+    const brief = await createNotification(db.pool, {
+      kind: "brief", title: "unlucky brief", payload: { content: "b" },
+      sourceType: "brief", createdBy: userPrincipalId,
+      expiresAt: new Date(T0.getTime() + 60_000),
+    }, { config: await workflowNotificationsConfig(), now });
+    const reply = await createNotification(db.pool, {
+      kind: "reply", title: "Reply", payload: { content: "x" },
+      sourceType: "run", createdBy: userPrincipalId, // conjunction fails → pending
+      expiresAt: new Date(T0.getTime() + 60_000),
+    }, { config: await workflowNotificationsConfig(), now });
+    await expireOverdueNotifications(db.pool, {
+      now: () => new Date(T0.getTime() + 60 * 60_000),
+    });
+    expect(await deadLetters(brief.id)).toHaveLength(0);
+    expect(await deadLetters(reply.id)).toHaveLength(0);
+  });
+
+  it("dead-letter sentinel: a claimed-then-expired ratified row is NOT a dead letter", async () => {
+    await drainQueue();
+    const claimedFirst = await seedRatified("calibration");
+    const claim = await claimNextApprovedNotification(db.pool, {
+      claimedBy: harnessPrincipalId,
+      now,
+    });
+    expect(claim!.id).toBe(claimedFirst.id);
+    await expireOverdueNotifications(db.pool, {
+      now: () => new Date(T0.getTime() + 60 * 60_000),
+    });
+    expect(await deadLetters(claimedFirst.id)).toHaveLength(0);
+    const row = (
+      await db.pool.query("SELECT status FROM notifications WHERE id = $1::uuid", [claimedFirst.id])
+    ).rows[0];
+    expect(String(row.status)).toBe("expired");
   });
 });

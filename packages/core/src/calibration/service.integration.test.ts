@@ -280,7 +280,7 @@ describe.skipIf(!TEST_DATABASE_URL)("calibration service (integration)", () => {
     ).rows[0]!;
     expect(row.kind).toBe("calibration");
     expect(row.source_type).toBe("calibration");
-    expect(row.status).toBe("pending"); // not on the default auto-approve list
+    expect(row.status).toBe("approved"); // calibration is on the ratified policy auto-approve list, loaded by the producer hook
     expect(row.payload).toMatchObject({ calibrationItemId: notified.item.id, periodDate: "2026-09-21" });
     expect(JSON.stringify(row.payload)).toContain("very little happened today");
   });
