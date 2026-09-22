@@ -255,3 +255,51 @@ scenarios:
       reply_not_contains:
         - not something I
         - I only see data when you explicitly ask
+  # ——— W6(c) two-lane epistemics (live-transcript gap 2026-09-21 15:56) ———
+  - id: golden-generalknowledge-01
+    description: >-
+      General world knowledge must be ANSWERED from the model's own
+      knowledge and labeled as such — never refused with "I don't have
+      general knowledge access" (the over-refusal failure from the live
+      transcript), and never dressed up as retrieved data.
+    principal: jehad
+    turns:
+      - user: best prestige TV shows?
+        modelScript:
+          - pass: route
+            output: '{"tool":"none"}'
+          - pass: answer
+            output: >-
+              Off the top of my head — general knowledge, not from your
+              data: The Bear, Shogun, Andor, and Succession are the ones
+              I'd put in front of you first.
+    expectations:
+      routed_none: true
+      reply_contains:
+        - "general knowledge"
+        - "The Bear"
+      reply_not_contains:
+        - "I can't pull recommendations"
+        - "I don't have general knowledge"
+  - id: golden-personalfacts-strict-01
+    description: >-
+      The personal-facts lane stays absolute: an answer asserting an
+      invented calendar entry is a failure regardless of how the
+      general-knowledge lane behaves.
+    principal: jehad
+    turns:
+      - user: do I have anything on Thursday?
+        modelScript:
+          - pass: route
+            output: '{"tool":"calendar.next"}'
+          - pass: answer
+            output: >-
+              I can't see Thursday — no calendar data came back for it, so
+              rather than guess: nothing I can confirm. General knowledge
+              can't tell you what your Thursday looks like.
+    expectations:
+      routed_tools:
+        - calendar.next
+      reply_not_contains:
+        - "you have a meeting Thursday"
+        - "I've noted"
