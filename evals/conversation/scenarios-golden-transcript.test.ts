@@ -18,7 +18,7 @@ const TODO_ITEMS = [
 ] as const;
 
 describe("scenarios-golden-transcript.yaml (W6(c) golden eval, R12)", () => {
-  it("validates and carries exactly the six transcript scenarios in order", () => {
+  it("validates and carries exactly the eight transcript scenarios in order", () => {
     const file = loadScenarioFile(FILE);
     expect(file.version).toBe(1);
     expect(file.scenarios.map((scenario) => scenario.id)).toEqual([
@@ -28,6 +28,8 @@ describe("scenarios-golden-transcript.yaml (W6(c) golden eval, R12)", () => {
       "golden-gmail-pertinence-01",
       "golden-yusra-persona-01",
       "golden-persona-selfbrief-01",
+      "golden-generalknowledge-01",
+      "golden-personalfacts-strict-01",
     ]);
   });
 
@@ -165,7 +167,7 @@ describe.skipIf(!TEST_DATABASE_URL)("golden transcript runner behavior", () => {
       capabilityProbes: {},
       dbTag: "conv_eval_w6c",
     });
-    expect(run.counts).toEqual({ pass: 1, fail: 0, skip: 5 });
+    expect(run.counts).toEqual({ pass: 3, fail: 0, skip: 5 });
     const byId = new Map(run.results.map((result) => [result.id, result]));
     for (const id of [
       "golden-todo-proposal-01",
