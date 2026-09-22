@@ -47,7 +47,7 @@ describe("buildTypingSendScript (Wave T)", () => {
 
 describe("makeTypingAwareTransport (fallback + auto-disable)", () => {
   it("happy path: typing script runs, no direct send", async () => {
-    const runner = vi.fn(async (_file: string, args: readonly string[]) => ({
+    const runner = vi.fn(async (_file: string, _args: readonly string[]) => ({
       stdout: "",
       stderr: "",
     }));
