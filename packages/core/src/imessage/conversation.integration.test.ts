@@ -572,7 +572,12 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation phase E (integration)
 
     queue = [];
     provider = new FakeModelProvider({
-      respond: async () => queue.shift() ?? { text: "fallback" },
+      respond: async (request: { prompt: string }) => {
+        if (request.prompt.includes("turn interpreter for a personal assistant")) {
+          return { text: "[]" };
+        }
+        return queue.shift() ?? { text: "fallback" };
+      },
     });
     deps = {
       db: db.pool,
@@ -613,13 +618,13 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation phase E (integration)
     queue = [{ text: '{"tool":"calendar.day","day":"tomorrow"}' }, { text: "You have 2 calendar items tomorrow." }];
     const outcome = await handleInbound(deps, { principalId: jehadId, handle: JEHAD_HANDLE, text: "what do I have tomorrow?" });
     expect(outcome.replied).toBe(true);
-    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests).toHaveLength(3); // route + interpret + answer
     expect(provider.requests[0]!.prompt).toContain("ONLY one JSON object");
     // Verifier C1: the router carries NO principal tokens at all.
     expect(provider.requests[0]!.prompt).not.toContain("jehad");
     expect(provider.requests[0]!.prompt).not.toContain("yusra");
     expect(provider.requests[0]!.prompt).not.toContain("Jehad");
-    const answerPrompt = provider.requests[1]!.prompt;
+    const answerPrompt = provider.requests.at(-1)!.prompt;
     // Answer prompt: the greeting name only, never the other principal.
     expect(answerPrompt).toContain("jehad");
     expect(answerPrompt).not.toContain("yusra");
@@ -630,7 +635,7 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation phase E (integration)
       "SELECT count(*)::int AS n FROM model_calls WHERE principal_id = $1::uuid AND surface = 'imessage'",
       [jehadId],
     );
-    expect(calls.rows[0].n).toBe(2);
+    expect(calls.rows[0].n).toBe(3); // route + interpret + answer
     expect(await auditActions()).toContain("imessage.converse.tool_used");
     const reply = await db.pool.query(
       "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
@@ -653,7 +658,7 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation phase E (integration)
     await grantConverse(jehadId);
     queue = [{ text: '{"tool":"calendar.day","day":"tomorrow"}' }, { text: "summary" }];
     await handleInbound(deps, { principalId: jehadId, handle: JEHAD_HANDLE, text: "tomorrow?" });
-    const answerPrompt = provider.requests[1]!.prompt;
+    const answerPrompt = provider.requests.at(-1)!.prompt;
     // lastIndexOf: the boundary INSTRUCTION also names the markers.
     const begin = answerPrompt.lastIndexOf("BEGIN DATA");
     const end = answerPrompt.lastIndexOf("END DATA");
@@ -675,9 +680,9 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation phase E (integration)
     const outcome = await handleInbound(deps, { principalId: jehadId, handle: JEHAD_HANDLE, text: "tell me a joke" });
     expect(outcome.replied).toBe(true);
     // route (parse fail) → ONE fallback-model retry → answer = 3 calls.
-    expect(provider.requests).toHaveLength(3);
+    expect(provider.requests).toHaveLength(4);
     expect(provider.requests[1]!.model).toBe("google/gemini-3.8-flash");
-    expect(provider.requests[2]!.prompt).toContain("No data lookup was performed");
+    expect(provider.requests.at(-1)!.prompt).toContain("No data lookup was performed");
     expect(await auditActions()).not.toContain("imessage.converse.tool_used");
   });
 
@@ -691,14 +696,14 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation phase E (integration)
     await handleInbound(restrictedDeps, { principalId: jehadId, handle: JEHAD_HANDLE, text: "what do I owe?" });
     const actions = await auditActions();
     expect(actions).toContain("imessage.converse.tool_denied");
-    expect(provider.requests[1]!.prompt).toContain("not permitted to query it");
+    expect(provider.requests.at(-1)!.prompt).toContain("not permitted to query it");
   });
 
   it("commitments.waiting: overdue + due-soon land in the data block", async () => {
     await grantConverse(jehadId);
     queue = [{ text: '{"tool":"commitments.waiting"}' }, { text: "one overdue bill" }];
     await handleInbound(deps, { principalId: jehadId, handle: JEHAD_HANDLE, text: "anything due?" });
-    const answerPrompt = provider.requests[1]!.prompt;
+    const answerPrompt = provider.requests.at(-1)!.prompt;
     expect(answerPrompt).toContain("Pay internet bill");
     expect(answerPrompt).toContain("Book squash court");
     expect(answerPrompt).toContain("manually captured commitments in the world model only");

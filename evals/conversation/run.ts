@@ -13,7 +13,7 @@ const CAPABILITY_EXPORT_PATTERNS: Readonly<Record<string, RegExp>> = {
   // W6(a) Turn Interpreter (R8): matches once core exports the interpreter
   // (e.g. interpretTurn / TURN_INTERPRETER_*). TRUTHFUL_UX_RULES deliberately
   // does not match either pattern.
-  turn_interpreter: /turn[\s_.-]?interpreter|interpretTurn/i,
+  turn_interpreter: /turn[\s_.-]?interpret|Interpretation/i,
   // W6(b) live self-model (R9): matches once system.self_brief lands.
   self_brief: /self[\s_.-]?brief/i,
 };

@@ -117,7 +117,7 @@ describe.skipIf(!TEST_DATABASE_URL)("W3/W2 wiring pins (integration)", () => {
     });
     expect(outcome.replied).toBe(true);
     // route + answer only — no parse-failure fallback (repo policy has gemini fallback).
-    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests).toHaveLength(3); // route + interpret + answer
     const audits = await db.pool.query(
       `SELECT count(*)::int AS n FROM audit_log
         WHERE action = 'imessage.converse.tool_used'
@@ -150,7 +150,9 @@ describe.skipIf(!TEST_DATABASE_URL)("W3/W2 wiring pins (integration)", () => {
   });
 
   it("answer_fallback: provider failure retries ONCE on the fallback model, audited; success still replies", async () => {
-    const provider = scriptedProvider(['{"tool":"none"}'], "recovered via fallback", 1);
+    // NOTE: the first non-router throw lands on the interpret pass (fail-safe,
+    // caught) — so failAnswers must survive it and still fail the answer pass.
+    const provider = scriptedProvider(['{"tool":"none"}'], "recovered via fallback", 2);
     const outcome = await handleInbound(makeDeps(provider, ["calendar"]), {
       principalId,
       handle: HANDLE,
@@ -158,7 +160,7 @@ describe.skipIf(!TEST_DATABASE_URL)("W3/W2 wiring pins (integration)", () => {
     });
     expect(outcome.replied).toBe(true);
     // route + failed answer + fallback answer = 3 dispatches
-    expect(provider.requests).toHaveLength(3);
+    expect(provider.requests).toHaveLength(4);
     const fb = await db.pool.query(
       `SELECT count(*)::int AS n FROM audit_log
         WHERE action = 'imessage.converse.answer_fallback'

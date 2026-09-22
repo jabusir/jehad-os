@@ -107,9 +107,12 @@ describe("scenario file validation", () => {
     emptyTurns["turns"] = [];
     expectInvalid({ version: 1, scenarios: [emptyTurns] });
 
-    const emptyScript = baseScenario() as { turns: { modelScript: unknown[] }[] };
-    emptyScript.turns[0]!.modelScript = [];
-    expectInvalid({ version: 1, scenarios: [emptyScript] });
+    // Empty modelScript is VALID since W6a — it encodes a deterministic
+    // turn (confirm verbs) with zero expected model dispatches.
+    const deterministicScript = baseScenario() as { turns: { modelScript: unknown[] }[] };
+    deterministicScript.turns[0]!.modelScript = [];
+    const ok = parseScenarioFile({ version: 1, scenarios: [deterministicScript] });
+    expect(ok.scenarios[0]!.turns[0]!.modelScript).toEqual([]);
 
     const blankUser = baseScenario() as { turns: { user: string }[] };
     blankUser.turns[0]!.user = "  ";

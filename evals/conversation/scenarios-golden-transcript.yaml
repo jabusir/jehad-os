@@ -42,11 +42,11 @@ scenarios:
           build bed
           Clean apartment and bathrooms by wednesday
         modelScript:
-          - pass: interpret
-            output: >-
-              {"proposals":[{"type":"task_batch","items":[{"title":"Wedding seating chart"},{"title":"wedding playlist"},{"title":"wedding appetizers"},{"title":"get prenup signed","due":"wednesday"},{"title":"finish companions lecture","due":"wednesday"},{"title":"build console table"},{"title":"build bed"},{"title":"Clean apartment and bathrooms","due":"wednesday"}]}]}
           - pass: route
             output: '{"tool":"none"}'
+          - pass: interpret
+            output: >-
+              [{"type":"task_batch","items":[{"title":"Wedding seating chart"},{"title":"wedding playlist"},{"title":"wedding appetizers"},{"title":"get prenup signed","due":"wednesday"},{"title":"finish companions lecture","due":"wednesday"},{"title":"build console table"},{"title":"build bed"},{"title":"Clean apartment and bathrooms","due":"wednesday"}]}]
           - pass: answer
             output: >-
               I count 8 items in your list, and 3 of them carry wednesday
@@ -93,11 +93,11 @@ scenarios:
           build bed
           Clean apartment and bathrooms by wednesday
         modelScript:
-          - pass: interpret
-            output: >-
-              {"proposals":[{"type":"task_batch","items":[{"title":"Wedding seating chart"},{"title":"wedding playlist"},{"title":"wedding appetizers"},{"title":"get prenup signed","due":"wednesday"},{"title":"finish companions lecture","due":"wednesday"},{"title":"build console table"},{"title":"build bed"},{"title":"Clean apartment and bathrooms","due":"wednesday"}]}]}
           - pass: route
             output: '{"tool":"none"}'
+          - pass: interpret
+            output: >-
+              [{"type":"task_batch","items":[{"title":"Wedding seating chart"},{"title":"wedding playlist"},{"title":"wedding appetizers"},{"title":"get prenup signed","due":"wednesday"},{"title":"finish companions lecture","due":"wednesday"},{"title":"build console table"},{"title":"build bed"},{"title":"Clean apartment and bathrooms","due":"wednesday"}]}]
           - pass: answer
             output: >-
               I count 8 items in your list, and 3 of them carry wednesday
@@ -106,16 +106,7 @@ scenarios:
               this conversation. Say "track them" and I'll add all 8 as
               commitments with those due dates.
       - user: track them
-        modelScript:
-          - pass: interpret
-            output: '{"proposals":[]}'
-          - pass: route
-            output: '{"tool":"none"}'
-          - pass: answer
-            output: >-
-              Tracked — 8 commitments are now in the world model, 3 with
-              due dates on Wednesday Sep 23 (prenup, companions lecture,
-              apartment and bathrooms).
+        modelScript: []  # deterministic confirm — zero model dispatches
     expectations:
       reply_contains:
         - "8"
@@ -123,7 +114,9 @@ scenarios:
       db_pins:
         - sql: SELECT 1 FROM commitments HAVING count(*) = 8
           expect_one: true
-        - sql: SELECT 1 FROM commitments WHERE (due_at AT TIME ZONE 'America/Los_Angeles')::date = '2026-09-23' HAVING count(*) = 3
+        - sql: SELECT 1 FROM commitments WHERE due_at IS NOT NULL HAVING count(*) = 3
+          expect_one: true
+        - sql: SELECT 1 FROM commitments WHERE due_at IS NOT NULL AND (due_at AT TIME ZONE 'America/Los_Angeles')::date = '2026-09-23' HAVING count(*) = 3
           expect_one: true
 
   # ——— Transcript: "gotcha — this is a gap in your capabilities…" ———
@@ -140,11 +133,11 @@ scenarios:
     turns:
       - user: gotcha — this is a gap in your capabilities that we should address
         modelScript:
-          - pass: interpret
-            output: >-
-              {"proposals":[{"type":"system_feedback","category":"capability_gap","subject":"cannot judge pertinence of email from metadata-only coverage","detail":"Owner flagged 2026-09-21 after the gmail pertinence answer: metadata-only coverage cannot support judgment questions."}]}
           - pass: route
             output: '{"tool":"none"}'
+          - pass: interpret
+            output: >-
+              [{"type":"system_feedback","category":"capability_gap","subject":"cannot judge pertinence of email from metadata-only coverage","detail":"Owner flagged 2026-09-21 after the gmail pertinence answer: metadata-only coverage cannot support judgment questions."}]}
           - pass: answer
             output: >-
               Agreed, that's a real gap. I can file it as system feedback
@@ -209,11 +202,11 @@ scenarios:
     turns:
       - user: user, Yusra, should have her user facing persona as a friendly, nice, bubbly character / are you seeing that?
         modelScript:
-          - pass: interpret
-            output: >-
-              {"proposals":[{"type":"configuration_directive","target_principal":"yusra","target":"interaction_profile.imessage","change":{"register":"friendly, nice, bubbly"}}]}
           - pass: route
             output: '{"tool":"none"}'
+          - pass: interpret
+            output: >-
+              [{"type":"configuration_directive","target_principal":"yusra","target":"interaction_profile.imessage","change":{"register":"friendly, nice, bubbly"}}]}
           - pass: answer
             output: >-
               Not yet — Yusra has no persona configured on my side, so

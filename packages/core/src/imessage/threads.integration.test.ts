@@ -84,7 +84,14 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     yusraId = await mk("yusra", YUSRA);
 
     queue = [];
-    provider = new FakeModelProvider({ respond: async () => queue.shift() ?? { text: "ok" } });
+    provider = new FakeModelProvider({
+      respond: async (request: { prompt: string }) => {
+        if (request.prompt.includes("turn interpreter for a personal assistant message gateway")) {
+          return { text: "[]" };
+        }
+        return queue.shift() ?? { text: "ok" };
+      },
+    });
     now = new Date();
     deps = {
       db: db.pool,
@@ -268,7 +275,11 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     await turn(jehadId, JEHAD, "hello again");
     const prompt = provider.requests.at(-1)!.prompt;
     expect(prompt).not.toContain("topic beta");
-    expect(prompt).not.toContain("noted");
+    const historyBlock = prompt.slice(
+      prompt.lastIndexOf("BEGIN HISTORY"),
+      prompt.lastIndexOf("END HISTORY"),
+    );
+    expect(historyBlock).not.toContain("noted");
   });
 
   it("HARD ISOLATION: cross-principal message insert is rejected by the storage trigger; contexts never mix", async () => {
@@ -474,10 +485,10 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     queue = [{ text: '{"tool":"none"}' }, { text: "model handled it" }];
     const before = provider.requests.length;
     await turn(jehadId, JEHAD, " /Newx ");
-    expect(provider.requests.length).toBe(before + 2); // grounded turn: route + answer
+    expect(provider.requests.length).toBe(before + 3); // grounded turn: route + interpret + answer
     const reset = await turn(jehadId, JEHAD, "/RESET");
     expect(reset.replied).toBe(true);
-    expect(provider.requests.length).toBe(before + 2); // deterministic — no model call
+    expect(provider.requests.length).toBe(before + 3); // deterministic reset adds nothing
   });
 
   it("reply-cap interleave is closed (adversary 8a): deterministic turns count against the model path", async () => {
@@ -614,7 +625,8 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     await turn(jehadId, JEHAD, "hello there");
     const models = provider.requests.map((r: { model: string }) => r.model);
     expect(models[0]).toBe("openai/gpt-4.1-mini"); // repo policy passes.route
-    expect(models[1]).toBe("openai/gpt-4o-mini"); // W3 tier resolution: short no-tool chat → FAST
+    expect(models[1]).toBe("openai/gpt-4.1-mini"); // interpret pass (route-class)
+    expect(models[2]).toBe("openai/gpt-4o-mini"); // W3 tier resolution: short no-tool chat → FAST
   });
 
   it("MODEL ROUTING: unparseable route output escalates ONCE to the fallback model, then proceeds", async () => {
@@ -625,11 +637,12 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
       { text: "recovered" },
     ];
     await turn(jehadId, JEHAD, "what is on my calendar today");
-    expect(provider.requests.length).toBe(3); // route + fallback retry + answer
+    expect(provider.requests.length).toBe(4); // route + fallback retry + interpret + answer
     const models = provider.requests.map((r: { model: string }) => r.model);
     expect(models[0]).toBe("openai/gpt-4.1-mini");
     expect(models[1]).toBe("google/gemini-3.8-flash");
-    expect(models[2]).toBe("anthropic/claude-sonnet-4.5"); // W3 tier resolution: STANDARD (question markers)
+    expect(models[2]).toBe("openai/gpt-4.1-mini"); // interpret pass (route-class)
+    expect(models[3]).toBe("anthropic/claude-sonnet-4.5"); // W3 tier resolution: STANDARD (question markers)
   });
 
   it("H-PROPOSE: no time given → deterministic clarification, nothing proposed", async () => {
@@ -696,7 +709,7 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     ];
     const outcome = await turn(jehadId, JEHAD, "schedule (garbled) at 7pm");
     expect(outcome.replied).toBe(true);
-    expect(provider.requests.length).toBe(3); // route + fallback retry + answer
+    expect(provider.requests.length).toBe(4); // route + fallback retry + interpret + answer
     expect(
       (
         await db.pool.query(

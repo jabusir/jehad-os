@@ -112,8 +112,8 @@ function parseTurns(value: unknown, where: string, errors: string[]): readonly S
       continue;
     }
     const rawScript = rawTurn["modelScript"];
-    if (!Array.isArray(rawScript) || rawScript.length === 0) {
-      errors.push(`${turnWhere}.modelScript: must be a non-empty array of {pass, output}`);
+    if (!Array.isArray(rawScript)) {
+      errors.push(`${turnWhere}.modelScript: must be an array of {pass, output} (empty = deterministic turn, zero dispatches expected)`);
       continue;
     }
     const script: ScriptedPass[] = [];

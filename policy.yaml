@@ -70,6 +70,7 @@ gateway:
   # buy silence. Defaults are ESCALATE-4 (owner tunes).
   actions: { enabled: true, principals: [josctl], max_proposals_per_day: 10, max_dispatches_per_day: 5, confirm_ttl_minutes: 10 }
   context: { enabled: true, max_reads_per_turn: 3, per_block_token_budget: 1500 }
+  interpret: { enabled: true }
   principals:
     yusra: { model: openai/gpt-4o-mini, requests_per_hour: 20, cost_per_day: 2.0 }
     josctl: { model: openai/gpt-4o-mini, requests_per_hour: 30, cost_per_day: 5.0, reads: [calendar, commitments, gmail, state, memory, system] }

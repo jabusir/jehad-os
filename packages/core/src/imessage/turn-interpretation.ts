@@ -170,11 +170,12 @@ function exactKeys(obj: Record<string, unknown>, keys: readonly string[]): boole
 function coerceTaskBatchItem(value: unknown): TaskBatchItem | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const item = value as Record<string, unknown>;
-  if (!exactKeys(item, ["title", "due"])) return null;
+  // due is OPTIONAL — an omitted due means "no deadline" (same as null).
+  if (!exactKeys(item, ["title", "due"]) && !exactKeys(item, ["title"])) return null;
   if (typeof item.title !== "string") return null;
   const title = redactContent(sanitizeText(item.title));
   if (title.length === 0 || title.length > TASK_TITLE_MAX_CHARS) return null;
-  if (item.due === null) return { title, due: null };
+  if (item.due === null || item.due === undefined) return { title, due: null };
   if (typeof item.due !== "string") return null;
   const due = sanitizeText(item.due);
   if (due.length === 0 || due.length > TASK_DUE_MAX_CHARS || due.includes("\n")) return null;
@@ -326,7 +327,7 @@ export function buildInterpretationPrompt(
     "Respond with ONLY one JSON array on a single line, no prose, no markdown.",
     "[] — when the turn is a question or command about the world, or pure chat. Do NOT invent proposals for questions.",
     "Proposal shapes (at most one of each type, at most 4 total):",
-    `{"type":"task_batch","items":[{"title":"<task>","due":"<deadline words>"|null}]} — the user listed tasks or to-dos for THEMSELVES; title at most ${TASK_TITLE_MAX_CHARS} chars; due is the USER'S words exactly as written (e.g. "wednesday", "by friday"), null when no deadline was stated — never invent one.`,
+    `{"type":"task_batch","items":[{"title":"<task>","due":"<deadline words>"|null}]} — the user listed tasks or to-dos for THEMSELVES; title at most ${TASK_TITLE_MAX_CHARS} chars; due is the USER'S words exactly as written (e.g. "wednesday", "by friday"), null (or the key may be omitted) when no deadline was stated — never invent one.`,
     `{"type":"configuration_directive","target_principal":"self"|"<other person's name>","target":"interaction_profile","change":{"<key>":"<value>"}} — the user asked to change how the assistant talks to them (or to a named person); change carries 1 to ${DIRECTIVE_CHANGE_MAX_PAIRS} key-value pairs, each value at most ${DIRECTIVE_CHANGE_VALUE_MAX_CHARS} chars.`,
     `{"type":"system_feedback","category":"capability_gap"|"bug"|"request","subject":"<short summary>","detail":"<what happened>"|null} — the user expressed a gap, defect, or wish about the assistant itself; subject at most ${FEEDBACK_SUBJECT_MAX_CHARS} chars, detail at most ${FEEDBACK_DETAIL_MAX_CHARS} chars.`,
     `{"type":"memory_candidate","summary":"<durable fact or preference worth keeping>"} — only when the user states one; at most ${MEMORY_SUMMARY_MAX_CHARS} chars.`,

@@ -256,6 +256,8 @@ export interface GatewayPolicyV1 {
   readonly actions?: GatewayActionsPolicy;
   /** Lane J1 context-assembler config (gateway.context); absent → module default. */
   readonly context?: GatewayContextPolicy;
+  /** W6a turn-interpretation flag (gateway.interpret); absent → disabled. */
+  readonly interpret?: GatewayInterpretPolicy;
   /** Lane R1 pass-model overrides (gateway.passes); absent → null (no overrides). */
   readonly passes: GatewayPassesPolicy | null;
 }
@@ -678,6 +680,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const gatewayReview: { value: GatewayReviewPolicy | null } = { value: null };
   const gatewayActions: { value: GatewayActionsPolicy | null } = { value: null };
   const gatewayContext: { value: GatewayContextPolicy | null } = { value: null };
+  const gatewayInterpret: { value: GatewayInterpretPolicy | null } = { value: null };
   const gatewayPasses: { value: GatewayPassesPolicy | null } = { value: null };
   const sensorsGmail: { value: GmailSensorPolicy | null } = { value: null };
   const calibrationDaily: { value: CalibrationPolicy | null } = { value: null };
@@ -794,6 +797,11 @@ export function parsePolicyV1(text: string): PolicyV1 {
         gatewayContext.value = parseGatewayContextEntry(value);
         continue;
       }
+      if (key === "interpret") {
+        if (gatewayInterpret.value !== null) throw new Error("policy: duplicate gateway.interpret key");
+        gatewayInterpret.value = parseGatewayInterpretEntry(value);
+        continue;
+      }
       if (key === "passes") {
         if (gatewayPasses.value !== null) throw new Error("policy: duplicate gateway.passes key");
         gatewayPasses.value = parseGatewayPassesEntry(value);
@@ -827,6 +835,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
       ...(gatewayReview.value !== null ? { review: gatewayReview.value } : {}),
       ...(gatewayActions.value !== null ? { actions: gatewayActions.value } : {}),
       ...(gatewayContext.value !== null ? { context: gatewayContext.value } : {}),
+      ...(gatewayInterpret.value !== null ? { interpret: gatewayInterpret.value } : {}),
       passes: gatewayPasses.value,
     };
   }
@@ -862,6 +871,25 @@ export function gmailSensorPolicyOf(policy: PolicyV1): GmailSensorPolicy {
  */
 export function calibrationPolicyOf(policy: PolicyV1): CalibrationPolicy {
   return policy.calibration ?? DEFAULT_CALIBRATION_POLICY;
+}
+
+export interface GatewayInterpretPolicy {
+  readonly enabled: boolean;
+}
+
+export const DEFAULT_GATEWAY_INTERPRET_POLICY: GatewayInterpretPolicy = { enabled: false };
+
+export function parseGatewayInterpretEntry(value: string): GatewayInterpretPolicy {
+  const m = value.match(/^\{ enabled: (true|false) \}$/);
+  if (m === null) {
+    throw new Error(`policy: gateway.interpret must be "{ enabled: <bool> }" (got '${value}')`);
+  }
+  return { enabled: m[1] === "true" };
+}
+
+export function interpretPolicyOf(policy: PolicyV1 | null): GatewayInterpretPolicy {
+  if (policy === null) return DEFAULT_GATEWAY_INTERPRET_POLICY;
+  return policy.gateway?.interpret ?? DEFAULT_GATEWAY_INTERPRET_POLICY;
 }
 
 export function gatewayContextPolicyOf(policy: PolicyV1): GatewayContextPolicy {

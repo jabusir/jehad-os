@@ -115,6 +115,16 @@ export function scriptedDispatch(
     responder: (request: ModelRequest): ModelResult => {
       const actual = passKindOf(request.prompt);
       const scripted = script[index];
+      // The interpret pass is advisory and dispatched between route and
+      // answer: when the NEXT script entry is not interpret, satisfy the
+      // dispatch with "no proposals" WITHOUT consuming the script.
+      if (actual === "interpret") {
+        if (scripted !== undefined && scripted.pass === "interpret") {
+          index += 1;
+          return { text: scripted.output };
+        }
+        return { text: "[]" };
+      }
       index += 1;
       if (scripted === undefined) {
         mismatches.push(`${actual} pass dispatched but modelScript is exhausted`);

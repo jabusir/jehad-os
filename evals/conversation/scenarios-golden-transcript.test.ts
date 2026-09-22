@@ -47,13 +47,14 @@ describe("scenarios-golden-transcript.yaml (W6(c) golden eval, R12)", () => {
     for (const item of TODO_ITEMS) expect(user).toContain(item);
     expect(user.match(/wednesday/gi)).toHaveLength(3);
     const interpret = scenario.turns[0]!.modelScript.find((p) => p.pass === "interpret")!;
-    const proposal = JSON.parse(interpret.output) as {
-      proposals: { type: string; items: { title: string; due?: string }[] }[];
-    };
-    expect(proposal.proposals).toHaveLength(1);
-    expect(proposal.proposals[0]!.type).toBe("task_batch");
+    const proposals = JSON.parse(interpret.output) as {
+      type: string;
+      items: { title: string; due?: string }[];
+    }[];
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.type).toBe("task_batch");
     // Titles carry the verbatim item text with the due word split into `due`.
-    expect(proposal.proposals[0]!.items.map((item) => item.title)).toEqual([
+    expect(proposals[0]!.items.map((item) => item.title)).toEqual([
       "Wedding seating chart",
       "wedding playlist",
       "wedding appetizers",
@@ -63,7 +64,7 @@ describe("scenarios-golden-transcript.yaml (W6(c) golden eval, R12)", () => {
       "build bed",
       "Clean apartment and bathrooms",
     ]);
-    expect(proposal.proposals[0]!.items.filter((item) => item.due === "wednesday")).toHaveLength(3);
+    expect(proposals[0]!.items.filter((item) => item.due === "wednesday")).toHaveLength(3);
   });
 
   it("(a) proposal-only: zero commitment writes, no persistence claim, offer verb present", () => {
@@ -86,16 +87,19 @@ describe("scenarios-golden-transcript.yaml (W6(c) golden eval, R12)", () => {
     expect(confirm.turns).toHaveLength(2);
     expect(confirm.turns[0]!.user).toBe(proposalTurn.user);
     expect(confirm.turns[1]!.user).toBe("track them");
-    expect(confirm.turns[1]!.modelScript.find((p) => p.pass === "interpret")!.output).toBe(
-      '{"proposals":[]}',
-    );
+    expect(confirm.turns[1]!.modelScript).toEqual([]); // deterministic confirm — zero dispatches
     expect(confirm.expectations.replyContains).toEqual(["8"]);
     // Fixed clock: runner anchors at 2026-09-21T18:00:00.000Z = Mon Sep 21
     // 2026, 11:00 PT → "wednesday" = 2026-09-23 (America/Los_Angeles).
     expect(confirm.expectations.dbPins).toEqual([
       { sql: "SELECT 1 FROM commitments HAVING count(*) = 8", expectOne: true, expectZero: false },
       {
-        sql: "SELECT 1 FROM commitments WHERE (due_at AT TIME ZONE 'America/Los_Angeles')::date = '2026-09-23' HAVING count(*) = 3",
+        sql: "SELECT 1 FROM commitments WHERE due_at IS NOT NULL HAVING count(*) = 3",
+        expectOne: true,
+        expectZero: false,
+      },
+      {
+        sql: "SELECT 1 FROM commitments WHERE due_at IS NOT NULL AND (due_at AT TIME ZONE 'America/Los_Angeles')::date = '2026-09-23' HAVING count(*) = 3",
         expectOne: true,
         expectZero: false,
       },

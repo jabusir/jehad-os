@@ -53,23 +53,35 @@ describe("passKindOf (W6(a) interpret pass marker)", () => {
 });
 
 describe("scriptedDispatch (interpret scripting)", () => {
-  it("dispatches interpret → route → answer in scripted order with no mismatches", () => {
+  it("dispatches route → interpret → answer in scripted order with no mismatches", () => {
     const dispatch = scriptedDispatch([
-      { pass: "interpret", output: '{"proposals":[]}' },
       { pass: "route", output: '{"tool":"none"}' },
+      { pass: "interpret", output: "[]" },
       { pass: "answer", output: "ok" },
     ]);
-    expect(dispatch.responder(req(INTERPRET_PROMPT))).toEqual({ text: '{"proposals":[]}' });
     expect(dispatch.responder(req(ROUTE_PROMPT))).toEqual({ text: '{"tool":"none"}' });
+    expect(dispatch.responder(req(INTERPRET_PROMPT))).toEqual({ text: "[]" });
     expect(dispatch.responder(req(ANSWER_PROMPT))).toEqual({ text: "ok" });
     expect(dispatch.mismatches()).toEqual([]);
     expect(dispatch.consumed()).toBe(3);
   });
 
+  it("unscripted interpret dispatches are auto-satisfied with no proposals (no consume, no mismatch)", () => {
+    const dispatch = scriptedDispatch([
+      { pass: "route", output: '{"tool":"none"}' },
+      { pass: "answer", output: "ok" },
+    ]);
+    expect(dispatch.responder(req(ROUTE_PROMPT))).toEqual({ text: '{"tool":"none"}' });
+    expect(dispatch.responder(req(INTERPRET_PROMPT))).toEqual({ text: "[]" });
+    expect(dispatch.responder(req(ANSWER_PROMPT))).toEqual({ text: "ok" });
+    expect(dispatch.mismatches()).toEqual([]);
+    expect(dispatch.consumed()).toBe(2);
+  });
+
   it("records a pass mismatch when the dispatched kind differs from the script", () => {
-    const dispatch = scriptedDispatch([{ pass: "interpret", output: '{"proposals":[]}' }]);
-    expect(dispatch.responder(req(ANSWER_PROMPT))).toEqual({ text: '{"proposals":[]}' });
-    expect(dispatch.mismatches()).toEqual(["pass mismatch — scripted interpret, dispatched answer"]);
+    const dispatch = scriptedDispatch([{ pass: "route", output: '{"tool":"none"}' }]);
+    expect(dispatch.responder(req(ANSWER_PROMPT))).toEqual({ text: '{"tool":"none"}' });
+    expect(dispatch.mismatches()).toEqual(["pass mismatch — scripted route, dispatched answer"]);
   });
 });
 
@@ -193,7 +205,7 @@ describe.skipIf(!TEST_DATABASE_URL)("conversation eval runner (integration, herm
     expect(observed.replied).toBe(true);
     expect(observed.reply).toBe("Canberra.");
     expect(observed.routedTools).toEqual([]);
-    expect(observed.passes).toEqual(["route", "answer"]);
+    expect(observed.passes).toEqual(["route", "interpret", "answer"]);
   });
 
   it("reports expectation failures with detail", async () => {
@@ -347,7 +359,7 @@ describe.skipIf(!TEST_DATABASE_URL)("conversation eval runner (integration, herm
     expect(byId.get("synthetic-persistence-licensed-01")!.status).toBe("pass");
   });
 
-  it("interpret audit observation is captured (zero rows today) alongside route/answer passes", async () => {
+  it("interpret audit observation is captured (wired: one audit row, parsed payloads) alongside route/answer passes", async () => {
     const run = await runConversationEval({
       databaseUrl: TEST_DATABASE_URL!,
       dbTag: "conveval7",
@@ -372,7 +384,10 @@ describe.skipIf(!TEST_DATABASE_URL)("conversation eval runner (integration, herm
     });
     expect(run.counts).toEqual({ pass: 1, fail: 0, skip: 0 });
     const observed = run.results[0]!.turns[0]!;
-    expect(observed.passes).toEqual(["route", "answer"]);
-    expect(observed.interpretation).toEqual({ audits: 0, payloads: [] });
+    expect(observed.passes).toEqual(["route", "interpret", "answer"]);
+    expect(observed.interpretation.audits).toBe(1);
+    expect(observed.interpretation.payloads).toEqual([
+      { handle: expect.any(String), principalId: expect.any(String), proposals: [] },
+    ]);
   });
 });
