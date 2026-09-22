@@ -138,3 +138,24 @@ export {
   SELF_BRIEF_LIMITATIONS_VERSION,
   SELF_BRIEF_MAX_LINES,
 } from "./system-self-brief.js";
+
+// SV3 lessons substrate — WRITE queries (propose/ratify) live beside the
+// read/render pair: the module owns the whole lesson lifecycle over the
+// feedback table (migration 022). See lessons.ts for the gate contract.
+export type { LessonRow, LessonVerdict } from "./lessons.js";
+export {
+  collectRatifiedLessons,
+  LESSONS_BLOCK_CHAR_BUDGET,
+  LESSONS_BLOCK_HEADER,
+  LESSONS_DEFAULT_LIMIT,
+  LESSON_ITEM_TYPE,
+  LESSON_NOTE_MAX_CHARS,
+  LESSON_SUBJECT_MAX_CHARS,
+  LESSON_VERDICTS,
+  LessonInputError,
+  LessonNotFoundError,
+  LessonNotProposedError,
+  proposeLesson,
+  ratifyLesson,
+  renderLessonsBlock,
+} from "./lessons.js";

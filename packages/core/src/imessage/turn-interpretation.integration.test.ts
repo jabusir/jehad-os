@@ -538,6 +538,7 @@ describe.skipIf(!TEST_DATABASE_URL)("turn interpretation bridges (integration)",
 
     // Roll back exactly 020 — the down path purges then narrows.
     expect(await migrateDown(db.pool, { to: "019_grant_reminder_kind" }, defaultMigrationsDir())).toEqual([
+      "022_lesson_vocabulary",
       "021_reminders",
       "020_system_feedback",
     ]);
@@ -557,7 +558,11 @@ describe.skipIf(!TEST_DATABASE_URL)("turn interpretation bridges (integration)",
     ).rejects.toThrow(/feedback_verdict_check/);
 
     // Re-up restores the widened vocabulary.
-    expect(await migrateUp(db.pool, defaultMigrationsDir())).toEqual(["020_system_feedback", "021_reminders"]);
+    expect(await migrateUp(db.pool, defaultMigrationsDir())).toEqual([
+      "020_system_feedback",
+      "021_reminders",
+      "022_lesson_vocabulary",
+    ]);
     await db.pool.query(
       `INSERT INTO feedback (item_type, item_id, verdict, note, created_by)
        VALUES ('system_feedback', 't4', 'request', 'n', $1)`,

@@ -55,4 +55,14 @@ describe("@jehad/worker", () => {
     const names = workflows.map((workflow) => workflow.name);
     expect(new Set(names).size).toBe(names.length);
   });
+
+  it("registers the lesson-harvest workflow exactly once (nightly SV3 harvest)", () => {
+    expect(workflows).toContainEqual(
+      expect.objectContaining({ kind: "cron", name: "lesson-harvest", cron: "30 * * * *" }),
+    );
+    const harvest = workflows.filter((workflow) => workflow.name === "lesson-harvest");
+    expect(harvest).toHaveLength(1);
+    const names = workflows.map((workflow) => workflow.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
 });

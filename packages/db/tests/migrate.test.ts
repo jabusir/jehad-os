@@ -22,7 +22,7 @@ const ALL_MIGRATIONS = [
   "004_commitments_domain", "005_commitments_temporal", "006_notifications",
   "007_calendar", "008_feedback", "009_notification_calendar_change", "010_imessage_sensor", "011_imessage_pairing", "012_interaction_threads", "013_review_refs", "014_confirm_token_unique",
   "015_gmail_sensor", "016_calibration", "017_calendar_occurrence", "018_interaction_profiles", "019_grant_reminder_kind",
-  "020_system_feedback", "021_reminders",
+  "020_system_feedback", "021_reminders", "022_lesson_vocabulary",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {
@@ -311,6 +311,38 @@ describe("migration files (fs only)", () => {
     expect(m!.downSql).toMatch(
       /CHECK \(verdict IN \('useful', 'noise', 'missed', 'incorrect', 'interruptive'\)\)/,
     );
+  });
+
+  it("022 widens the feedback item_type/verdict CHECKs for lessons; down purges then narrows", async () => {
+    const migrations = await listMigrations();
+    const m = migrations.find((x) => x.name === "022_lesson_vocabulary");
+    expect(m).toBeDefined();
+    // Additive drop/recreate of BOTH feedback CHECKs (020 precedent); the
+    // lesson item world plus the propose→confirm gate verdicts.
+    expect(m!.sql).toMatch(
+      /CHECK \(item_type IN \('notification', 'attention_item', 'review_item', 'brief_section', 'event', 'calibration', 'system_feedback', 'lesson'\)\)/,
+    );
+    expect(m!.sql).toMatch(
+      /CHECK \(verdict IN \('useful', 'noise', 'missed', 'incorrect', 'interruptive', 'capability_gap', 'bug', 'request', 'proposed', 'ratified', 'retired'\)\)/,
+    );
+    // Lessons are the first mutable feedback world: updated_at + provenance.
+    expect(m!.sql).toMatch(/ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now\(\)/);
+    expect(m!.sql).toMatch(/ADD COLUMN source_refs jsonb/);
+    // Subject dedupe is a partial unique index — other worlds stay append-only.
+    expect(m!.sql).toMatch(
+      /CREATE UNIQUE INDEX feedback_lesson_subject_unique\s+ON feedback \(item_type, item_id\)\s+WHERE item_type = 'lesson'/,
+    );
+    expect(m!.sql).toMatch(/CREATE INDEX feedback_lesson_ratified_idx/);
+    // Down: purge lesson rows BEFORE narrowing; restore the 020 vocabulary.
+    expect(m!.downSql).toMatch(/DELETE FROM feedback WHERE item_type = 'lesson'/);
+    expect(m!.downSql).toMatch(
+      /CHECK \(item_type IN \('notification', 'attention_item', 'review_item', 'brief_section', 'event', 'calibration', 'system_feedback'\)\)/,
+    );
+    expect(m!.downSql).toMatch(
+      /CHECK \(verdict IN \('useful', 'noise', 'missed', 'incorrect', 'interruptive', 'capability_gap', 'bug', 'request'\)\)/,
+    );
+    expect(m!.downSql).toMatch(/DROP COLUMN IF EXISTS source_refs/);
+    expect(m!.downSql).toMatch(/DROP COLUMN IF EXISTS updated_at/);
   });
 
   it("002 ships the action_attempts outcome-guard trigger with a down path", async () => {

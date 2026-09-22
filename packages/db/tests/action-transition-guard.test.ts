@@ -108,7 +108,7 @@ describe.skipIf(!TEST_DATABASE_URL)("002 action_attempts outcome guard (integrat
 
     const rolled = await migrateDown(db.pool, { to: "001_schema_core" });
     expect(rolled).toEqual([
-      "021_reminders", "020_system_feedback", "019_grant_reminder_kind", "018_interaction_profiles", "017_calendar_occurrence", "016_calibration", "015_gmail_sensor", "014_confirm_token_unique", "013_review_refs",
+      "022_lesson_vocabulary", "021_reminders", "020_system_feedback", "019_grant_reminder_kind", "018_interaction_profiles", "017_calendar_occurrence", "016_calibration", "015_gmail_sensor", "014_confirm_token_unique", "013_review_refs",
       "012_interaction_threads",
       "011_imessage_pairing",
       "010_imessage_sensor",
