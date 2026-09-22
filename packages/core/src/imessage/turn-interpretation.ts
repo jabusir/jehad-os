@@ -523,6 +523,45 @@ export function parseReminderPhrase(text: string): { title: string; dueWords: st
 
 // Mutation bridges (validate → mutate via existing writers → audit → reply)
 // ---------------------------------------------------------------------------
+// W6-phase-2: reminder probe replies. The check-in is OUTBOUND — the reply
+// resolves deterministically against the pending probe on the thread. Bare
+// "yep" is NOT ambient chat when a check-in is open. Exact grammar only;
+// anything else flows through the normal pipeline (never hijacked).
+// ---------------------------------------------------------------------------
+
+export type ProbeReplyKind = "done" | "renegotiate" | "not_done" | "stop";
+
+export interface ProbeReply {
+  readonly kind: ProbeReplyKind;
+  /** Trailing when-words for a renegotiation ("tomorrow at 9am"); else null. */
+  readonly whenText: string | null;
+}
+
+const PROBE_DONE_RE =
+  /^(yes|yep|yeah|yup|done|did it|did that|just did|finished|completed|got it done|i did)\s*[.!?]*$/i;
+const PROBE_STOP_RE =
+  /^(stop|cancel)\s*[.!?]*$|^(?:stop|quit) (?:reminding|texting|nagging|asking)(?: me)?(?: about it)?\s*[.!?]*$|^(?:cancel|delete) (?:the )?reminder\s*[.!?]*$/i;
+const PROBE_NOT_DONE_RE =
+  /^(?:no|nope|nah|not yet|not done|didn'?t|couldn'?t|negative|haven'?t yet|i haven'?t|later|not today|can'?t today|can'?t right now)\s*[.!?]*$/i;
+const PROBE_WHEN_TAIL_RE =
+  /((?:tomorrow|today|tonight|next week|this afternoon|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))(?: at \d{1,2}(?::\d{2})? ?(?:am|pm)?)?|in \d+ (?:hours?|hrs?|minutes?|mins?)|at \d{1,2}(?::\d{2})? ?(?:am|pm))\s*[.!?]*$/i;
+
+export function parseProbeReply(text: string): ProbeReply | null {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim().replace(/\s+/g, " ");
+  if (trimmed.length === 0 || trimmed.length > 120) return null;
+  if (PROBE_STOP_RE.test(trimmed)) return { kind: "stop", whenText: null };
+  if (PROBE_DONE_RE.test(trimmed)) return { kind: "done", whenText: null };
+  const tail = trimmed.match(PROBE_WHEN_TAIL_RE);
+  if (tail !== null) {
+    const whenText = tail[1]!.toLowerCase().trim();
+    return { kind: "renegotiate", whenText };
+  }
+  if (PROBE_NOT_DONE_RE.test(trimmed)) return { kind: "not_done", whenText: null };
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 
 /** Bridge results carry an honest reply for EVERY outcome (R10). */
 export interface BridgeOutcome {

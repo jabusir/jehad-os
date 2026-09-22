@@ -26,24 +26,17 @@ import {
   recordAudit,
   resolveActiveThread,
   UUID_RE,
-} from "@jehad/core";
-// TODO(core): the barrel does not carry the reminders module yet — these
-// deep imports collapse to "@jehad/core" once packages/core/src/index.ts
-// exports ./reminders/queries.js + ./reminders/lifecycle.js.
-import {
+  REMINDER_POLICY,
+  dueWordFor,
+  scheduleAfterTouch,
+  touchMessage,
   ReminderNotFoundError,
   ReminderNotArmedError,
   dueTouches,
   getReminder,
   parkReminder,
   recordTouch,
-} from "../../core/src/reminders/queries.js";
-import {
-  REMINDER_POLICY,
-  dueWordFor,
-  scheduleAfterTouch,
-  touchMessage,
-} from "../../core/src/reminders/lifecycle.js";
+} from "@jehad/core";
 import { defineScheduledWorkflow, type ScheduledWorkflowDefinition } from "./definition.js";
 
 export const REMINDER_SWEEP_CRON = "*/15 * * * *";

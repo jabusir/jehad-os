@@ -18,11 +18,10 @@
 
 import { UUID_RE } from "../events/envelope.js";
 import { toIso, toIsoOrNull, type QueryExecutor } from "../queries/executor.js";
+import type { TouchKind } from "./lifecycle.js";
 
 /** The touch vocabulary (schema CHECK, migration 021). */
 export const TOUCH_KINDS = ["morning", "probe", "nudge"] as const;
-
-export type TouchKind = (typeof TOUCH_KINDS)[number];
 
 /** Reminder lifecycle statuses (schema CHECK, migration 021). */
 export const REMINDER_STATUSES = ["armed", "completed", "parked", "cancelled"] as const;

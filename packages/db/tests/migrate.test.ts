@@ -22,7 +22,7 @@ const ALL_MIGRATIONS = [
   "004_commitments_domain", "005_commitments_temporal", "006_notifications",
   "007_calendar", "008_feedback", "009_notification_calendar_change", "010_imessage_sensor", "011_imessage_pairing", "012_interaction_threads", "013_review_refs", "014_confirm_token_unique",
   "015_gmail_sensor", "016_calibration", "017_calendar_occurrence", "018_interaction_profiles", "019_grant_reminder_kind",
-  "020_system_feedback",
+  "020_system_feedback", "021_reminders",
 ] as const;
 
 async function tableNames(pool: Pool): Promise<Set<string>> {

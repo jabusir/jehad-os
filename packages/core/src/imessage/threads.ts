@@ -356,6 +356,20 @@ export interface ThreadMetadata {
   readonly lastStance?: ThreadStance;
   readonly profile_override?: ThreadProfileOverride;
   readonly pendingProposal?: ThreadPendingProposal;
+  readonly pendingProbe?: ThreadPendingProbe;
+}
+
+/**
+ * W6-phase-2 reminder probe — lives in
+ * interaction_threads.metadata.pendingProbe and is written by the
+ * reminder-sweep workflow (outbound touch), resolved/cleared by the
+ * deterministic probe-reply pre-pass in conversation.ts. Never produced by
+ * turn artifacts.
+ */
+export interface ThreadPendingProbe {
+  readonly reminderId: string;
+  readonly kind: "probe" | "nudge";
+  readonly sentAt: string;
 }
 
 export interface TurnReferentArtifact {
@@ -395,7 +409,10 @@ type MutableThreadMetadata = {
   lastStance?: ThreadStance;
   profile_override?: ThreadProfileOverride;
   pendingProposal?: ThreadPendingProposal;
+  pendingProbe?: ThreadPendingProbe;
 };
+
+const PENDING_PROBE_KINDS: ReadonlySet<string> = new Set(["probe", "nudge"]);
 
 function sanitizeThreadText(text: string, maxChars: number): string {
   return redactContent(text.trim())
@@ -468,6 +485,10 @@ export function mergeThreadState(
   // never produce or mutate it (setThreadPendingProposal owns it); a NEW
   // turn's proposal replaces it only through that writer.
   if (base.pendingProposal !== undefined) merged.pendingProposal = base.pendingProposal;
+  // W6-phase-2: the reminder probe rides along untouched — turn artifacts
+  // never produce or mutate it (setThreadPendingProbe owns it; the sweep
+  // writes it, the probe-reply pre-pass clears it).
+  if (base.pendingProbe !== undefined) merged.pendingProbe = base.pendingProbe;
   return merged;
 }
 
@@ -482,6 +503,7 @@ export function retractLastStance(metadata: ThreadMetadata | null): ThreadMetada
     ...(metadata.pendingProposal !== undefined
       ? { pendingProposal: metadata.pendingProposal }
       : {}),
+    ...(metadata.pendingProbe !== undefined ? { pendingProbe: metadata.pendingProbe } : {}),
   };
 }
 
@@ -495,7 +517,8 @@ export function parseThreadMetadata(value: unknown): ThreadMetadata | null {
       key !== "referents" &&
       key !== "lastStance" &&
       key !== "profile_override" &&
-      key !== "pendingProposal"
+      key !== "pendingProposal" &&
+      key !== "pendingProbe"
     ) {
       return null;
     }
@@ -544,7 +567,32 @@ export function parseThreadMetadata(value: unknown): ThreadMetadata | null {
     if (pending === null) return null;
     metadata.pendingProposal = pending;
   }
+  if (obj.pendingProbe !== undefined) {
+    const probe = parsePendingProbe(obj.pendingProbe);
+    if (probe === null) return null;
+    metadata.pendingProbe = probe;
+  }
   return metadata;
+}
+
+/** W6-phase-2: strict fail-closed parse of the pendingProbe metadata value
+ *  (written by the reminder-sweep, consumed by the probe-reply pre-pass). */
+function parsePendingProbe(value: unknown): ThreadPendingProbe | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const obj = value as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (key !== "reminderId" && key !== "kind" && key !== "sentAt") return null;
+  }
+  if (typeof obj.reminderId !== "string" || obj.reminderId.length === 0 || obj.reminderId.length > 64)
+    return null;
+  if (typeof obj.kind !== "string" || !PENDING_PROBE_KINDS.has(obj.kind)) return null;
+  if (typeof obj.sentAt !== "string" || obj.sentAt.length === 0 || obj.sentAt.length > 40) return null;
+  if (Number.isNaN(Date.parse(obj.sentAt))) return null;
+  return {
+    reminderId: obj.reminderId,
+    kind: obj.kind as ThreadPendingProbe["kind"],
+    sentAt: obj.sentAt,
+  };
 }
 
 /** W6(a): strict fail-closed parse of the pendingProposal metadata value. */
@@ -698,7 +746,54 @@ export async function setThreadPendingProposal(
     ...(existing.profile_override !== undefined
       ? { profile_override: existing.profile_override }
       : {}),
+    ...(existing.pendingProbe !== undefined ? { pendingProbe: existing.pendingProbe } : {}),
     ...(opts.pending !== null ? { pendingProposal: opts.pending } : {}),
+  };
+  await db.query(
+    `UPDATE interaction_threads SET metadata = $2::jsonb WHERE id = $1::uuid`,
+    [opts.threadId, JSON.stringify(merged)],
+  );
+}
+
+/**
+ * W6-phase-2: write/clear the reminder probe on a thread. Same protocol as
+ * setThreadPendingProposal (FOR UPDATE, owner check, strict fail-closed
+ * shape, sibling preservation). `pending: null` clears the probe.
+ */
+export async function setThreadPendingProbe(
+  db: QueryExecutor,
+  opts: {
+    readonly threadId: string;
+    readonly principalId: string;
+    readonly pending: ThreadPendingProbe | null;
+  },
+): Promise<void> {
+  if (opts.pending !== null) {
+    const candidate: unknown = { pendingProbe: opts.pending };
+    if (parseThreadMetadata(candidate) === null) {
+      throw new Error("setThreadPendingProbe: pending probe failed the strict shape");
+    }
+  }
+  const row = await db.query(
+    `SELECT principal_id, metadata FROM interaction_threads WHERE id = $1::uuid FOR UPDATE`,
+    [opts.threadId],
+  );
+  const thread = row.rows[0];
+  if (thread === undefined || String(thread.principal_id) !== opts.principalId) {
+    throw new Error("setThreadPendingProbe: thread does not belong to the requesting principal");
+  }
+  const existing = parseThreadMetadata(thread.metadata) ?? {};
+  const merged: Record<string, unknown> = {
+    ...(existing.topic !== undefined ? { topic: existing.topic } : {}),
+    ...(existing.referents !== undefined ? { referents: existing.referents } : {}),
+    ...(existing.lastStance !== undefined ? { lastStance: existing.lastStance } : {}),
+    ...(existing.profile_override !== undefined
+      ? { profile_override: existing.profile_override }
+      : {}),
+    ...(existing.pendingProposal !== undefined
+      ? { pendingProposal: existing.pendingProposal }
+      : {}),
+    ...(opts.pending !== null ? { pendingProbe: opts.pending } : {}),
   };
   await db.query(
     `UPDATE interaction_threads SET metadata = $2::jsonb WHERE id = $1::uuid`,

@@ -106,6 +106,7 @@ describe("collectSelfBrief (unit)", () => {
         activeProfileVersion: 3,
       },
       actions: { calendarWrite: true, commitmentTracking: true },
+      remindersArmed: null,
       limits: [...SYSTEM_STATE_LIMITATIONS],
     });
   });

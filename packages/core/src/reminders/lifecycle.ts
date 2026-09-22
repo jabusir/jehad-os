@@ -343,6 +343,31 @@ export function quietShiftedAck(): string {
   return `That lands in quiet hours — I'll text at 9:00 AM instead.`;
 }
 
+/** Probe answered with a no-date deferral — the nudge is already pre-scheduled. */
+export function deferredAck(): string {
+  return `Got it — I'll check back tomorrow morning.`;
+}
+
+/**
+ * The capture-time promise: what the ack says about the first touch.
+ * quiet-shifted → the quiet-shift line; explicit time → "I'll text you at
+ * H:MM AM/PM."; fuzzy today → afternoon; else "<weekday> morning".
+ */
+export function firstTouchPromise(
+  firstTouch: { at: Date; quietShifted: boolean },
+  m: { dueTime: { hour: number; minute: number } | null; dueWord: string },
+): string {
+  if (firstTouch.quietShifted) return quietShiftedAck();
+  if (m.dueTime !== null) {
+    const h12 = m.dueTime.hour % 12 === 0 ? 12 : m.dueTime.hour % 12;
+    const mm = String(m.dueTime.minute).padStart(2, "0");
+    const suffix = m.dueTime.hour < 12 ? "AM" : "PM";
+    return `I'll text you at ${h12}:${mm} ${suffix}.`;
+  }
+  if (m.dueWord === "today") return "I'll text you this afternoon.";
+  return `I'll text you ${m.dueWord} morning.`;
+}
+
 // -------------------------------------------------------------------
 // When-words → due (same grammar as capture, plus time-of-day)
 // -------------------------------------------------------------------

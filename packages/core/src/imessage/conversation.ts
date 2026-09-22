@@ -64,6 +64,7 @@ import { confirmOccurrence } from "../calendar/occurrence.js";
 import {
   applyConfigurationDirective,
   parseReminderPhrase,
+  parseProbeReply,
   applyMemoryCandidate,
   applySystemFeedback,
   applyTaskBatch,
@@ -73,7 +74,26 @@ import {
   proposalFromPending,
   renderProposalOffer,
 } from "./turn-interpretation.js";
-import { setThreadPendingProposal } from "./threads.js";
+import {
+  REMINDER_POLICY,
+  computeFirstTouch,
+  deferredAck,
+  doneAck,
+  dueWordFor,
+  firstTouchPromise,
+  movedAck,
+  parkedAck,
+  quietShiftedAck,
+  resolveWhenWords,
+} from "../reminders/lifecycle.js";
+import {
+  cancelReminder,
+  completeReminder,
+  createReminder,
+  getReminder,
+  renegotiateReminder,
+} from "../reminders/queries.js";
+import { setThreadPendingProposal, setThreadPendingProbe } from "./threads.js";
 import { resolveProfileBehaviors } from "./profiles.js";
 import { collectSelfBrief, renderSelfBrief, SELF_BRIEF_HONESTY_RULES } from "../queries/system-self-brief.js";
 import { TRUTHFUL_UX_RULES } from "./truthful-ux.js";
@@ -480,6 +500,35 @@ const ATTACHMENT_ONLY_REPLY =
 
 /** Explicit thread reset (§11) — deterministic, no model call. */
 const RESET_COMMANDS = new Set(["/new", "/reset"]);
+
+/**
+ * W6-phase-2 helpers: civil-day math in the principal's PT frame. A
+ * renegotiated or explicit time already past rolls forward to the next
+ * civil day (never schedules into the past); "no when-words" defaults to
+ * tomorrow.
+ */
+function nextCivilDay(now: Date): string {
+  const pt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: REMINDER_POLICY.timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
+  const rolled = new Date(`${pt}T12:00:00Z`);
+  rolled.setUTCDate(rolled.getUTCDate() + 1);
+  return rolled.toISOString().slice(0, 10);
+}
+
+function rollForwardPastTime(
+  dueDate: string,
+  dueTime: { hour: number; minute: number } | null,
+  now: Date,
+): { dueDate: string; dueTime: { hour: number; minute: number } | null } {
+  if (dueTime === null) return { dueDate, dueTime };
+  const first = computeFirstTouch({ dueDate, dueTime, now });
+  if (first.at.getTime() > now.getTime()) return { dueDate, dueTime };
+  return { dueDate: nextCivilDay(now), dueTime };
+}
 const RETRACT_RE = /\b(?:i\s+)?(?:have\s+)?changed\s+my\s+mind\b|\bnever\s?mind\b|\bscratch\s+that\b/i;
 const INTERPRET_PROMPT_VERSION = "imessage-converse-v3-interpret";
 const QUESTION_MARKERS_RE =
@@ -1062,6 +1111,98 @@ async function converseTurn(
     // zero eligible → fall through to the model path
   }
 
+  // W6-phase-2: replies to reminder check-ins resolve deterministically
+  // against the pending probe the sweep wrote on this thread — the system
+  // opened that conversation, so bare "yep" closes IT, not ambient chat.
+  // Exact grammar only (parseProbeReply); everything else flows through.
+  const probeReply = parseProbeReply(input.text);
+  if (probeReply !== null) {
+    const probeThread = await resolveActiveThread(db, {
+      principalId: input.principalId,
+      surface: CONVERSATION_SURFACE,
+      now,
+    });
+    const probeMetaRow = await db.query(
+      "SELECT metadata FROM interaction_threads WHERE id = $1::uuid",
+      [probeThread.id],
+    );
+    const probePending = parseThreadMetadata(probeMetaRow.rows[0]?.metadata ?? null)
+      ?.pendingProbe;
+    if (probePending !== undefined) {
+      const reminderRow = await getReminder(db, probePending.reminderId);
+      const live = reminderRow !== null && reminderRow.status === "armed";
+      if (live) {
+        let content: string;
+        let marker: string;
+        const row = reminderRow!;
+        if (probeReply.kind === "done") {
+          await completeReminder(db, row.id, "user_reply");
+          if (row.commitmentId !== null) {
+            await applyCommitmentTransition(db, {
+              commitmentId: row.commitmentId,
+              verb: "done",
+              principalId: input.principalId,
+              now: () => now,
+            });
+          }
+          content = doneAck(row.title);
+          marker = "reminder-probe-done";
+        } else if (probeReply.kind === "stop") {
+          await cancelReminder(db, row.id, "user");
+          content = parkedAck(row.title);
+          marker = "reminder-probe-stopped";
+        } else if (probeReply.kind === "not_done") {
+          content = deferredAck();
+          marker = "reminder-probe-deferred";
+        } else {
+          const when = resolveWhenWords(probeReply.whenText ?? "", now);
+          if (when === null) {
+            content = deferredAck();
+            marker = "reminder-probe-deferred";
+          } else {
+            const target = rollForwardPastTime(when.dueDate, when.dueTime, now);
+            const first = computeFirstTouch({ dueDate: target.dueDate, dueTime: target.dueTime, now });
+            await renegotiateReminder(db, row.id, {
+              dueDate: target.dueDate,
+              dueTime: target.dueTime,
+              firstTouchAt: first.at,
+              firstTouchKind: first.kind,
+            });
+            if (row.commitmentId !== null) {
+              await applyCommitmentTransition(db, {
+                commitmentId: row.commitmentId,
+                verb: "renegotiated",
+                principalId: input.principalId,
+                note: `moved to ${target.dueDate}`,
+                now: () => now,
+              });
+            }
+            content = movedAck(dueWordFor(target.dueDate, now));
+            if (first.quietShifted) content += ` ${quietShiftedAck()}`;
+            marker = "reminder-probe-moved";
+          }
+        }
+        await setThreadPendingProbe(db, {
+          threadId: probeThread.id,
+          principalId: input.principalId,
+          pending: null,
+        });
+        return deterministicReply(deps, input, ctx, {
+          content,
+          outboundTrust: "system_generated",
+          marker,
+        });
+      }
+      // Stale probe (reminder completed/cancelled/gone): clear it and let
+      // the turn flow through the normal pipeline.
+      await setThreadPendingProbe(db, {
+        threadId: probeThread.id,
+        principalId: input.principalId,
+        pending: null,
+      });
+    }
+  }
+
   // W6a follow-up: "remind me to X" is an EXPLICIT capture request —
   // the user's words are the consent, so it applies directly (no
   // offer round-trip). Reuses the task-batch bridge + temporal
@@ -1090,8 +1231,33 @@ async function converseTurn(
         principalId: input.principalId,
         now,
       });
+      // W6-phase-2: the commitment is the record; the reminder is the
+      // promise — the system brings it back at a chosen moment. No
+      // when-words defaults to tomorrow 9:00 AM (the work-day rhythm).
+      const when =
+        remindParse.dueWords === null ? null : resolveWhenWords(remindParse.dueWords, now);
+      const dueDate = when?.dueDate ?? nextCivilDay(now);
+      const dueTime = when?.dueTime ?? null;
+      const firstTouch = computeFirstTouch({ dueDate, dueTime, now });
+      const safeFirstTouch =
+        firstTouch.at.getTime() <= now.getTime()
+          ? computeFirstTouch({ dueDate: nextCivilDay(now), dueTime, now })
+          : firstTouch;
+      await createReminder(db, {
+        principal: String(principalName),
+        title: remindParse.title,
+        commitmentId: applied.commitmentIds[0] ?? null,
+        dueDate,
+        dueTime,
+        firstTouchAt: safeFirstTouch.at,
+        firstTouchKind: safeFirstTouch.kind,
+      });
+      const promiseLine = firstTouchPromise(safeFirstTouch, {
+        dueTime,
+        dueWord: dueWordFor(dueDate, now),
+      });
       return deterministicReply(deps, input, ctx, {
-        content: applied.reply,
+        content: `${applied.reply} ${promiseLine}`,
         outboundTrust: "system_generated",
         marker: "reminder-captured",
       });

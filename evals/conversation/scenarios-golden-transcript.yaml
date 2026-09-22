@@ -319,6 +319,7 @@ scenarios:
       reply_contains:
         - "Tracked: call sheikh jamaal"
         - "due Tuesday"
+        - "I'll text you"
       db_pins:
         - sql: SELECT 1 FROM commitments WHERE description ILIKE '%sheikh jamaal%' AND due_at IS NOT NULL HAVING count(*) = 1
           expect_one: true

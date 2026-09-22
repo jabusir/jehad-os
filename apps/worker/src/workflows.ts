@@ -16,6 +16,7 @@ import {
   calendarSyncWorkflow,
   gmailSyncWorkflow,
   threadRetentionWorkflow,
+  reminderSweepWorkflow,
 } from "@jehad/workflow";
 
 export const smokeWorkflow = defineWorkflow({
@@ -32,6 +33,7 @@ export const workflows = [
   calendarSyncWorkflow,
   calendarOccurrenceSweepWorkflow,
   grantReminderWorkflow,
+  reminderSweepWorkflow,
   gmailSyncWorkflow,
   threadRetentionWorkflow,
   ...calibrationWorkflows,

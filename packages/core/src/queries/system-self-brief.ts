@@ -18,6 +18,7 @@
 // or the render (pinned in tests).
 
 import { UUID_RE } from "../events/envelope.js";
+import { countArmedReminders } from "../reminders/queries.js";
 import { ACTIVE_CONTEXT_TTL_MS, RAW_RETENTION_MS } from "../imessage/threads.js";
 import { personasPolicyOf, type PolicyV1 } from "../policy/ceiling.js";
 import type { QueryExecutor } from "./executor.js";
@@ -115,6 +116,8 @@ export interface SelfBriefData {
   readonly conversation: SelfBriefConversation;
   readonly persona: SelfBriefPersona;
   readonly actions: SelfBriefActions;
+  /** Armed reminder check-ins (W6-phase-2); null when not determined. */
+  readonly remindersArmed?: number | null;
   readonly limits: readonly string[];
 }
 
@@ -201,6 +204,7 @@ export async function collectSelfBrief(
     throw new Error("collectSelfBrief: sourceFreshness must return calendar and gmail entries");
   }
   const view = policyView(input.policy ?? null, input.principalName);
+  const armedReminders = await countArmedReminders(db, input.principalId).catch(() => null);
   return {
     principalId: input.principalId,
     now: now.toISOString(),
@@ -228,6 +232,7 @@ export async function collectSelfBrief(
       calendarWrite: view.actionsOn,
       commitmentTracking: andTri(view.captureOn, view.reviewOn),
     },
+    remindersArmed: armedReminders,
     limits: [...SYSTEM_STATE_LIMITATIONS],
   };
 }
@@ -262,6 +267,13 @@ export function renderSelfBrief(brief: SelfBriefData): string {
         : ` (active profile v${brief.persona.activeProfileVersion})`
     }; self-modify ${tri(brief.persona.selfModify)} via propose+confirm; other principals: owner approval only`,
     `actions: calendar write ${tri(brief.actions.calendarWrite)} (always confirm-gated); commitment capture ${tri(brief.actions.commitmentTracking)} — when the user asks to be reminded or to track something, that works (propose, then they confirm)`,
+    ...(brief.remindersArmed !== undefined &&
+    brief.remindersArmed !== null &&
+    brief.remindersArmed > 0
+      ? [
+          `check-ins: ${brief.remindersArmed} reminder(s) armed — I text at the promised moment; a reply of yes/done resolves it, a date moves it, "stop" parks it`,
+        ]
+      : []),
     `limits: ${brief.limits.join("; ")}`,
     `as of ${brief.now} — unknown means not determined; never guess`,
   ];
