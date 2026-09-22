@@ -63,6 +63,7 @@ import {
 import { confirmOccurrence } from "../calendar/occurrence.js";
 import {
   applyConfigurationDirective,
+  parseReminderPhrase,
   applyMemoryCandidate,
   applySystemFeedback,
   applyTaskBatch,
@@ -1059,6 +1060,42 @@ async function converseTurn(
       });
     }
     // zero eligible → fall through to the model path
+  }
+
+  // W6a follow-up: "remind me to X" is an EXPLICIT capture request —
+  // the user's words are the consent, so it applies directly (no
+  // offer round-trip). Reuses the task-batch bridge + temporal
+  // normalizer; gated on capture being enabled for this principal.
+  const remindMatch = input.text.match(/^remind me to (.+?)\s*$/i);
+  const remindGatewayFile = await loadConversationPolicyFile();
+  const fileCapture = remindGatewayFile?.gateway?.capture;
+  if (
+    remindMatch !== null &&
+    fileCapture !== undefined &&
+    fileCapture.enabled &&
+    fileCapture.principals.includes(String(principalName))
+  ) {
+    const remindParse = parseReminderPhrase(input.text);
+    if (remindParse !== null) {
+      const applied = await applyTaskBatch(db, {
+        proposal: {
+          type: "task_batch",
+          items: [
+            {
+              title: remindParse.title,
+              due: remindParse.dueWords === null ? null : remindParse.dueWords,
+            },
+          ],
+        },
+        principalId: input.principalId,
+        now,
+      });
+      return deterministicReply(deps, input, ctx, {
+        content: applied.reply,
+        outboundTrust: "system_generated",
+        marker: "reminder-captured",
+      });
+    }
   }
 
   // W5: commitment verbs — the resolver rule (owner-ratified): bare

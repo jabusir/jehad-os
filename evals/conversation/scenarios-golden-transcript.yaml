@@ -303,3 +303,22 @@ scenarios:
       reply_not_contains:
         - "you have a meeting Thursday"
         - "I've noted"
+
+  # ——— "remind me to" is an explicit capture request: applies directly ———
+  - id: golden-reminder-direct-01
+    description: >-
+      "remind me to X <when>" is explicit consent — captured deterministically
+      with zero model dispatches (no offer round-trip), due date resolved by
+      the normalizer (fixed clock 2026-09-21 → tomorrow = 2026-09-22).
+    principal: josctl
+    turns:
+      - user: remind me to call sheikh jamaal tomorrow
+        modelScript: []  # deterministic capture — zero dispatches
+    expectations:
+      routed_none: true
+      reply_contains:
+        - "Tracked: call sheikh jamaal"
+        - "due Tuesday"
+      db_pins:
+        - sql: SELECT 1 FROM commitments WHERE description ILIKE '%sheikh jamaal%' AND due_at IS NOT NULL HAVING count(*) = 1
+          expect_one: true

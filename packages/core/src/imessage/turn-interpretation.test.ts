@@ -224,7 +224,7 @@ describe("parseInterpretationJson (strict, fail-safe)", () => {
 describe("renderProposalOffer (deterministic goldens, behavior-gated)", () => {
   it("GOLDEN: the 8-item transcript batch renders the exact offer", () => {
     expect(renderProposalOffer([GOLDEN_TASK_BATCH])).toBe(
-      "I pulled out 8 tasks, 3 due wednesday: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins … Reply 'track them' and I'll track all 8 (the 3 with deadlines).",
+      "I pulled out 8 tasks, 3 due wednesday: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins … Reply 'track them' and I'll track them (the 3 with deadlines).",
     );
   });
 
@@ -237,7 +237,7 @@ describe("renderProposalOffer (deterministic goldens, behavior-gated)", () => {
       ],
     };
     expect(renderProposalOffer([noDue])).toBe(
-      "I pulled out 2 tasks: Alpha, Beta. Reply 'track them' and I'll track all 2.",
+      "I pulled out 2 tasks: Alpha, Beta. Reply 'track them' and I'll track them.",
     );
   });
 
@@ -280,7 +280,7 @@ describe("renderProposalOffer (deterministic goldens, behavior-gated)", () => {
     expect(renderProposalOffer([CONFIG_SELF], { behaviors: { convertDirectives: false } })).toBeNull();
     expect(renderProposalOffer([MEMORY], { behaviors: { proposeCapture: false } })).toBeNull();
     expect(renderProposalOffer([GOLDEN_TASK_BATCH], { behaviors: { surfaceDeadlines: false } })).toBe(
-      "I pulled out 8 tasks: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins … Reply 'track them' and I'll track all 8.",
+      "I pulled out 8 tasks: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins … Reply 'track them' and I'll track them.",
     );
     expect(renderProposalOffer([GOLDEN_TASK_BATCH], { behaviors: { preferNextAction: false } })).toBe(
       "I pulled out 8 tasks, 3 due wednesday: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins …",

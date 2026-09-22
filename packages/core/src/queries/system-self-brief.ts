@@ -261,9 +261,7 @@ export function renderSelfBrief(brief: SelfBriefData): string {
         ? " (no active profile)"
         : ` (active profile v${brief.persona.activeProfileVersion})`
     }; self-modify ${tri(brief.persona.selfModify)} via propose+confirm; other principals: owner approval only`,
-    `actions: calendar write ${tri(brief.actions.calendarWrite)} (always confirm-gated); commitment tracking ${tri(
-      brief.actions.commitmentTracking,
-    )}`,
+    `actions: calendar write ${tri(brief.actions.calendarWrite)} (always confirm-gated); commitment capture ${tri(brief.actions.commitmentTracking)} — when the user asks to be reminded or to track something, that works (propose, then they confirm)`,
     `limits: ${brief.limits.join("; ")}`,
     `as of ${brief.now} — unknown means not determined; never guess`,
   ];

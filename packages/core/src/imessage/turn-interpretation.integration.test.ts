@@ -95,7 +95,7 @@ describe.skipIf(!TEST_DATABASE_URL)("turn interpretation bridges (integration)",
     expect(proposals).not.toBeNull();
     const offer = renderProposalOffer(proposals!);
     expect(offer).toBe(
-      "I pulled out 8 tasks, 3 due wednesday: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins … Reply 'track them' and I'll track all 8 (the 3 with deadlines).",
+      "I pulled out 8 tasks, 3 due wednesday: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins … Reply 'track them' and I'll track them (the 3 with deadlines).",
     );
     // The principal confirmed.
     expect(parseProposalConfirm("track them")).toBe("track");

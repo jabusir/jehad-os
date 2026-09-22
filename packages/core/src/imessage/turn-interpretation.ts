@@ -388,13 +388,15 @@ function renderTaskBatchOffer(
   const examples =
     proposal.items.slice(0, OFFER_EXAMPLES_MAX).map((item) => item.title).join(", ") +
     (truncated ? " …" : "");
+  const noun = n === 1 ? "task" : "tasks";
+  const them = n === 1 ? "it" : "them";
   const cta = behaviors.preferNextAction
-    ? ` Reply 'track them' and I'll track all ${n}${d > 0 && behaviors.surfaceDeadlines ? ` (the ${d} with deadlines)` : ""}.`
+    ? ` Reply 'track them' and I'll track ${them}${d > 0 && behaviors.surfaceDeadlines ? ` (the ${d} with deadlines)` : ""}.`
     : "";
   const lead =
     d > 0 && behaviors.surfaceDeadlines
-      ? `I pulled out ${n} tasks, ${d} due ${dueDayWord(withDeadlines[0]!.due!)}: ${examples}`
-      : `I pulled out ${n} tasks: ${examples}`;
+      ? `I pulled out ${n} ${noun}, ${d} due ${dueDayWord(withDeadlines[0]!.due!)}: ${examples}`
+      : `I pulled out ${n} ${noun}: ${examples}`;
   // The truncation ellipsis stands in for the sentence period (never "….").
   const end = truncated ? "" : ".";
   return cta !== "" ? `${lead}${end}${cta}` : `${lead}${end}`;
@@ -498,6 +500,27 @@ export function parseProposalConfirm(text: string): ProposalConfirmKind | null {
 }
 
 // ---------------------------------------------------------------------------
+/**
+ * "remind me to X" splitter (deterministic): title = everything after the
+ * phrase, with a TRAILING due-word run split off ("call sheikh jamaal
+ * tomorrow" → {title: "call sheikh jamaal", dueWords: "tomorrow"}).
+ * null when the phrase is absent or the remainder is empty.
+ */
+export function parseReminderPhrase(text: string): { title: string; dueWords: string | null } | null {
+  if (typeof text !== "string") return null;
+  const m = text.trim().match(/^remind me to (.+)$/i);
+  if (m === null) return null;
+  const rest = m[1]!.replace(/\s+/g, " ").trim();
+  if (rest.length === 0) return null;
+  const due = rest.match(
+    /\s+(today|tonight|tomorrow|next week|by end of week|(?:on |by )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\s*$/i,
+  );
+  if (due === null) return { title: rest, dueWords: null };
+  const title = rest.slice(0, rest.length - due[0].length).replace(/[,.!?]+$/, "").trim();
+  if (title.length === 0) return null;
+  return { title, dueWords: due[1]!.toLowerCase() };
+}
+
 // Mutation bridges (validate → mutate via existing writers → audit → reply)
 // ---------------------------------------------------------------------------
 
@@ -666,7 +689,12 @@ export async function applyTaskBatch(
         : "";
   return {
     applied: true,
-    reply: `Tracked ${commitmentIds.length} tasks${duePhrase}.`,
+    reply:
+      commitmentIds.length === 1 && dueIsoDates.length === 1
+        ? `Tracked: ${proposal.items[0]!.title} — due ${weekdayWordOf(distinctDue[0]!)}.`
+        : commitmentIds.length === 1
+          ? `Tracked: ${proposal.items[0]!.title}.`
+          : `Tracked ${commitmentIds.length} tasks${duePhrase}.`,
     commitmentIds,
     dueIsoDates: distinctDue,
     eventId: accepted.envelope.id,
