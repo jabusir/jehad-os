@@ -18,8 +18,10 @@ import {
   parkedAck,
   quietShiftedAck,
 } from "../reminders/lifecycle.js";
-import { setThreadPendingProposal, setThreadPendingProbe } from "./threads.js";
+import { setThreadPendingProbe, setThreadPendingProposal } from "./threads.js";
+import { setThreadProfileOverride } from "./profiles.js";
 import { CONVERSE_CAPABILITY, handleInbound, type ConversationDeps } from "./conversation.js";
+import { claimDueTouch, createReminder } from "../reminders/queries.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const T0 = new Date("2026-09-21T20:56:00Z");
@@ -116,6 +118,20 @@ describe.skipIf(!TEST_DATABASE_URL)("W6-phase-2 reminder lifecycle (integration)
       ['josctl', title, commitmentId, new Date(T0.getTime() + 30 * 60_000).toISOString()],
     );
     return String(row.rows[0].id);
+  };
+
+  /** Tests that exercise capture need a clean thread: drop any probe a
+   *  previous test left pending. */
+  const clearProbe = async (): Promise<void> => {
+    const thread = await db.pool.query(
+      "SELECT id FROM interaction_threads WHERE principal_id = $1::uuid ORDER BY created_at DESC LIMIT 1",
+      [principalId],
+    );
+    if (thread.rows[0] !== undefined) {
+      await db.pool.query("UPDATE interaction_threads SET metadata = '{}'::jsonb WHERE id = $1::uuid", [
+        String(thread.rows[0].id),
+      ]);
+    }
   };
 
   const replyOf = async (outcome: { notificationId?: string }): Promise<string | undefined> => {
@@ -333,6 +349,101 @@ describe.skipIf(!TEST_DATABASE_URL)("W6-phase-2 reminder lifecycle (integration)
     const cleared = await db.pool.query("SELECT metadata FROM interaction_threads WHERE id = $1::uuid", [threadId]);
     expect(cleared.rows[0].metadata.pendingProbe).toBeUndefined();
     expect(cleared.rows[0].metadata.pendingProposal?.offered).toBe("offer text");
+  });
+
+  it("D1: a profile override write preserves the pending probe (and vice versa)", async () => {
+    const rid = await armReminder("be-brief survivor");
+    await seedPendingProbe(rid);
+    const thread = await db.pool.query(
+      "SELECT id FROM interaction_threads WHERE principal_id = $1::uuid ORDER BY created_at DESC LIMIT 1",
+      [principalId],
+    );
+    const threadId = String(thread.rows[0].id);
+    await setThreadProfileOverride(db.pool, {
+      threadId,
+      principalId,
+      override: { brevityDelta: { maxSentences: 1 } },
+    });
+    const row = await db.pool.query("SELECT metadata FROM interaction_threads WHERE id = $1::uuid", [threadId]);
+    expect(row.rows[0].metadata.pendingProbe?.reminderId).toBe(rid);
+    expect(row.rows[0].metadata.profile_override?.brevityDelta?.maxSentences).toBe(1);
+  });
+
+  it("D4: explicit clock time at capture is honored exactly ('at 3pm' → 15:00 PT touch)", async () => {
+    await clearProbe();
+    const outcome = await handleInbound(deps(), {
+      principalId,
+      handle,
+      text: "remind me to call the bank at 3pm",
+    });
+    expect(await replyOf(outcome)).toBe("Tracked: call the bank. I'll text you at 3:00 PM.");
+    const row = await db.pool.query(
+      `SELECT due_date::text AS due_date, next_touch_at, next_touch_kind FROM reminders
+         WHERE principal = 'josctl' ORDER BY created_at DESC LIMIT 1`,
+    );
+    expect(row.rows[0].due_date).toBe("2026-09-21");
+    expect(new Date(row.rows[0].next_touch_at).toISOString()).toBe("2026-09-21T22:00:00.000Z");
+    expect(row.rows[0].next_touch_kind).toBe("morning");
+  });
+
+  it("D3: an explicit time already past rolls to tomorrow and the promise names the day", async () => {
+    await clearProbe();
+    const outcome = await handleInbound(deps(), {
+      principalId,
+      handle,
+      text: "remind me to file the expenses at 1pm",
+    });
+    expect(await replyOf(outcome)).toBe("Tracked: file the expenses. I'll text you Tuesday at 1:00 PM.");
+    const row = await db.pool.query(
+      `SELECT due_date::text AS due_date, next_touch_at FROM reminders
+         WHERE principal = 'josctl' ORDER BY created_at DESC LIMIT 1`,
+    );
+    expect(row.rows[0].due_date).toBe("2026-09-22");
+    expect(new Date(row.rows[0].next_touch_at).toISOString()).toBe("2026-09-22T20:00:00.000Z");
+  });
+
+  it("D5: capture titles are redacted before storage", async () => {
+    await clearProbe();
+    const outcome = await handleInbound(deps(), {
+      principalId,
+      handle,
+      text: "remind me to wire the account 4111 1111 1111 1111 tomorrow",
+    });
+    expect(outcome.replied).toBe(true);
+    const row = await db.pool.query(
+      `SELECT title FROM reminders WHERE principal = 'josctl' ORDER BY created_at DESC LIMIT 1`,
+    );
+    expect(String(row.rows[0].title)).not.toContain("4111 1111");
+  });
+
+  it("D6: claimDueTouch is a CAS — the second claim on the same expected touch loses", async () => {
+    const created = await createReminder(db.pool, {
+      principal: "josctl",
+      title: "cas probe",
+      commitmentId: null,
+      dueDate: "2026-09-22",
+      dueTime: null,
+      firstTouchAt: new Date("2026-09-22T16:00:00.000Z"),
+      firstTouchKind: "morning",
+    });
+    const first = await claimDueTouch(db.pool, {
+      id: created.id,
+      expectedNextTouchAt: new Date("2026-09-22T16:00:00.000Z"),
+      at: new Date("2026-09-22T16:00:00.000Z"),
+      kind: "morning",
+      nextTouchAt: new Date("2026-09-22T22:30:00.000Z"),
+      nextTouchKind: "probe",
+    });
+    expect(first).not.toBeNull();
+    const second = await claimDueTouch(db.pool, {
+      id: created.id,
+      expectedNextTouchAt: new Date("2026-09-22T16:00:00.000Z"),
+      at: new Date("2026-09-22T16:00:00.000Z"),
+      kind: "morning",
+      nextTouchAt: null,
+      nextTouchKind: null,
+    });
+    expect(second).toBeNull();
   });
 
   it("'remind me' capture stays gated on the capture principals (strangers get the model path)", async () => {

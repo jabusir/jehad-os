@@ -312,3 +312,24 @@ describe("DST sanity (America/Los_Angeles transitions)", () => {
     expect(r!.at.toISOString()).toBe("2026-11-01T17:00:00.000Z");
   });
 });
+
+describe("scheduleAfterTouch late-touch edges (verifier D2)", () => {
+  const policy = { ...REMINDER_POLICY };
+  const probe = (atIso: string, escalations = 0) =>
+    scheduleAfterTouch({ kind: "morning", at: new Date(atIso), escalations }, policy);
+
+  it("touch 20:30 PT → probe falls to NEXT workday start (cap 20:00 would precede the touch)", () => {
+    const r = probe("2026-09-22T03:30:00.000Z"); // 20:30 PDT Sep 21
+    expect(r).not.toBeNull();
+    expect(r!.at.toISOString()).toBe("2026-09-22T16:00:00.000Z"); // Tue 09:00 PDT
+    expect(r!.kind).toBe("probe");
+  });
+  it("touch 21:00 PT (+3h wraps midnight) → probe next workday start, never 00:00 quiet", () => {
+    const r = probe("2026-09-22T04:00:00.000Z"); // 21:00 PDT Sep 21
+    expect(r!.at.toISOString()).toBe("2026-09-22T16:00:00.000Z");
+  });
+  it("touch 16:00 PT → same-day 19:00 probe still allowed (under the 20:00 cap)", () => {
+    const r = probe("2026-09-21T23:00:00.000Z");
+    expect(r!.at.toISOString()).toBe("2026-09-22T02:00:00.000Z");
+  });
+});

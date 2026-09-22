@@ -17,6 +17,7 @@ import {
   buildInterpretationPrompt,
   dueDayWord,
   parseInterpretationJson,
+  parseProbeReply,
   parseProposalConfirm,
   renderProposalOffer,
   type Proposal,
@@ -308,6 +309,31 @@ describe("renderProposalOffer (deterministic goldens, behavior-gated)", () => {
     expect(dueDayWord("by wednesday")).toBe("wednesday");
     expect(dueDayWord("Friday")).toBe("friday");
     expect(dueDayWord("end of month")).toBe("end of month");
+  });
+});
+
+describe("parseProbeReply (W6-phase-2, deterministic)", () => {
+  it("classifies done / stop / not_done exactly", () => {
+    expect(parseProbeReply("yep")).toEqual({ kind: "done", whenText: null });
+    expect(parseProbeReply("Done.")).toEqual({ kind: "done", whenText: null });
+    expect(parseProbeReply("stop")).toEqual({ kind: "stop", whenText: null });
+    expect(parseProbeReply("stop reminding me")).toEqual({ kind: "stop", whenText: null });
+    expect(parseProbeReply("not yet")).toEqual({ kind: "not_done", whenText: null });
+  });
+  it("negation beats the date tail (verifier C7)", () => {
+    expect(parseProbeReply("not today")).toEqual({ kind: "not_done", whenText: null });
+    expect(parseProbeReply("not tomorrow")).toEqual({ kind: "not_done", whenText: null });
+  });
+  it("renegotiation tails carry when-words", () => {
+    expect(parseProbeReply("gonna do it tomorrow")).toEqual({ kind: "renegotiate", whenText: "tomorrow" });
+    expect(parseProbeReply("i'll do it friday")).toEqual({ kind: "renegotiate", whenText: "friday" });
+    expect(parseProbeReply("tomorrow at 9am")).toEqual({ kind: "renegotiate", whenText: "tomorrow at 9am" });
+    expect(parseProbeReply("no, tomorrow")).toEqual({ kind: "renegotiate", whenText: "tomorrow" });
+  });
+  it("ambient chat is never probe-directed", () => {
+    expect(parseProbeReply("yes and also what's on my calendar tomorrow")).toBeNull();
+    expect(parseProbeReply("")).toBeNull();
+    expect(parseProbeReply("ok sure thing, I'll get right to that after this meeting tomorrow, promise")).toBeNull();
   });
 });
 

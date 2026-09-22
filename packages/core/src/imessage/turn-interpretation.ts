@@ -513,7 +513,7 @@ export function parseReminderPhrase(text: string): { title: string; dueWords: st
   const rest = m[1]!.replace(/\s+/g, " ").trim();
   if (rest.length === 0) return null;
   const due = rest.match(
-    /\s+(today|tonight|tomorrow|next week|by end of week|(?:on |by )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\s*$/i,
+    /\s+((?:today|tonight|tomorrow|next week|by end of week|(?:on |by )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))(?: at \d{1,2}(?::\d{2})? ?(?:am|pm)?)?|(?:at )?\d{1,2}(?::\d{2})? ?(?:am|pm)|this afternoon|in \d+ (?:hours?|hrs?|minutes?|mins?))\s*$/i,
   );
   if (due === null) return { title: rest, dueWords: null };
   const title = rest.slice(0, rest.length - due[0].length).replace(/[,.!?]+$/, "").trim();
@@ -542,7 +542,7 @@ const PROBE_DONE_RE =
 const PROBE_STOP_RE =
   /^(stop|cancel)\s*[.!?]*$|^(?:stop|quit) (?:reminding|texting|nagging|asking)(?: me)?(?: about it)?\s*[.!?]*$|^(?:cancel|delete) (?:the )?reminder\s*[.!?]*$/i;
 const PROBE_NOT_DONE_RE =
-  /^(?:no|nope|nah|not yet|not done|didn'?t|couldn'?t|negative|haven'?t yet|i haven'?t|later|not today|can'?t today|can'?t right now)\s*[.!?]*$/i;
+  /^(?:no|nope|nah|not yet|not done|didn'?t|couldn'?t|negative|haven'?t yet|i haven'?t|later|not today|not tonight|not tomorrow|can'?t today|can'?t right now|probably not|maybe later)\s*[.!?]*$/i;
 const PROBE_WHEN_TAIL_RE =
   /((?:tomorrow|today|tonight|next week|this afternoon|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))(?: at \d{1,2}(?::\d{2})? ?(?:am|pm)?)?|in \d+ (?:hours?|hrs?|minutes?|mins?)|at \d{1,2}(?::\d{2})? ?(?:am|pm))\s*[.!?]*$/i;
 
@@ -552,12 +552,19 @@ export function parseProbeReply(text: string): ProbeReply | null {
   if (trimmed.length === 0 || trimmed.length > 120) return null;
   if (PROBE_STOP_RE.test(trimmed)) return { kind: "stop", whenText: null };
   if (PROBE_DONE_RE.test(trimmed)) return { kind: "done", whenText: null };
-  const tail = trimmed.match(PROBE_WHEN_TAIL_RE);
-  if (tail !== null) {
-    const whenText = tail[1]!.toLowerCase().trim();
-    return { kind: "renegotiate", whenText };
-  }
+  // Negation beats the date tail: "not today" is a deferral, never a
+  // renegotiate-to-today (verifier C7).
   if (PROBE_NOT_DONE_RE.test(trimmed)) return { kind: "not_done", whenText: null };
+  // A renegotiation is a SHORT utterance that ends in when-words. Long
+  // sentences that merely mention a date ("…what's on my calendar
+  // tomorrow?") are ambient chat, never probe-directed.
+  if (trimmed.length <= 40) {
+    const tail = trimmed.match(PROBE_WHEN_TAIL_RE);
+    if (tail !== null) {
+      const whenText = tail[1]!.toLowerCase().trim();
+      return { kind: "renegotiate", whenText };
+    }
+  }
   return null;
 }
 

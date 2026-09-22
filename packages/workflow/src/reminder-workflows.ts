@@ -30,12 +30,10 @@ import {
   dueWordFor,
   scheduleAfterTouch,
   touchMessage,
-  ReminderNotFoundError,
-  ReminderNotArmedError,
   dueTouches,
   getReminder,
   parkReminder,
-  recordTouch,
+  claimDueTouch,
 } from "@jehad/core";
 import { defineScheduledWorkflow, type ScheduledWorkflowDefinition } from "./definition.js";
 
@@ -214,6 +212,37 @@ export async function runReminderSweepTick(
       continue;
     }
 
+    // (d) Claim BEFORE send (verifier D6): CAS on status + expected
+    // next_touch_at pre-schedules the follow-up atomically. A lost claim
+    // (overlapping tick, concurrent resolution) sends nothing. A crash
+    // after the claim fails quiet — a missed touch, never a double-send.
+    let parked = false;
+    const next = scheduleAfterTouch({ kind, at: now, escalations: reminder.escalations });
+    const claimed = await claimDueTouch(pool, {
+      id: reminder.id,
+      expectedNextTouchAt: new Date(reminder.nextTouchAt!),
+      at: now,
+      kind,
+      nextTouchAt: next === null ? null : next.at,
+      nextTouchKind: next === null ? null : next.kind,
+    });
+    if (claimed === null) {
+      continue;
+    }
+    if (next === null) {
+      await parkReminder(pool, reminder.id, now);
+      parked = true;
+    }
+
+    // (f) Audit at claim time — ids only (thread-retention pattern); every
+    // claimed touch is audited even if the send below throws.
+    await recordAudit(pool, {
+      actor: REMINDER_SWEEP_ACTOR,
+      action: REMINDER_TOUCH_AUDIT_ACTION,
+      reversible: true,
+      outputsRef: JSON.stringify({ reminderId: reminder.id, principal: reminder.principal, kind }),
+    });
+
     // (c) Send on the briefs' queue (same drain, same edge render).
     const dueWord =
       kind === "morning" ? dueWordFor(reminder.dueDate, now) : "today";
@@ -229,43 +258,6 @@ export async function runReminderSweepTick(
       now,
     });
 
-    // (d) Advance: pre-schedule the follow-up, or record-and-park at the
-    // nudge cap. escalations is the PRE-touch count — recordTouch does the
-    // nudge increment. A concurrent resolution lands ReminderNotArmedError:
-    // the touch already went out, so log and move on (the row is terminal).
-    let parked = false;
-    try {
-      const next = scheduleAfterTouch({ kind, at: now, escalations: reminder.escalations });
-      if (next !== null) {
-        await recordTouch(pool, reminder.id, {
-          at: now,
-          kind,
-          nextTouchAt: next.at,
-          nextTouchKind: next.kind,
-        });
-      } else {
-        await recordTouch(pool, reminder.id, {
-          at: now,
-          kind,
-          nextTouchAt: null,
-          nextTouchKind: null,
-        });
-        await parkReminder(pool, reminder.id, now);
-        parked = true;
-      }
-    } catch (err) {
-      if (err instanceof ReminderNotArmedError || err instanceof ReminderNotFoundError) {
-        console.log(
-          JSON.stringify({
-            workflow: "reminder-sweep",
-            skipped: "not-armed",
-            reminderId: reminder.id,
-          }),
-        );
-        continue;
-      }
-      throw err;
-    }
     if (parked) result.parked += 1;
 
     // (e) Probe state for the inbound lane (exact PendingProbe shape).
@@ -277,14 +269,6 @@ export async function runReminderSweepTick(
         now,
       });
     }
-
-    // (f) Audit — ids only (thread-retention pattern).
-    await recordAudit(pool, {
-      actor: REMINDER_SWEEP_ACTOR,
-      action: REMINDER_TOUCH_AUDIT_ACTION,
-      reversible: true,
-      outputsRef: JSON.stringify({ reminderId: reminder.id, principal: reminder.principal, kind }),
-    });
 
     result.sent += 1;
     console.log(JSON.stringify({ workflow: "reminder-sweep", reminderId: reminder.id, kind }));

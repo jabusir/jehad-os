@@ -459,6 +459,53 @@ export async function recordTouch(
 }
 
 /**
+ * Verifier D6: atomic claim-before-send. The sweep claims the touch (CAS on
+ * status + expected next_touch_at) BEFORE enqueuing, so an overlapping tick
+ * or a replayed step can never double-send, and a delivered touch is always
+ * the one this claim produced. Returns null when the claim is lost (row
+ * resolved/advanced elsewhere) — the caller sends nothing. Nudge increments
+ * ride the claim (same semantics as recordTouch).
+ */
+export async function claimDueTouch(
+  db: QueryExecutor,
+  opts: {
+    readonly id: string;
+    readonly expectedNextTouchAt: Date;
+    readonly at: Date;
+    readonly kind: TouchKind;
+    readonly nextTouchAt: Date | null;
+    readonly nextTouchKind: TouchKind | null;
+  },
+): Promise<ReminderRow | null> {
+  validateUuidOrNull(opts.id, "id");
+  validateInstant(opts.expectedNextTouchAt, "expectedNextTouchAt");
+  validateInstant(opts.at, "at");
+  validateKind(opts.kind, "kind");
+  if (opts.nextTouchAt !== null) validateInstant(opts.nextTouchAt, "nextTouchAt");
+  if (opts.nextTouchKind !== null) validateKind(opts.nextTouchKind, "nextTouchKind");
+  const row = await db.query(
+    `UPDATE reminders SET
+       last_touch_at = $2::timestamptz,
+       next_touch_at = $3::timestamptz,
+       next_touch_kind = $4,
+       escalations = escalations + (CASE WHEN $5 = 'nudge' THEN 1 ELSE 0 END),
+       updated_at = now()
+     WHERE id = $1::uuid AND status = 'armed' AND next_touch_at = $6::timestamptz
+     ${RETURNING}`,
+    [
+      opts.id,
+      opts.at.toISOString(),
+      opts.nextTouchAt === null ? null : opts.nextTouchAt.toISOString(),
+      opts.nextTouchKind,
+      opts.kind,
+      opts.expectedNextTouchAt.toISOString(),
+    ],
+  );
+  const first = row.rows[0];
+  return first === undefined ? null : toReminderRow(first);
+}
+
+/**
  * Marks the obligation met (probe reply or manual): completed with
  * resolution provenance; the touch path closes (next-touch fields null).
  */

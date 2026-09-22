@@ -94,6 +94,7 @@ import {
   renegotiateReminder,
 } from "../reminders/queries.js";
 import { setThreadPendingProposal, setThreadPendingProbe } from "./threads.js";
+import { redactContent } from "./redact.js";
 import { resolveProfileBehaviors } from "./profiles.js";
 import { collectSelfBrief, renderSelfBrief, SELF_BRIEF_HONESTY_RULES } from "../queries/system-self-brief.js";
 import { TRUTHFUL_UX_RULES } from "./truthful-ux.js";
@@ -1130,7 +1131,10 @@ async function converseTurn(
       ?.pendingProbe;
     if (probePending !== undefined) {
       const reminderRow = await getReminder(db, probePending.reminderId);
-      const live = reminderRow !== null && reminderRow.status === "armed";
+      const live =
+        reminderRow !== null &&
+        reminderRow.status === "armed" &&
+        reminderRow.principal === String(principalName);
       if (live) {
         let content: string;
         let marker: string;
@@ -1218,12 +1222,26 @@ async function converseTurn(
   ) {
     const remindParse = parseReminderPhrase(input.text);
     if (remindParse !== null) {
+      // Honest reject for when-words the scheduler cannot pin (verifier
+      // C10): never silently substitute a different obligation date.
+      const when =
+        remindParse.dueWords === null ? null : resolveWhenWords(remindParse.dueWords, now);
+      if (remindParse.dueWords !== null && when === null) {
+        return deterministicReply(deps, input, ctx, {
+          content: `I can't schedule "${remindParse.dueWords}" yet — give me a weekday, "tomorrow", or a clock time.`,
+          outboundTrust: "system_generated",
+          marker: "reminder-unsupported-when",
+        });
+      }
+      // Verifier D5: titles are stored AND re-broadcast (acks, touches,
+      // briefs) — redact at the boundary, repo convention.
+      const title = redactContent(remindParse.title);
       const applied = await applyTaskBatch(db, {
         proposal: {
           type: "task_batch",
           items: [
             {
-              title: remindParse.title,
+              title,
               due: remindParse.dueWords === null ? null : remindParse.dueWords,
             },
           ],
@@ -1234,27 +1252,32 @@ async function converseTurn(
       // W6-phase-2: the commitment is the record; the reminder is the
       // promise — the system brings it back at a chosen moment. No
       // when-words defaults to tomorrow 9:00 AM (the work-day rhythm).
-      const when =
-        remindParse.dueWords === null ? null : resolveWhenWords(remindParse.dueWords, now);
-      const dueDate = when?.dueDate ?? nextCivilDay(now);
-      const dueTime = when?.dueTime ?? null;
-      const firstTouch = computeFirstTouch({ dueDate, dueTime, now });
+      // Verifier D3: an explicit time already past rolls to the next civil
+      // day, and the stored due/promise name the ACTUAL touch day.
+      const askedDueDate = when?.dueDate ?? nextCivilDay(now);
+      const target = rollForwardPastTime(askedDueDate, when?.dueTime ?? null, now);
+      const firstTouch = computeFirstTouch({
+        dueDate: target.dueDate,
+        dueTime: target.dueTime,
+        now,
+      });
       const safeFirstTouch =
         firstTouch.at.getTime() <= now.getTime()
-          ? computeFirstTouch({ dueDate: nextCivilDay(now), dueTime, now })
+          ? computeFirstTouch({ dueDate: nextCivilDay(now), dueTime: target.dueTime, now })
           : firstTouch;
       await createReminder(db, {
         principal: String(principalName),
-        title: remindParse.title,
+        title,
         commitmentId: applied.commitmentIds[0] ?? null,
-        dueDate,
-        dueTime,
+        dueDate: target.dueDate,
+        dueTime: target.dueTime,
         firstTouchAt: safeFirstTouch.at,
         firstTouchKind: safeFirstTouch.kind,
       });
       const promiseLine = firstTouchPromise(safeFirstTouch, {
-        dueTime,
-        dueWord: dueWordFor(dueDate, now),
+        dueTime: target.dueTime,
+        dueWord: dueWordFor(target.dueDate, now),
+        includeDay: target.dueDate !== askedDueDate,
       });
       return deterministicReply(deps, input, ctx, {
         content: `${applied.reply} ${promiseLine}`,

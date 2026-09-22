@@ -296,7 +296,18 @@ export function scheduleAfterTouch(
       offset.hour > policy.probeLatestHour
         ? { ...offset, hour: policy.probeLatestHour, minute: 0 }
         : offset;
-    return { at: instantOfWallClock(capped, tz), kind: "probe" };
+    let probe = instantOfWallClock(capped, tz);
+    // Midnight wrap (touch 21:00 + 3h → 00:00) or a cap that lands at/before
+    // the touch itself (touch 20:30 → 20:00): the same-afternoon probe is
+    // gone — fall to the next workday start rather than scheduling into
+    // quiet hours or the past.
+    if (
+      civilTodayOf(probe, tz) !== civilTodayOf(prev.at, tz) ||
+      probe.getTime() <= prev.at.getTime()
+    ) {
+      probe = atWorkdayStart(addDaysToIso(civilTodayOf(prev.at, tz), 1), policy);
+    }
+    return { at: probe, kind: "probe" };
   }
   if (prev.kind === "probe") {
     return { at: atWorkdayStart(addDaysToIso(civilTodayOf(prev.at, tz), 1), policy), kind: "nudge" };
@@ -355,14 +366,17 @@ export function deferredAck(): string {
  */
 export function firstTouchPromise(
   firstTouch: { at: Date; quietShifted: boolean },
-  m: { dueTime: { hour: number; minute: number } | null; dueWord: string },
+  m: { dueTime: { hour: number; minute: number } | null; dueWord: string; includeDay?: boolean },
 ): string {
   if (firstTouch.quietShifted) return quietShiftedAck();
   if (m.dueTime !== null) {
     const h12 = m.dueTime.hour % 12 === 0 ? 12 : m.dueTime.hour % 12;
     const mm = String(m.dueTime.minute).padStart(2, "0");
     const suffix = m.dueTime.hour < 12 ? "AM" : "PM";
-    return `I'll text you at ${h12}:${mm} ${suffix}.`;
+    // includeDay: the touch rolled to another civil day than the ask —
+    // name the day so the promise matches the schedule (verifier D3).
+    const day = m.includeDay === true ? `${m.dueWord} ` : "";
+    return `I'll text you ${day}at ${h12}:${mm} ${suffix}.`;
   }
   if (m.dueWord === "today") return "I'll text you this afternoon.";
   return `I'll text you ${m.dueWord} morning.`;

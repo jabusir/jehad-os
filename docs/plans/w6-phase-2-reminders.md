@@ -103,3 +103,24 @@ commitments (offer→confirm), unchanged.
 
 Open params (defaults ratified in conversation, owner may adjust):
 probe 15:30 · nudge cap 2 · standalone texts · workday 09:00 · PT timezone.
+
+## Verifier wave (post-merge, 7789ca8)
+
+Verdict FIX-FIRST → all D-items fixed in the follow-up commit:
+D1 profile-override writer preserves pendingProbe · D2 late-touch probe falls
+to next workday start (never quiet/past) · D3 capture rolls past explicit
+times with the promise naming the actual day · D4 explicit clock times
+parseable at capture · D5 titles redacted at capture · D6 claim-before-send
+CAS (atomic touch claim; audit at claim time). Also: C7 negation beats the
+date tail in probe replies; C10 unsupported when-words get an honest reject
+("next week" etc.); N13 getReminder liveness is principal-scoped.
+
+Deferred (known limitations, by design for v1):
+- C8: one pendingProbe slot per thread — same-afternoon probes for multiple
+  reminders overwrite each other (v2: batch one message, list resolution).
+- C9: thread-metadata writers are read-modify-write, not transactional
+  (repo-wide latent pattern; shared turn lock covers the common case).
+- N11: parked-reminder brief line uses a 24h window (can double-surface on
+  brief-time drift; watermark later).
+- N12: /new turnover orphans a pending probe (reminder keeps escalating;
+  probe lives on the active thread by design).
