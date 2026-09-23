@@ -204,7 +204,7 @@ describe.skipIf(!TEST_DATABASE_URL)("backup → restore (integration)", () => {
       "011_imessage_pairing",
       "012_interaction_threads",
       "013_review_refs", "014_confirm_token_unique", "015_gmail_sensor", "016_calibration",
-      "017_calendar_occurrence", "018_interaction_profiles", "019_grant_reminder_kind", "020_system_feedback", "021_reminders", "022_lesson_vocabulary", "023_gmail_content",
+      "017_calendar_occurrence", "018_interaction_profiles", "019_grant_reminder_kind", "020_system_feedback", "021_reminders", "022_lesson_vocabulary", "023_gmail_content", "024_outcomes",
     ]);
   });
 });

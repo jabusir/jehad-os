@@ -26,8 +26,20 @@ describe("event catalog v1", () => {
       "calendar.event.cancelled",
       "gmail.message.received",
       "commitment.transitioned",
+      // D0 additive (ADR-0017): the outcome lifecycle.
+      "outcome.created",
+      "outcome.accepted",
+      "outcome.status_changed",
+      "outcome.criteria_updated",
+      "outcome.wait_started",
+      "outcome.wait_satisfied",
+      "outcome.blocked",
+      "outcome.escalated",
+      "outcome.completed",
+      "outcome.failed",
+      "outcome.cancelled",
     ]);
-    expect(EVENT_CATALOG_V1.length).toBe(22);
+    expect(EVENT_CATALOG_V1.length).toBe(33);
   });
 
   it("accepts catalog names and rejects everything else", () => {

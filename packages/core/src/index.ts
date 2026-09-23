@@ -20,6 +20,7 @@ export * from "./calendar/index.js";
 export * from "./imessage/index.js";
 export * from "./context/index.js";
 export * from "./gmail/index.js";
+export * from "./outcomes/index.js";
 export * from "./calibration/index.js";
 export * from "./memory/candidate-contract.js";
 export * from "./reminders/queries.js";

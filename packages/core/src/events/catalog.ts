@@ -41,6 +41,21 @@ export const EVENT_CATALOG_V1 = [
   // REDACTED principal note (capture.recorded precedent for content).
   // Additive name only (ADR-0006); schemaVersion stays 1.
   "commitment.transitioned",
+  // D0 additive (Delegate/Watch roadmap §5; ADR-0017): the Outcome lifecycle.
+  // Payloads carry ids/refs/statuses/counts — never owner directive text
+  // beyond the confirmed title (provenance lives on the outcomes row and,
+  // for criteria, in evidence). Additive names only (ADR-0006).
+  "outcome.created",
+  "outcome.accepted",
+  "outcome.status_changed",
+  "outcome.criteria_updated",
+  "outcome.wait_started",
+  "outcome.wait_satisfied",
+  "outcome.blocked",
+  "outcome.escalated",
+  "outcome.completed",
+  "outcome.failed",
+  "outcome.cancelled",
 ] as const;
 
 export type EventTypeName = (typeof EVENT_CATALOG_V1)[number];

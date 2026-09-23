@@ -271,6 +271,7 @@ describe.skipIf(!TEST_DATABASE_URL)("lessons substrate (integration)", () => {
 
     // Roll back exactly 022 — the down path purges then narrows.
     expect(await migrateDown(db.pool, { to: "021_reminders" }, defaultMigrationsDir())).toEqual([
+      "024_outcomes",
       "023_gmail_content",
       "022_lesson_vocabulary",
     ]);
@@ -295,7 +296,7 @@ describe.skipIf(!TEST_DATABASE_URL)("lessons substrate (integration)", () => {
     expect(columns.rows).toEqual([]);
 
     // Re-up restores the widened vocabulary.
-    expect(await migrateUp(db.pool, defaultMigrationsDir())).toEqual(["022_lesson_vocabulary", "023_gmail_content"]);
+    expect(await migrateUp(db.pool, defaultMigrationsDir())).toEqual(["022_lesson_vocabulary", "023_gmail_content", "024_outcomes"]);
     const restored = await propose("migration probe", "n");
     expect(restored.created).toBe(true);
   });
