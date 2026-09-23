@@ -443,3 +443,81 @@ describe("parseProposalAffirmation (00:09 transcript: explicit consent bounced)"
     expect(parseProposalAffirmation("")).toBeNull();
   });
 });
+
+describe("outcome_spec proposals (DELEGATE intake, D0 finisher)", () => {
+  const valid = {
+    type: "outcome_spec",
+    title: "Plaid security review",
+    directive: "own the plaid security review until it's done",
+    criteria: [
+      "the review document exists and covers the four findings",
+      "the owner confirms it in their reply",
+    ],
+    budget_usd: 2,
+    deadline_days: 7,
+  };
+
+  it("parses a well-formed outcome_spec", () => {
+    expect(parseInterpretationJson(JSON.stringify([valid]))).toEqual([valid]);
+  });
+
+  it("directive may be omitted (confirm-time fallback)", () => {
+    const withoutDirective: Record<string, unknown> = { ...valid };
+    delete withoutDirective.directive;
+    expect(parseInterpretationJson(JSON.stringify([withoutDirective]))).toEqual([
+      { ...withoutDirective, directive: "" },
+    ]);
+  });
+
+  it("criteria: 1..5, non-empty, ≤200 chars — any deviation fails the whole parse", () => {
+    expect(parseInterpretationJson(JSON.stringify([{ ...valid, criteria: [] }]))).toBeNull();
+    expect(
+      parseInterpretationJson(JSON.stringify([{ ...valid, criteria: ["a", "b", "c", "d", "e", "f"] }])),
+    ).toBeNull();
+    expect(parseInterpretationJson(JSON.stringify([{ ...valid, criteria: ["  " ] }]))).toBeNull();
+    expect(
+      parseInterpretationJson(JSON.stringify([{ ...valid, criteria: ["x".repeat(201)] }])),
+    ).toBeNull();
+  });
+
+  it("budget/deadline ceilings: ≤50 USD, 1..30 days, numbers only", () => {
+    expect(parseInterpretationJson(JSON.stringify([{ ...valid, budget_usd: 51 }]))).toBeNull();
+    expect(parseInterpretationJson(JSON.stringify([{ ...valid, budget_usd: "5" }]))).toBeNull();
+    expect(parseInterpretationJson(JSON.stringify([{ ...valid, deadline_days: 0 }]))).toBeNull();
+    expect(parseInterpretationJson(JSON.stringify([{ ...valid, deadline_days: 31 }]))).toBeNull();
+    expect(parseInterpretationJson(JSON.stringify([{ ...valid, deadline_days: 2.5 }]))).toBeNull();
+    expect(parseInterpretationJson(JSON.stringify([{ ...valid, budget_usd: null, deadline_days: null }]))).toEqual([
+      { ...valid, budget_usd: null, deadline_days: null },
+    ]);
+  });
+
+  it("extra keys fail closed", () => {
+    expect(parseInterpretationJson(JSON.stringify([{ ...valid, extra: 1 }]))).toBeNull();
+  });
+
+  it("title ceiling 120 chars", () => {
+    expect(parseInterpretationJson(JSON.stringify([{ ...valid, title: "x".repeat(121) }]))).toBeNull();
+  });
+
+  it("forbidden terms anywhere in the payload fail the whole parse", () => {
+    expect(parseInterpretationJson(JSON.stringify([{ ...valid, title: "ask gpt about plaid" }]))).toBeNull();
+  });
+
+  it("renders the offer with done-meaning and the approve CTA", () => {
+    const offer = renderProposalOffer([
+      { type: "outcome_spec", ...valid, criteria: ["the review covers all findings", "owner signs off"] },
+    ]);
+    expect(offer).toBe(
+      'Staged as a delegated outcome: "Plaid security review" (budget $2, due in 7 days) — done means: the review covers all findings (+1 more). Reply \'approve\' to start it.',
+    );
+  });
+
+  it("renders without budget/deadline extras when null", () => {
+    const offer = renderProposalOffer([
+      { type: "outcome_spec", ...valid, budget_usd: null, deadline_days: null, criteria: ["done state"] },
+    ]);
+    expect(offer).toBe(
+      'Staged as a delegated outcome: "Plaid security review" — done means: done state. Reply \'approve\' to start it.',
+    );
+  });
+});

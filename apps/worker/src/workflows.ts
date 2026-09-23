@@ -9,6 +9,7 @@
  */
 
 import {
+  type AnyWorkflowDefinition,
   defineWorkflow,
   briefWorkflows,
   calibrationWorkflows,
@@ -33,7 +34,7 @@ export const smokeWorkflow = defineWorkflow({
   },
 });
 
-export const workflows = [
+export const workflows: readonly AnyWorkflowDefinition[] = [
   smokeWorkflow,
   ...briefWorkflows,
   calendarSyncWorkflow,

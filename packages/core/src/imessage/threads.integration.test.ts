@@ -53,6 +53,8 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
   let provider: FakeModelProvider;
   let deps: ConversationDeps;
   let now: Date;
+  let interpreterResponse = "[]";
+  let outcomeDispatches: Array<{ outcomeId: string; ref: string }> = [];
   const JEHAD = "+15550001001";
   const YUSRA = "+15550002002";
 
@@ -88,7 +90,7 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     provider = new FakeModelProvider({
       respond: async (request: { prompt: string }) => {
         if (request.prompt.includes("turn interpreter for a personal assistant message gateway")) {
-          return { text: "[]" };
+          return { text: interpreterResponse };
         }
         return queue.shift() ?? { text: "ok" };
       },
@@ -98,6 +100,10 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
       db: db.pool,
       provider,
       registry: REGISTRY,
+      outcomeDispatcher: async (input) => {
+        outcomeDispatches.push(input);
+        return `run-${outcomeDispatches.length}`;
+      },
       principalPolicy: (name) =>
         name === "jehad"
           ? { model: "fake/model-x", requestsPerHour: 100, costPerDay: 5, reads: ["calendar", "commitments"] }
@@ -120,6 +126,7 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
   afterEach(async () => {
     await db.pool.query(`
       DELETE FROM feedback; DELETE FROM calibration_items;
+      DELETE FROM outcomes;
       DELETE FROM interaction_messages; DELETE FROM interaction_threads;
       DELETE FROM audit_log; DELETE FROM review_refs; DELETE FROM action_attempts; DELETE FROM action_intents;
       DELETE FROM model_calls; DELETE FROM runs; DELETE FROM notifications;
@@ -127,6 +134,8 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     `);
     provider.requests.length = 0;
     queue = [];
+    interpreterResponse = "[]";
+    outcomeDispatches = [];
     now = new Date();
   });
 
@@ -581,6 +590,71 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
       await db.pool.query("SELECT rating FROM calibration_items WHERE status = 'open' ORDER BY created_at DESC LIMIT 1")
     ).rows[0]!;
     expect(item.rating).toBe(4);
+  });
+
+  it("DELEGATE: interpreter stages an outcome_spec; 'approve' starts it through the dispatch port", async () => {
+    await grant(jehadId);
+    interpreterResponse = JSON.stringify([
+      {
+        type: "outcome_spec",
+        title: "Plaid security review",
+        directive: "own the plaid security review until it's done",
+        criteria: [
+          "the review document covers all four findings",
+          "you confirm the result in your reply",
+        ],
+        budget_usd: 2,
+        deadline_days: 7,
+      },
+    ]);
+    const callsBefore = provider.requests.length;
+    await turn(jehadId, JEHAD, "own the plaid security review until it's done");
+    const offer = (
+      await db.pool.query(
+        "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
+      )
+    ).rows[0]!.c as string;
+    expect(offer).toContain("Staged as a delegated outcome");
+    expect(offer).toContain("Reply 'approve' to start it");
+    // the offer stage never wrote an outcome row
+    const beforeCount = (
+      await db.pool.query("SELECT count(*)::int AS n FROM outcomes")
+    ).rows[0]!.n;
+    expect(Number(beforeCount)).toBe(0);
+
+    // confirm: zero model calls on the deterministic lane
+    interpreterResponse = "[]";
+    now = new Date(now.getTime() + 60_000); // distinct stamp for the confirm reply
+    const confirmCallsBefore = provider.requests.length;
+    await turn(jehadId, JEHAD, "approve");
+    // The confirm lane is fully deterministic: the pre-pass handles the
+    // turn and returns BEFORE any model dispatch (route/interpret/answer
+    // never run on an apply).
+    expect(provider.requests.length).toBe(confirmCallsBefore);
+    void callsBefore;
+    const confirmReply = (
+      await db.pool.query(
+        "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
+      )
+    ).rows[0]!.c as string;
+    expect(confirmReply).toMatch(/Outcome [A-Z0-9]{3} accepted/);
+    expect(confirmReply).toContain("the review document covers all four findings");
+
+    const outcome = (
+      await db.pool.query(
+        "SELECT id, ref, status, budget_usd, directive FROM outcomes ORDER BY created_at DESC LIMIT 1",
+      )
+    ).rows[0]!;
+    expect(outcome.status).toBe("accepted");
+    expect(Number(outcome.budget_usd)).toBe(2);
+    expect(outcome.directive).toBe("own the plaid security review until it's done");
+    const criteria = await db.pool.query(
+      "SELECT ordinal FROM outcome_criteria WHERE outcome_id = $1::uuid ORDER BY ordinal",
+      [outcome.id],
+    );
+    expect(criteria.rows).toHaveLength(2);
+    expect(outcomeDispatches).toHaveLength(1);
+    expect(outcomeDispatches[0]!.ref).toBe(String(outcome.ref));
   });
 
   it("CALIBRATION: prose during an open prompt records as missed feedback; tool questions NEVER do", async () => {

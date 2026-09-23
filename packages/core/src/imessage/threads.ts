@@ -341,7 +341,8 @@ export type ThreadPendingProposalType =
   | "task_batch"
   | "configuration_directive"
   | "system_feedback"
-  | "memory_candidate";
+  | "memory_candidate"
+  | "outcome_spec";
 
 export interface ThreadPendingProposal {
   readonly type: ThreadPendingProposalType;
@@ -401,6 +402,7 @@ const PENDING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
   "configuration_directive",
   "system_feedback",
   "memory_candidate",
+  "outcome_spec",
 ]);
 
 type MutableThreadMetadata = {

@@ -15,7 +15,7 @@ import {
   type EveningCloseData,
   type MorningBriefData,
 } from "./data.js";
-import { renderEveningCloseText, renderMorningBriefText } from "./render.js";
+import { renderEveningCloseText, renderMorningBriefText, renderOutcomesSection } from "./render.js";
 import type { DivergenceResult } from "./divergence.js";
 
 const NOW = "2026-09-17T12:00:00.000Z";
@@ -546,5 +546,55 @@ describe("suppression predicates (§31 nothing-meaningful-changed)", () => {
 
     // A calm, future-dated wait alone stays suppressed.
     expect(isEveningCloseMeaningful({ ...EVENING_EMPTY, stillWaiting: EVENING_EMPTY.stillWaiting })).toBe(false);
+  });
+});
+
+describe("renderOutcomesSection (D0 finisher: delegated outcomes in briefs)", () => {
+  it("is suppressed for null/undefined (§31: nothing to say says nothing)", () => {
+    expect(renderOutcomesSection(null)).toEqual([]);
+    expect(renderOutcomesSection(undefined)).toEqual([]);
+  });
+
+  it("renders needs-you first, then in-flight, then window-resolved with status", () => {
+    const lines = renderOutcomesSection({
+      needsYou: [{ ref: "FH1", title: "Verify the outcome loop", status: "waiting_user" }],
+      active: [{ ref: "P8Q", title: "Chase the Acme quote", status: "running" }],
+      resolved: [
+        { ref: "BVB", title: "First delegated outcome", status: "completed" },
+        { ref: "M2K", title: "Doomed errand", status: "failed" },
+      ],
+    });
+    expect(lines).toEqual([
+      "Delegated outcomes",
+      '- FH1 needs your verification — "Verify the outcome loop"',
+      '- P8Q in progress — "Chase the Acme quote"',
+      '- BVB completed — "First delegated outcome"',
+      '- M2K failed — "Doomed errand"',
+    ]);
+  });
+
+  it("caps each list at four lines with an honest overflow marker", () => {
+    const five = Array.from({ length: 5 }, (_, i) => ({
+      ref: `R${i}X`,
+      title: `outcome ${i}`,
+      status: "running",
+    }));
+    const lines = renderOutcomesSection({ needsYou: [], active: five, resolved: [] });
+    expect(lines).toHaveLength(1 + 4 + 1);
+    expect(lines.at(-1)).toBe("  - …and 1 more");
+  });
+
+  it("wires into the morning brief between escalations and the review section", () => {
+    const text = renderMorningBriefText({
+      ...MORNING_FULL,
+      outcomes: {
+        needsYou: [{ ref: "FH1", title: "Verify the outcome loop", status: "waiting_user" }],
+        active: [],
+        resolved: [],
+      },
+    });
+    expect(text).toContain("Delegated outcomes");
+    expect(text.indexOf("Delegated outcomes")).toBeGreaterThan(-1);
+    expect(text).toContain('FH1 needs your verification — "Verify the outcome loop"');
   });
 });

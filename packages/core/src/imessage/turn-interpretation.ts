@@ -28,6 +28,7 @@ import type { QueryExecutor } from "../queries/executor.js";
 import { BRIEF_TIMEZONE } from "../briefs/timezone.js";
 import { redactContent } from "./redact.js";
 import { captureEnabledFor, DEFAULT_CAPTURE_POLICY, type CapturePolicy } from "./capture.js";
+import { createOutcome, listActiveOutcomes } from "../outcomes/service.js";
 import {
   JOSCTL_PROFILE_DEFINITION,
   activeProfile,
@@ -83,11 +84,30 @@ export interface MemoryCandidateProposal {
   readonly summary: string;
 }
 
+/**
+ * DELEGATE intake (roadmap §5.3, D0 finisher): the interpreter stages an
+ * outcome_spec when the owner explicitly asks the assistant to OWN work
+ * forward. The criteria are the interpreter's DERIVATION of what the owner
+ * said — they only become real when the owner confirms, and they are the
+ * ONLY source of criteria (raw directive text is provenance, never parsed
+ * for criteria at confirm time — adversarial pin, roadmap D0).
+ */
+export interface OutcomeSpecProposal {
+  readonly type: "outcome_spec";
+  readonly title: string;
+  /** The owner's ask, carried verbatim as provenance (never re-parsed). */
+  readonly directive: string;
+  readonly criteria: readonly string[];
+  readonly budget_usd: number | null;
+  readonly deadline_days: number | null;
+}
+
 export type Proposal =
   | TaskBatchProposal
   | ConfigurationDirectiveProposal
   | SystemFeedbackProposal
-  | MemoryCandidateProposal;
+  | MemoryCandidateProposal
+  | OutcomeSpecProposal;
 
 /** Schema ceilings shared by the prompt, the parser, and the bridges. */
 export const TASK_TITLE_MAX_CHARS = 120;
@@ -101,6 +121,12 @@ export const FEEDBACK_SUBJECT_MAX_CHARS = 80;
 export const FEEDBACK_DETAIL_MAX_CHARS = 200;
 export const MEMORY_SUMMARY_MAX_CHARS = 200;
 export const PROPOSALS_MAX_PER_TURN = 4;
+export const OUTCOME_TITLE_MAX_CHARS = 120;
+export const OUTCOME_DIRECTIVE_MAX_CHARS = 500;
+export const OUTCOME_MAX_CRITERIA = 5;
+export const OUTCOME_CRITERION_MAX_CHARS = 200;
+export const OUTCOME_MAX_BUDGET_USD = 50;
+export const OUTCOME_MAX_DEADLINE_DAYS = 30;
 
 /**
  * ADVERSARIAL PIN (§7 W6): interpreter output can never name a model,
@@ -229,6 +255,58 @@ function coerceSystemFeedback(obj: Record<string, unknown>): SystemFeedbackPropo
   return { type: "system_feedback", category: obj.category as SystemFeedbackCategory, subject, detail };
 }
 
+function coerceOutcomeSpec(obj: Record<string, unknown>): OutcomeSpecProposal | null {
+  if (
+    !exactKeys(obj, ["type", "title", "directive", "criteria", "budget_usd", "deadline_days"]) &&
+    !exactKeys(obj, ["type", "title", "criteria", "budget_usd", "deadline_days"])
+  ) {
+    return null;
+  }
+  if (typeof obj.title !== "string") return null;
+  const title = redactContent(sanitizeText(obj.title));
+  if (title.length === 0 || title.length > OUTCOME_TITLE_MAX_CHARS) return null;
+  // directive OPTIONAL — confirm-time provenance falls back to the staged
+  // turn text when the interpreter omits it (never the other way around:
+  // an empty directive is honest, an invented one is a fabrication).
+  let directive = "";
+  if (obj.directive !== undefined && obj.directive !== null) {
+    if (typeof obj.directive !== "string") return null;
+    directive = redactContent(sanitizeText(obj.directive));
+    if (directive.length > OUTCOME_DIRECTIVE_MAX_CHARS) return null;
+  }
+  if (!Array.isArray(obj.criteria)) return null;
+  if (obj.criteria.length < 1 || obj.criteria.length > OUTCOME_MAX_CRITERIA) return null;
+  const criteria: string[] = [];
+  for (const raw of obj.criteria) {
+    if (typeof raw !== "string") return null;
+    const criterion = redactContent(sanitizeText(raw));
+    if (criterion.length === 0 || criterion.length > OUTCOME_CRITERION_MAX_CHARS) return null;
+    criteria.push(criterion);
+  }
+  let budgetUsd: number | null = null;
+  if (obj.budget_usd !== null && obj.budget_usd !== undefined) {
+    if (typeof obj.budget_usd !== "number" || !Number.isFinite(obj.budget_usd)) return null;
+    if (obj.budget_usd < 0 || obj.budget_usd > OUTCOME_MAX_BUDGET_USD) return null;
+    budgetUsd = Math.round(obj.budget_usd * 100) / 100;
+  }
+  let deadlineDays: number | null = null;
+  if (obj.deadline_days !== null && obj.deadline_days !== undefined) {
+    if (typeof obj.deadline_days !== "number" || !Number.isInteger(obj.deadline_days)) return null;
+    if (deadlineDays !== null || obj.deadline_days < 1 || obj.deadline_days > OUTCOME_MAX_DEADLINE_DAYS) {
+      return null;
+    }
+    deadlineDays = obj.deadline_days;
+  }
+  return {
+    type: "outcome_spec",
+    title,
+    directive,
+    criteria,
+    budget_usd: budgetUsd,
+    deadline_days: deadlineDays,
+  };
+}
+
 /** Strict single-proposal validator — the shared seam of the array parser
  *  and the confirm bridges (a pending payload re-validates identically,
  *  INCLUDING the forbidden-term pin: a smuggled model/provider/read-source
@@ -263,6 +341,9 @@ export function coerceProposal(value: unknown): Proposal | null {
     const summary = redactContent(sanitizeText(obj.summary));
     if (summary.length === 0 || summary.length > MEMORY_SUMMARY_MAX_CHARS) return null;
     return { type: "memory_candidate", summary };
+  }
+  if (obj.type === "outcome_spec") {
+    return coerceOutcomeSpec(obj);
   }
   return null;
 }
@@ -331,6 +412,8 @@ export function buildInterpretationPrompt(
     `{"type":"configuration_directive","target_principal":"self"|"<other person's name>","target":"interaction_profile","change":{"<key>":"<value>"}} — the user asked to change how the assistant talks to them (or to a named person); change carries 1 to ${DIRECTIVE_CHANGE_MAX_PAIRS} key-value pairs, each value at most ${DIRECTIVE_CHANGE_VALUE_MAX_CHARS} chars.`,
     `{"type":"system_feedback","category":"capability_gap"|"bug"|"request","subject":"<short summary>","detail":"<what happened>"|null} — the user expressed a gap, defect, or wish about the assistant itself; subject at most ${FEEDBACK_SUBJECT_MAX_CHARS} chars, detail at most ${FEEDBACK_DETAIL_MAX_CHARS} chars.`,
     `{"type":"memory_candidate","summary":"<durable fact or preference worth keeping>"} — only when the user states one; at most ${MEMORY_SUMMARY_MAX_CHARS} chars.`,
+    `{"type":"outcome_spec","title":"<short name for the work>","directive":"<the user's ask in their words>","criteria":["<checkable condition for done>"],"budget_usd":null,"deadline_days":null} — ONLY when the user explicitly asks the assistant to OWN or CARRY work forward for them ("delegate this", "own this until it's done", "make sure this happens").`,
+    `outcome_spec ceilings: title at most ${OUTCOME_TITLE_MAX_CHARS} chars; directive copies the user's ask (at most ${OUTCOME_DIRECTIVE_MAX_CHARS} chars); 1-${OUTCOME_MAX_CRITERIA} criteria, each an objective checkable condition derived ONLY from what the user said, at most ${OUTCOME_CRITERION_MAX_CHARS} chars; budget_usd and deadline_days stay null unless the user stated numbers (budget ≤ ${OUTCOME_MAX_BUDGET_USD}, deadline 1-${OUTCOME_MAX_DEADLINE_DAYS} days).`,
     "Rules:",
     "- Propose only what the user actually said this turn; never infer tasks from questions or hypotheticals.",
     "- Never mention models, providers, or lookup tool names anywhere in the output.",
@@ -436,6 +519,21 @@ function renderMemoryCandidateOffer(
   return `Worth keeping in mind: "${proposal.summary}".${cta}`;
 }
 
+function renderOutcomeSpecOffer(
+  proposal: OutcomeSpecProposal,
+  behaviors: Required<ProfileBehaviors>,
+): string {
+  const n = proposal.criteria.length;
+  const first = proposal.criteria[0]!;
+  const done = n === 1 ? first : `${first} (+${n - 1} more)`;
+  const extras: string[] = [];
+  if (proposal.budget_usd !== null) extras.push(`budget $${proposal.budget_usd}`);
+  if (proposal.deadline_days !== null) extras.push(`due in ${proposal.deadline_days} day${proposal.deadline_days === 1 ? "" : "s"}`);
+  const extrasText = extras.length > 0 ? ` (${extras.join(", ")})` : "";
+  const cta = behaviors.preferNextAction ? " Reply 'approve' to start it." : "";
+  return `Staged as a delegated outcome: "${proposal.title}"${extrasText} — done means: ${done}.${cta}`;
+}
+
 /**
  * Deterministic offer block for the interpreter's proposals — one line per
  * proposal, input order. Offers are gated by the profile's behavior flags
@@ -466,6 +564,9 @@ export function renderProposalOffer(
         break;
       case "memory_candidate":
         if (behaviors.proposeCapture) lines.push(renderMemoryCandidateOffer(proposal, behaviors));
+        break;
+      case "outcome_spec":
+        lines.push(renderOutcomeSpecOffer(proposal, behaviors));
         break;
     }
   }
@@ -1280,4 +1381,126 @@ export function proposalFromPending(pending: {
   const proposal = coerceProposal(pending.payload);
   if (proposal === null || proposal.type !== pending.type) return null;
   return proposal;
+}
+
+// ------------------------------------------------------------- outcome_spec
+
+export interface ApplyOutcomeSpecInput {
+  readonly proposal: OutcomeSpecProposal;
+  readonly principalId: string;
+  /** Parsed `outcomes:` policy — fail-closed (disabled = intake refused). */
+  readonly policy: {
+    readonly enabled: boolean;
+    readonly maxActivePerPrincipal: number;
+    readonly defaultBudgetUsd: number;
+    readonly defaultDeadlineDays: number;
+  };
+  /**
+   * The executor dispatch port (WorkflowRuntime.start behind it). Optional
+   * so hosts without the runner wired still stage honestly.
+   */
+  readonly dispatch?: (input: { outcomeId: string; ref: string }) => Promise<string>;
+  /** The interaction thread the ask came from (provenance). */
+  readonly sourceThreadId?: string;
+  readonly now: Date;
+}
+
+export interface ApplyOutcomeSpecResult extends BridgeOutcome {
+  readonly ref: string | null;
+  readonly outcomeId: string | null;
+}
+
+/**
+ * The DELEGATE confirm bridge: an owner-confirmed outcome_spec becomes an
+ * ACCEPTED outcome through the canonical outcomes service. Injection pin:
+ * criteria come from THIS proposal (which the owner just confirmed) —
+ * the directive text is stored as provenance and is NEVER parsed for
+ * criteria. Budget/deadline fall back to policy defaults when the
+ * interpreter staged nulls; the policy cap bounds active outcomes.
+ */
+export async function applyOutcomeSpec(
+  db: TurnInterpretationDb,
+  input: ApplyOutcomeSpecInput,
+): Promise<ApplyOutcomeSpecResult> {
+  if (!UUID_RE.test(input.principalId)) {
+    throw new TurnProposalError("principalId must be a uuid");
+  }
+  const proposal = coerceProposal(input.proposal);
+  if (proposal === null || proposal.type !== "outcome_spec") {
+    return {
+      applied: false,
+      reason: "invalid-proposal",
+      reply: "That delegation didn't parse cleanly — nothing was started.",
+      ref: null,
+      outcomeId: null,
+    };
+  }
+  if (input.policy.enabled !== true) {
+    return {
+      applied: false,
+      reason: "policy-disabled",
+      reply: "Delegation is switched off right now, so nothing was started — the offer stands here if you re-enable it.",
+      ref: null,
+      outcomeId: null,
+    };
+  }
+  const active = await listActiveOutcomes(db, input.principalId);
+  if (active.length >= input.policy.maxActivePerPrincipal) {
+    return {
+      applied: false,
+      reason: "cap-reached",
+      reply: `I'm already carrying ${active.length} active outcome${active.length === 1 ? "" : "s"} — that's the policy cap. Resolve one (josctl ops now) or raise the cap before I take this on.`,
+      ref: null,
+      outcomeId: null,
+    };
+  }
+  const directive =
+    proposal.directive.trim().length > 0
+      ? proposal.directive
+      : "(staged from chat — no verbatim ask recorded)";
+  const budgetUsd = proposal.budget_usd ?? input.policy.defaultBudgetUsd;
+  const deadlineAt = new Date(
+    input.now.getTime() +
+      (proposal.deadline_days ?? input.policy.defaultDeadlineDays) * 86_400_000,
+  ).toISOString();
+  const created = await createOutcome(
+    db,
+    {
+      principalId: input.principalId,
+      title: proposal.title,
+      directive,
+      criteria: proposal.criteria.map((criterion) => ({
+        criterion,
+        verificationMethod: { kind: "owner_judgment" as const },
+      })),
+      budgetUsd,
+      deadlineAt,
+      sourceThreadId: input.sourceThreadId,
+      createdBy: "conversation",
+    },
+    { now: input.now, actor: TURN_PROPOSAL_ACTOR },
+  );
+  let dispatchNote = "";
+  if (input.dispatch === undefined) {
+    // No runner wired on this host — say so instead of claiming motion.
+    dispatchNote =
+      " It's saved, but the runner isn't wired here, so it's not moving yet.";
+  } else {
+    try {
+      await input.dispatch({ outcomeId: created.outcome.id, ref: created.outcome.ref });
+    } catch {
+      dispatchNote =
+        " It's saved, but the runner didn't pick it up — I'll retry from the ops lane rather than pretend it's moving.";
+    }
+  }
+  const n = created.criteria.length;
+  return {
+    applied: true,
+    reply:
+      `Outcome ${created.outcome.ref} accepted — "${created.outcome.title}", done means: ${created.criteria[0]!.criterion}` +
+      (n > 1 ? ` (+${n - 1} more)` : "") +
+      `.${dispatchNote} I'll surface progress in your briefs and only interrupt you if it needs judgment.`,
+    ref: created.outcome.ref,
+    outcomeId: created.outcome.id,
+  };
 }

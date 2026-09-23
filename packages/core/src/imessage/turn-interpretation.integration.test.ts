@@ -23,6 +23,7 @@ import {
   setThreadProfileOverride,
 } from "./profiles.js";
 import {
+  applyOutcomeSpec,
   applyConfigurationDirective,
   applyMemoryCandidate,
   applySystemFeedback,
@@ -82,6 +83,7 @@ describe.skipIf(!TEST_DATABASE_URL)("turn interpretation bridges (integration)",
     await db.pool.query(`
       DELETE FROM commitments; DELETE FROM feedback; DELETE FROM memory_candidates;
       DELETE FROM events; DELETE FROM outbox; DELETE FROM audit_log;
+      DELETE FROM outcomes;
       DELETE FROM interaction_messages; DELETE FROM interaction_threads;
       TRUNCATE interaction_profiles;
     `);
@@ -371,6 +373,139 @@ describe.skipIf(!TEST_DATABASE_URL)("turn interpretation bridges (integration)",
     const audit = await db.pool.query(`SELECT outputs_ref FROM audit_log`);
     expect(JSON.parse(audit.rows[0]!.outputs_ref).category).toBe("capability_gap");
     expect(audit.rows[0]!.outputs_ref).not.toContain("recruiter");
+  });
+
+  // ------------------------------------------------------------- outcome_spec
+
+  const OUTCOMES_POLICY = {
+    enabled: true,
+    maxActivePerPrincipal: 3,
+    defaultBudgetUsd: 5,
+    defaultDeadlineDays: 14,
+  } as const;
+
+  const OUTCOME_SPEC = {
+    type: "outcome_spec",
+    title: "Plaid security review",
+    directive: "own the plaid security review until it's done",
+    criteria: [
+      "the review document covers all four findings",
+      "you confirm the result in your reply",
+    ],
+    budget_usd: 2,
+    deadline_days: 7,
+  } as const;
+
+  it("DELEGATE: 'approve' on an outcome_spec creates an accepted outcome, its criteria, and dispatches", async () => {
+    const now = new Date("2026-09-21T20:00:00.000Z");
+    const dispatched: Array<{ outcomeId: string; ref: string }> = [];
+    const result = await applyOutcomeSpec(db.pool, {
+      proposal: OUTCOME_SPEC,
+      principalId: josctlId,
+      policy: OUTCOMES_POLICY,
+      dispatch: async (input) => {
+        dispatched.push(input);
+        return `run-${dispatched.length}`;
+      },
+      now,
+    });
+    expect(result.applied).toBe(true);
+    expect(result.ref).toMatch(/^[A-Z0-9]{3}$/);
+    expect(result.reply).toContain("accepted");
+    expect(result.reply).toContain("the review document covers all four findings");
+
+    const outcome = (
+      await db.pool.query(
+        `SELECT id, ref, title, directive, status, budget_usd, deadline_at, source_thread_id, created_by
+         FROM outcomes WHERE ref = $1`,
+        [result.ref],
+      )
+    ).rows[0]!;
+    expect(outcome.status).toBe("accepted");
+    expect(outcome.title).toBe("Plaid security review");
+    expect(outcome.directive).toBe("own the plaid security review until it's done");
+    expect(Number(outcome.budget_usd)).toBe(2); // proposal value beats policy default
+    expect(outcome.created_by).toBe("conversation");
+    const deadlineDays = (Date.parse(String(outcome.deadline_at)) - now.getTime()) / 86_400_000;
+    expect(Math.round(deadlineDays)).toBe(7);
+
+    const criteria = await db.pool.query(
+      `SELECT ordinal, criterion, verification_method FROM outcome_criteria
+        WHERE outcome_id = $1::uuid ORDER BY ordinal`,
+      [outcome.id],
+    );
+    expect(criteria.rows).toHaveLength(2);
+    for (const row of criteria.rows) {
+      expect(row.verification_method).toEqual({ kind: "owner_judgment" });
+    }
+    expect(dispatched).toEqual([{ outcomeId: String(outcome.id), ref: result.ref! }]);
+
+    // audit: metadata only (ids/counts), never the directive text
+    const audits = await db.pool.query(
+      `SELECT outputs_ref FROM audit_log WHERE actor = 'system:turn-proposals'`,
+    );
+    expect(audits.rows.length).toBeGreaterThan(0);
+    expect(audits.rows.map((r) => String(r.outputs_ref)).join(" ")).not.toContain("plaid security review until");
+  });
+
+  it("DELEGATE: policy defaults fill null budget/deadline; dispatch is optional (honest staging)", async () => {
+    const now = new Date("2026-09-21T20:00:00.000Z");
+    const result = await applyOutcomeSpec(db.pool, {
+      proposal: { ...OUTCOME_SPEC, budget_usd: null, deadline_days: null },
+      principalId: josctlId,
+      policy: OUTCOMES_POLICY,
+      now,
+    });
+    expect(result.applied).toBe(true);
+    const outcome = (
+      await db.pool.query(`SELECT budget_usd, deadline_at FROM outcomes WHERE ref = $1`, [result.ref])
+    ).rows[0]!;
+    expect(Number(outcome.budget_usd)).toBe(5);
+    const deadlineDays = (Date.parse(String(outcome.deadline_at)) - now.getTime()) / 86_400_000;
+    expect(Math.round(deadlineDays)).toBe(14);
+    expect(result.reply).toContain("runner isn't wired here"); // honest: no dispatch port wired
+  });
+
+  it("DELEGATE: disabled policy refuses without writing; cap reached refuses; invalid shape fails closed", async () => {
+    const now = new Date("2026-09-21T20:00:00.000Z");
+    const disabled = await applyOutcomeSpec(db.pool, {
+      proposal: OUTCOME_SPEC,
+      principalId: josctlId,
+      policy: { ...OUTCOMES_POLICY, enabled: false },
+      now,
+    });
+    expect(disabled.applied).toBe(false);
+    expect(disabled.reason).toBe("policy-disabled");
+
+    // fill the cap (3) via the same bridge, then expect refusal #4
+    for (let i = 0; i < OUTCOMES_POLICY.maxActivePerPrincipal; i += 1) {
+      const r = await applyOutcomeSpec(db.pool, {
+        proposal: { ...OUTCOME_SPEC, title: `Outcome ${i}` },
+        principalId: josctlId,
+        policy: OUTCOMES_POLICY,
+        now,
+      });
+      expect(r.applied).toBe(true);
+    }
+    const capped = await applyOutcomeSpec(db.pool, {
+      proposal: { ...OUTCOME_SPEC, title: "One too many" },
+      principalId: josctlId,
+      policy: OUTCOMES_POLICY,
+      now,
+    });
+    expect(capped.applied).toBe(false);
+    expect(capped.reason).toBe("cap-reached");
+
+    const invalid = await applyOutcomeSpec(db.pool, {
+      proposal: { type: "outcome_spec", title: "", directive: "", criteria: [], budget_usd: null, deadline_days: null },
+      principalId: josctlId,
+      policy: OUTCOMES_POLICY,
+      now,
+    });
+    expect(invalid.applied).toBe(false);
+    expect(invalid.reason).toBe("invalid-proposal");
+    const count = await db.pool.query(`SELECT count(*)::int AS n FROM outcomes`);
+    expect(Number(count.rows[0]!.n)).toBe(OUTCOMES_POLICY.maxActivePerPrincipal);
   });
 
   // --------------------------------------------------------- memory_candidate

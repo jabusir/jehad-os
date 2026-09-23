@@ -53,6 +53,9 @@ importers:
       '@jehad/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@jehad/workflow':
+        specifier: workspace:*
+        version: link:../../packages/workflow
       fastify:
         specifier: ^5.2.0
         version: 5.12.5
@@ -84,6 +87,9 @@ importers:
       '@jehad/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@jehad/workflow':
+        specifier: workspace:*
+        version: link:../../packages/workflow
       pg:
         specifier: ^8.13.0
         version: 8.23.0

@@ -15,7 +15,13 @@ import {
   runOutcomeResumeScan,
   type OutcomeExecutorPrimitives,
 } from "./outcome-workflows.js";
-import { createOutcome, createOutcomeWait, setCriterionStatus, transitionOutcome } from "@jehad/core";
+import {
+  applyOutcomeSpec,
+  createOutcome,
+  createOutcomeWait,
+  setCriterionStatus,
+  transitionOutcome,
+} from "@jehad/core";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const NOW = new Date("2026-09-23T12:00:00.000Z");
@@ -199,5 +205,105 @@ describe.skipIf(!TEST_DATABASE_URL)("outcome execution layer (D0 tranche 2)", ()
     // before/after expiry handling; either way the outcome is honestly dead.
     expect(["failed", "blocked"]).toContain(row[0]!.status);
     expect(row[0]!.failure_reason).not.toBeNull();
+  });
+});
+
+describe.skipIf(!TEST_DATABASE_URL)("D0 full-loop scenario (hermetic eval: intake→confirm→complete)", () => {
+  let db: IsolatedDb;
+  let principalId: string;
+
+  beforeAll(async () => {
+    db = await createIsolatedTestDb(TEST_DATABASE_URL!, "outcomesloop");
+    await migrateUp(db.pool);
+    await seedDomains(db.pool);
+    const row = await db.pool.query(
+      `INSERT INTO principals (type, name) VALUES ('user', 'outcome-loop-owner') RETURNING id`,
+    );
+    principalId = String(row.rows[0]!.id);
+  });
+
+  afterAll(async () => {
+    await dropIsolatedTestDb(TEST_DATABASE_URL!, db);
+  });
+
+  it("owner delegates over chat → confirm bridge → executor parks on owner judgment → verify → approve → completed", async () => {
+    const dispatched: Array<{ outcomeId: string; ref: string }> = [];
+
+    // 1. INTAKE + CONFIRM: the DELEGATE bridge (owner replied "approve" to
+    // the staged offer — the interpreter lane itself is covered in core).
+    const applied = await applyOutcomeSpec(db.pool, {
+      proposal: {
+        type: "outcome_spec",
+        title: "Plaid security review",
+        directive: "own the plaid security review until it's done",
+        criteria: ["the review document covers all four findings"],
+        budget_usd: 2,
+        deadline_days: 7,
+      },
+      principalId,
+      policy: { enabled: true, maxActivePerPrincipal: 3, defaultBudgetUsd: 5, defaultDeadlineDays: 14 },
+      dispatch: async (input) => {
+        dispatched.push(input);
+        return `run-${dispatched.length}`;
+      },
+      now: NOW,
+    });
+    expect(applied.applied).toBe(true);
+    expect(dispatched).toHaveLength(1);
+    const outcomeId = applied.outcomeId!;
+
+    // 2. EXECUTOR, first pass: no waits, criteria owner-judged → parks on
+    // the owner (waiting_user + the approval wait exists). Simulate the
+    // crash-after-park so the REPLAY carries the approval.
+    const parkingPrimitives: OutcomeExecutorPrimitives = {
+      waitForSignal: async () => undefined,
+      pauseForApproval: async () => {
+        throw new Error("simulated: owner has not replied yet");
+      },
+    };
+    await expect(
+      runOutcomeExecutor(db.pool, { outcomeId, ref: applied.ref! }, "run-park", parkingPrimitives),
+    ).rejects.toThrow("owner has not replied yet");
+    const parked = (await db.pool.query(`SELECT status, waiting_on FROM outcomes WHERE id = $1::uuid`, [outcomeId])).rows[0]!;
+    expect(String(parked.status)).toBe("waiting_user");
+    expect((parked.waiting_on as Record<string, unknown>).runId).toBe("run-park");
+
+
+    // 3. OWNER VERIFICATION: the owner marks the criterion verified with
+    // evidence (the canonical verify path, never worker prose).
+    const evidence = await db.pool.query(
+      `INSERT INTO evidence (domain_id, source_type, source_ref, claim, observed_at)
+       SELECT d.id, 'manual', $1, 'owner-verified from chat', $2::timestamptz
+       FROM domains d WHERE d.key = 'personal' RETURNING id`,
+      [`owner-verify-${randomUUID()}`, NOW.toISOString()],
+    );
+    await setCriterionStatus(db.pool, outcomeId, 1, "verified", {
+      now: NOW,
+      actor: "owner",
+      evidenceRef: String(evidence.rows[0]!.id),
+    });
+
+    // 4. RESUME WITH APPROVAL: the replay-tolerant executor re-enters,
+    // sees the approval, re-reads the now-verified criteria → verifying →
+    // completed (the completion gate demands verified criteria + non-null
+    // verified_at — exactly what step 3 wrote).
+    await runOutcomeExecutor(
+      db.pool,
+      { outcomeId, ref: applied.ref! },
+      "run-park",
+      {
+        waitForSignal: async () => undefined,
+        pauseForApproval: async () => ({ approved: true }),
+      },
+    );
+    const done = (await db.pool.query(`SELECT status FROM outcomes WHERE id = $1::uuid`, [outcomeId])).rows[0]!;
+    expect(String(done.status)).toBe("completed");
+
+    // 5. The completion event exists in the canonical log.
+    const events = await db.pool.query(
+      `SELECT type FROM events WHERE type = 'outcome.completed' AND payload->>'outcomeId' = $1::text`,
+      [outcomeId],
+    );
+    expect(events.rows).toHaveLength(1);
   });
 });

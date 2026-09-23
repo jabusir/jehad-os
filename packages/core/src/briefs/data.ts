@@ -87,6 +87,27 @@ export interface WaitingOnYou {
   readonly otherOpenCount: number;
 }
 
+/**
+ * Delegated-outcome surface (D0 finisher): briefs carry outcome progress so
+ * the owner is never interrupted for status — the brief IS the status
+ * surface. null when the owner principal resolves to nothing or there is
+ * nothing to say (§31 suppression).
+ */
+export interface OutcomeBriefItem {
+  readonly ref: string;
+  readonly title: string;
+  readonly status: string;
+}
+
+export interface OutcomesBriefSection {
+  /** Open outcomes parked on owner verification. */
+  readonly needsYou: readonly OutcomeBriefItem[];
+  /** Open outcomes in flight (accepted..verifying, not waiting_user). */
+  readonly active: readonly OutcomeBriefItem[];
+  /** Terminal transitions inside the delta window (completed/failed). */
+  readonly resolved: readonly OutcomeBriefItem[];
+}
+
 export interface MorningBriefData {
   readonly kind: "brief";
   readonly domainId: string;
@@ -102,6 +123,8 @@ export interface MorningBriefData {
   readonly todaySchedule: readonly TodayScheduleItem[];
   /** Next event after today (quiet-day fallback — "next up: …"). */
   readonly nextUpcoming: TodayScheduleItem | null;
+  /** D0 finisher: delegated-outcome progress (§31-suppressed when empty). */
+  readonly outcomes: OutcomesBriefSection | null;
   /**
    * Phase G "Needs your call" section (§4.2): live review refs + one-line
    * item summaries, bounded (10 candidates oldest-first + 5 urgency-ranked
@@ -144,6 +167,8 @@ export interface EveningCloseData {
    * only — never a claim about what actually happened.
    */
   readonly divergence: DivergenceResult | null;
+  /** D0 finisher: delegated-outcome progress (§31-suppressed when empty). */
+  readonly outcomes: OutcomesBriefSection | null;
 }
 
 const OPEN_ESCALATIONS_SQL = `
@@ -253,6 +278,41 @@ function filterCalendarDeltaToFuture<T extends { type: string; count: number; ev
   return out;
 }
 
+/** Cap on outcome lines per sub-list in the brief section. */
+export const OUTCOMES_BRIEF_MAX_PER_LIST = 4;
+
+async function collectOutcomesBriefSection(
+  db: QueryExecutor,
+  opts: BriefOptions,
+  since: Date,
+): Promise<OutcomesBriefSection | null> {
+  const principalId = await resolveReviewPrincipalId(db, opts);
+  if (principalId === null) return null;
+  const open = await db.query(
+    `SELECT ref, title, status FROM outcomes
+      WHERE principal_id = $1::uuid AND status NOT IN ('completed', 'failed', 'cancelled')
+      ORDER BY (status = 'waiting_user') DESC, updated_at ASC LIMIT 8`,
+    [principalId],
+  );
+  const resolved = await db.query(
+    `SELECT ref, title, status FROM outcomes
+      WHERE principal_id = $1::uuid AND status IN ('completed', 'failed')
+        AND updated_at >= $2::timestamptz
+      ORDER BY updated_at DESC LIMIT 4`,
+    [principalId, since.toISOString()],
+  );
+  const toItem = (row: Record<string, unknown>): OutcomeBriefItem => ({
+    ref: String(row.ref),
+    title: String(row.title),
+    status: String(row.status),
+  });
+  const needsYou = open.rows.filter((r) => String(r.status) === "waiting_user").map(toItem);
+  const active = open.rows.filter((r) => String(r.status) !== "waiting_user").map(toItem);
+  const resolvedItems = resolved.rows.map(toItem);
+  if (needsYou.length + active.length + resolvedItems.length === 0) return null;
+  return { needsYou, active, resolved: resolvedItems };
+}
+
 export async function collectMorningBriefData(
   db: QueryExecutor,
   opts: BriefOptions = {},
@@ -295,6 +355,7 @@ export async function collectMorningBriefData(
     reviewDigest !== null && reviewDigest.candidates.length + reviewDigest.escalations.length > 0
       ? reviewDigest
       : null;
+  const outcomes = await collectOutcomesBriefSection(db, opts, since);
 
   return {
     kind: "brief",
@@ -314,6 +375,7 @@ export async function collectMorningBriefData(
     todaySchedule,
     nextUpcoming,
     review,
+    outcomes,
   };
 }
 
@@ -367,6 +429,7 @@ export async function collectEveningCloseData(
     unlock: pickUnlock(ranked),
     divergence,
     stoppedReminders: parked.map((r) => ({ title: r.title })),
+    outcomes: await collectOutcomesBriefSection(db, opts, since),
   };
 }
 

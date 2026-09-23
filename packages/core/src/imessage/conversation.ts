@@ -35,6 +35,8 @@ import {
   interpretPolicyOf,
   personasPolicyOf,
   loadPolicyFile,
+  outcomesPolicyOf,
+  DEFAULT_OUTCOMES_POLICY,
   parsePolicyV1,
   type GatewayPrincipalPolicy,
   type PolicyV1,
@@ -71,6 +73,7 @@ import {
   parseProbeReply,
   parseProposalAffirmation,
   applyMemoryCandidate,
+  applyOutcomeSpec,
   applySystemFeedback,
   applyTaskBatch,
   buildInterpretationPrompt,
@@ -243,6 +246,11 @@ export interface ConversationDeps {
   readonly capturePolicy?: CapturePolicy | null;
   /** Phase H write provider (calendar); absent → confirms fail honestly. */
   readonly actionProvider?: unknown;
+  /**
+   * The outcome executor dispatch port (WorkflowRuntime.start behind it).
+   * Absent → confirmed outcomes stage honestly as "saved, not running".
+   */
+  readonly outcomeDispatcher?: (input: { outcomeId: string; ref: string }) => Promise<string>;
   /** Phase H action policy override (tests); defaults to policy.yaml. */
   readonly calendarActionPolicy?: CalendarActionPolicy | null;
   readonly now?: () => Date;
@@ -427,12 +435,37 @@ function pendingStateLine(parsed: { pendingProposal?: unknown } | null): string 
   const label =
     proposal?.type === "task_batch"
       ? `task batch (${proposal.items.length} item${proposal.items.length === 1 ? "" : "s"})`
-      : (proposal?.type ?? "proposal");
+      : proposal?.type === "outcome_spec"
+        ? `delegated outcome "${proposal.title}"`
+        : (proposal?.type ?? "proposal");
   return (
     "PENDING CONFIRMATION: a proposed " +
     label +
     " is awaiting the user's yes — an affirmative from them applies it. Never claim it was already applied, and never invent reply words; the system appends the offer text."
   );
+}
+
+/**
+ * True when the principal's active thread carries a pendingProposal — the
+ * bare-"approve" deferral check for the review-command collision.
+ */
+async function threadHasPendingProposal(
+  db: ModelCallDb,
+  opts: { principalId: string; now: Date },
+): Promise<boolean> {
+  try {
+    const thread = await resolveActiveThread(db, {
+      principalId: opts.principalId,
+      surface: CONVERSATION_SURFACE,
+      now: opts.now,
+    });
+    const meta = await db.query("SELECT metadata FROM interaction_threads WHERE id = $1::uuid", [
+      thread.id,
+    ]);
+    return parseThreadMetadata(meta.rows[0]?.metadata ?? null)?.pendingProposal !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 const OPEN_ITEMS_ASK_RE =
@@ -801,7 +834,18 @@ async function converseTurn(
   }
   // Phase G: review/control commands are exact-match and win over
   // everything conversational (gateway §3.1). Zero model calls.
-  if (parseReviewCommand(input.text) !== null) {
+  // COLLISION FIX (D0 intake): a bare "approve" (no ref) is ALSO the
+  // proposal-confirm CTA — when this thread has a pendingProposal, the
+  // deterministic confirm lane owns the turn and the review lane stands
+  // down (it would otherwise swallow the owner's confirmation for every
+  // review-enabled principal).
+  const reviewCmd = parseReviewCommand(input.text);
+  const bareApproveDefersToConfirm =
+    reviewCmd !== null &&
+    reviewCmd.ref === undefined &&
+    reviewCmd.cmd === "approve" &&
+    (await threadHasPendingProposal(db, { principalId: input.principalId, now }));
+  if (reviewCmd !== null && !bareApproveDefersToConfirm) {
     const gatewayPolicy = await loadConversationPolicyFile();
     const reviewOutcome = await handleReviewCommand(
       db,
@@ -894,13 +938,19 @@ async function converseTurn(
           // Exact verbs still dispatch by phrase; affirmatives by TYPE.
           const wantsTrack = confirm === "track" || (confirm === null && proposal.type === "task_batch");
           const wantsApprove =
-            confirm === "approve" || (confirm === null && proposal.type === "configuration_directive");
+            (confirm === "approve" && proposal.type !== "outcome_spec") ||
+            (confirm === null && proposal.type === "configuration_directive");
           const wantsLog =
             confirm === "log" || (confirm === null && proposal.type === "system_feedback");
           const wantsRemember =
             confirm === "remember" || (confirm === null && proposal.type === "memory_candidate");
+          // DELEGATE intake (D0 finisher): "approve" or an affirmative starts
+          // a staged outcome_spec. "approve" stays the configuration_directive
+          // verb only when the pending proposal ISN'T an outcome.
+          const wantsStartOutcome =
+            proposal.type === "outcome_spec" && (confirm === "approve" || confirm === null);
           const verb = confirm ?? "affirm";
-          let applied: { applied: boolean; reply: string } | null = null;
+          let applied: { applied: boolean; reply: string; reason?: string } | null = null;
           if (wantsTrack && proposal.type === "task_batch") {
             applied = await applyTaskBatch(db, { proposal, principalId: input.principalId, now });
           } else if (wantsApprove && proposal.type === "configuration_directive") {
@@ -914,6 +964,31 @@ async function converseTurn(
             applied = await applySystemFeedback(db, { proposal, principalId: input.principalId, now });
           } else if (wantsRemember && proposal.type === "memory_candidate") {
             applied = await applyMemoryCandidate(db, { proposal, principalId: input.principalId, now });
+          } else if (wantsStartOutcome && proposal.type === "outcome_spec") {
+            const policyFile = await loadConversationPolicyFile();
+            // No policy file → fail-closed defaults (outcomes disabled).
+            const outcomesPolicy = policyFile === null
+              ? DEFAULT_OUTCOMES_POLICY
+              : outcomesPolicyOf(policyFile);
+            applied = await applyOutcomeSpec(db, {
+              proposal,
+              principalId: input.principalId,
+              policy: outcomesPolicy,
+              dispatch: deps.outcomeDispatcher,
+              sourceThreadId: threadNow.id,
+              now,
+            });
+            // A refused apply (policy off / cap reached) keeps the offer
+            // pending so the owner can resolve and retry — only a real
+            // apply (or an unparseable proposal) clears it.
+            if (applied.applied === false && applied.reason !== "invalid-proposal") {
+              return deterministicReply(deps, input, ctx, {
+                content: applied.reply,
+                outboundTrust: "system_generated",
+                marker: `proposal-${verb}-refused`,
+                bypassReplyCap: true,
+              });
+            }
           }
           if (applied !== null) {
             await setThreadPendingProposal(db, {
@@ -2110,7 +2185,11 @@ async function converseTurn(
         turnStart: now,
         pendingProposal: auditPending?.pendingProposal !== undefined,
         pendingProposalLabel:
-          auditPending?.pendingProposal?.type === "task_batch" ? "task batch" : null,
+          auditPending?.pendingProposal?.type === "task_batch"
+            ? "task batch"
+            : auditPending?.pendingProposal?.type === "outcome_spec"
+              ? "outcome spec"
+              : null,
         brief: structuredBrief,
       });
       const claimAudit = auditReplyClaims(replyText, claimFacts);
@@ -2209,7 +2288,8 @@ async function converseTurn(
             | "task_batch"
             | "configuration_directive"
             | "system_feedback"
-            | "memory_candidate",
+            | "memory_candidate"
+            | "outcome_spec",
           at: now.toISOString(),
           payload: firstProposal,
           offered: offer.slice(0, 400),

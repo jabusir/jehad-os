@@ -7,7 +7,10 @@ import type { CommitmentListItem, WaitsOnMeItem } from "../queries/waiting.js";
 import type { BlockedItem, StalledItem } from "../queries/blocked.js";
 import { BRIEF_TIMEZONE } from "./timezone.js";
 import type { TodayScheduleItem } from "../calendar/projection.js";
-import type { EveningCloseData, MorningBriefData } from "./data.js";
+import type {
+  OutcomesBriefSection,
+  OutcomeBriefItem, EveningCloseData, MorningBriefData } from "./data.js";
+import { OUTCOMES_BRIEF_MAX_PER_LIST } from "./data.js";
 import { renderDivergenceBlock } from "./divergence.js";
 
 function blank(): string {
@@ -201,6 +204,26 @@ function friendlyEventGroups(
 
 /** §31 "while you were away" morning shape — delta first, then attention state.
  *  Suppression rule (plan M6B): a section with nothing to say says nothing. */
+/**
+ * Delegated-outcome progress (D0 finisher). Honest + bounded: needs-you
+ * first (the brief is the nudge, not an interrupt), then in-flight, then
+ * window-resolved with their terminal status. §31: an empty section never
+ * renders.
+ */
+export function renderOutcomesSection(outcomes: OutcomesBriefSection | null | undefined): string[] {
+  if (outcomes === null || outcomes === undefined) return [];
+  const lines: string[] = ["Delegated outcomes"];
+  const cap = (items: readonly OutcomeBriefItem[], render: (item: OutcomeBriefItem) => string): string[] => {
+    const out = items.slice(0, OUTCOMES_BRIEF_MAX_PER_LIST).map(render);
+    if (items.length > OUTCOMES_BRIEF_MAX_PER_LIST) out.push(`  - …and ${items.length - OUTCOMES_BRIEF_MAX_PER_LIST} more`);
+    return out;
+  };
+  lines.push(...cap(outcomes.needsYou, (o) => `- ${o.ref} needs your verification — "${o.title}"`));
+  lines.push(...cap(outcomes.active, (o) => `- ${o.ref} in progress — "${o.title}"`));
+  lines.push(...cap(outcomes.resolved, (o) => `- ${o.ref} ${o.status === "completed" ? "completed" : "failed"} — "${o.title}"`));
+  return lines.length > 1 ? lines : [];
+}
+
 export function renderMorningBriefText(data: MorningBriefData): string {
   const changed = data.changed;
   const deltaEmpty =
@@ -237,6 +260,7 @@ export function renderMorningBriefText(data: MorningBriefData): string {
   const unlock = renderUnlockBrief(data);
   const escalations = renderEscalations(data);
   const review = renderReviewSection(data);
+  const outcomes = renderOutcomesSection(data.outcomes);
 
   const sections: string[][] = [
     renderTodaySchedule(data.todaySchedule, data.nextUpcoming),
@@ -245,6 +269,7 @@ export function renderMorningBriefText(data: MorningBriefData): string {
     blocked,
     unlock,
     escalations,
+    outcomes,
     review,
   ].filter((section) => section.length > 0);
 
@@ -290,6 +315,7 @@ export function renderEveningCloseText(data: EveningCloseData): string {
         ]
       : [],
     renderStoppedReminders(data),
+    renderOutcomesSection(data.outcomes),
     data.unlock !== null
       ? [
           "Tomorrow's best unlock",

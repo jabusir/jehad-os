@@ -22,6 +22,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { createWorkflowRuntime } from "@jehad/workflow";
 import type { ModelProvider } from "@jehad/adapters";
 import { createOpenRouterProvider } from "@jehad/adapters";
 import type { PromotionDb } from "@jehad/core";
@@ -77,7 +78,24 @@ let conversationDeps: Promise<{
   registry: Awaited<ReturnType<typeof loadEgressPolicyRegistry>>;
   principalPolicy: Awaited<ReturnType<typeof loadConversationPrincipalPolicy>>;
   actionProvider: unknown;
+  outcomeDispatcher: (input: { outcomeId: string; ref: string }) => Promise<string>;
 }> | null = null;
+
+/**
+ * The outcome executor dispatch port (D0 intake): the conversation confirm
+ * bridge calls this after the canonical outcome row lands — one
+ * WorkflowRuntime.start per confirmed outcome, exactly like `josctl
+ * delegate`. Runtime created lazily once per process.
+ */
+let outcomeRuntime: Promise<ReturnType<typeof createWorkflowRuntime>> | null = null;
+function outcomeDispatcher(): (input: { outcomeId: string; ref: string }) => Promise<string> {
+  return async ({ outcomeId, ref }) => {
+    if (outcomeRuntime === null) outcomeRuntime = Promise.resolve(createWorkflowRuntime());
+    const runtime = await outcomeRuntime;
+    const handle = await runtime.start("outcome-executor", { outcomeId, ref });
+    return handle.runId;
+  };
+}
 
 export function registerImessageHarnessRoutes(
   app: FastifyInstance,
@@ -107,6 +125,7 @@ export function registerImessageHarnessRoutes(
               tokenProvider: envOrKeychainTokenProvider,
               calendarId: process.env.GCALENDAR_ID ?? "primary",
             }),
+            outcomeDispatcher: outcomeDispatcher(),
           }))
           .catch((err: unknown) => {
             // Reset memoization on failure: a transient (or loud, at

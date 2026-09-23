@@ -100,7 +100,12 @@ export function defineScheduledWorkflow(def: {
   return { kind: "cron", name: def.name, cron: def.cron, fn: def.fn };
 }
 
-export type AnyWorkflowDefinition = WorkflowDefinition<unknown> | ScheduledWorkflowDefinition;
+// `any` (not `unknown`) on the payload: definitions are consumed at this
+// boundary by NAME only (registration/serve) — inputs are supplied by the
+// runtime, never through this type, so payload contravariance would make
+// the union reject every parametrized definition for no safety gain.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type AnyWorkflowDefinition = WorkflowDefinition<any> | ScheduledWorkflowDefinition;
 
 // ---------------------------------------------------------------------------
 // Compilation to Inngest functions (internal)

@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@jehad/adapters": "workspace:*",
+    "@jehad/workflow": "workspace:*",
     "@jehad/core": "workspace:*",
     "@jehad/db": "workspace:*",
     "fastify": "^5.2.0",
