@@ -307,3 +307,197 @@ describe.skipIf(!TEST_DATABASE_URL)("D0 full-loop scenario (hermetic eval: intak
     expect(events.rows).toHaveLength(1);
   });
 });
+
+describe.skipIf(!TEST_DATABASE_URL)("executor assignment dispatch (D1: the worker contract)", () => {
+  let db: IsolatedDb;
+  let principalId: string;
+
+  beforeAll(async () => {
+    db = await createIsolatedTestDb(TEST_DATABASE_URL!, "outcomesassign");
+    await migrateUp(db.pool);
+    await seedDomains(db.pool);
+    const row = await db.pool.query(
+      `INSERT INTO principals (type, name) VALUES ('user', 'assign-exec-owner') RETURNING id`,
+    );
+    principalId = String(row.rows[0]!.id);
+  });
+
+  afterAll(async () => {
+    await dropIsolatedTestDb(TEST_DATABASE_URL!, db);
+  });
+
+  const exec = {
+    query: (sql: string, params: readonly unknown[] = []) => db.pool.query(sql, params as unknown[]),
+  };
+
+  const WORKERS_POLICY = {
+    enabled: true,
+    roles: {
+      research: {
+        model: "fake/research-model",
+        maxBudgetUsd: 0.05,
+        defaultDeadlineMinutes: 30,
+        reads: ["gmail.metadata.recent", "commitments.waiting"] as const,
+      },
+    },
+  };
+
+  function fakeHarness(response: string | { denial: string }) {
+    const calls: Array<{ assignmentId: string | null; prompt: string; model: string }> = [];
+    return {
+      calls,
+      adapter: {
+        id: "fake-harness",
+        capabilities: () => ["model:call"],
+        start: async (spec: { prompt: string; model: string; assignmentId: string | null; }) => {
+          calls.push({ assignmentId: spec.assignmentId, prompt: spec.prompt, model: spec.model });
+          if (typeof response === "string") {
+            return { ok: true, text: response, costUsd: 0.002, latencyMs: 5 };
+          }
+          return { ok: false, text: "", costUsd: 0.001, latencyMs: 5, denial: response.denial as never };
+        },
+        status: () => ({ runKey: "", state: "unknown" as const, latencyMs: null }),
+        cancel: async () => ({ cancelled: false, reason: "n/a" }),
+        artifacts: async () => ({ text: null }),
+      } as never,
+    };
+  }
+
+  const VALID_ENVELOPE = JSON.stringify({
+    summary: "The Acme quote is pending finance sign-off.",
+    artifact: { title: "Acme quote status", body: "Grounded synthesis." },
+    citations: [{ ref: "gmail.metadata.recent — billing@acme.com", note: "sender context" }],
+    costUsd: 0,
+  });
+
+  async function seedPlanOutcome(plan: Array<Record<string, unknown>>): Promise<{ id: string; ref: string }> {
+    const created = await createOutcome(
+      exec,
+      {
+        principalId,
+        title: "Chase the Acme quote",
+        directive: "find the quote state",
+        criteria: [{ criterion: "quote state grounded" }],
+        createdBy: "josctl",
+      },
+      { now: NOW, actor: "system:outcome-test" },
+    );
+    // createOutcome deliberately ignores plan (it is not a constructor
+    // concern) — the executor's plan comes from the interpreter proposal;
+    // seed it directly, exactly like the tranche-2 tests.
+    await db.pool.query(`UPDATE outcomes SET plan = $2::jsonb WHERE id = $1::uuid`, [
+      created.outcome.id,
+      JSON.stringify(plan),
+    ]);
+    return { id: created.outcome.id, ref: created.outcome.ref };
+  }
+
+  it("dispatches a research assignment: succeeded → evidence → grant revoked → plan consumed → outcome parks on owner", async () => {
+    const { id, ref } = await seedPlanOutcome([{ assign: { role: "research", task: "Find the Acme quote state" } }]);
+    const grantsBefore = await db.pool.query(`SELECT count(*)::int AS n FROM capability_grants`).then((r) => Number(r.rows[0]!.n));
+    const harness = fakeHarness(VALID_ENVELOPE);
+
+    // The executor parks by throwing out of pauseForApproval (the runtime
+    // durably parks and replays on resume) — same crash-replay shape the
+    // D0 loop tests use.
+    // The executor parks by throwing out of pauseForApproval (the runtime
+    // durably parks and replays on resume) — same crash-replay shape the
+    // D0 loop tests use.
+    await expect(
+      runOutcomeExecutor(
+        db.pool,
+        { outcomeId: id, ref },
+        `run-${randomUUID()}`,
+        {
+          waitForSignal: async () => undefined,
+          pauseForApproval: async () => {
+            throw new Error("owner has not replied yet");
+          },
+        },
+        { harness: harness.adapter, workersPolicy: WORKERS_POLICY },
+      ),
+    ).rejects.toThrow("owner has not replied yet");
+    const parked = await db.pool.query(`SELECT status FROM outcomes WHERE id = $1::uuid`, [id]);
+    expect(String(parked.rows[0]!.status)).toBe("waiting_user");
+    expect(harness.calls).toHaveLength(1);
+    expect(harness.calls[0]!.model).toBe("fake/research-model");
+    expect(harness.calls[0]!.prompt).toContain("UNTRUSTED DATA");
+    expect(harness.calls[0]!.prompt).toContain("Find the Acme quote state");
+
+    const assignments = await db.pool.query(
+      `SELECT id, status, spent_usd, capability_grant_id, result_ref FROM assignments WHERE outcome_id = $1::uuid`,
+      [id],
+    );
+    const assignment = assignments.rows[0]!;
+    expect(String(assignment.status)).toBe("succeeded");
+    expect(Number(assignment.spent_usd)).toBeCloseTo(0.002);
+    const grantRow = await db.pool.query(
+      `SELECT revoked_at, resource FROM capability_grants WHERE id = $1::uuid`,
+      [assignment.capability_grant_id],
+    );
+    expect(grantRow.rows[0]!.revoked_at).not.toBeNull();
+    expect(String(grantRow.rows[0]!.resource)).toBe(`assignment:${assignment.id}`);
+    // citations landed as evidence
+    const evidence = await db.pool.query(
+      `SELECT count(*)::int AS n FROM evidence WHERE source_type = 'assignment' AND source_ref LIKE '%acme.com%'`,
+    );
+    expect(Number(evidence.rows[0]!.n)).toBe(1);
+    // outcome plan consumed
+    const outcome = await db.pool.query(`SELECT plan FROM outcomes WHERE id = $1::uuid`, [id]);
+    expect((outcome.rows[0]!.plan as unknown[]).length).toBe(0);
+    void grantsBefore;
+  });
+
+  it("disabled role blocks the outcome honestly; assignment never created", async () => {
+    const { id, ref } = await seedPlanOutcome([{ assign: { role: "coding", task: "write code" } }]);
+    const result = await runOutcomeExecutor(
+      db.pool,
+      { outcomeId: id, ref },
+      `run-${randomUUID()}`,
+      { waitForSignal: async () => undefined, pauseForApproval: async () => ({ approved: true }) },
+      { workersPolicy: { enabled: true, roles: {} } },
+    );
+    expect(result.status).toBe("blocked");
+    const rows = await db.pool.query(`SELECT count(*)::int AS n FROM assignments WHERE outcome_id = $1::uuid`, [id]);
+    expect(Number(rows.rows[0]!.n)).toBe(0);
+  });
+
+  it("harness failure → assignment failed with grant revoked → outcome blocked honestly", async () => {
+    const { id, ref } = await seedPlanOutcome([{ assign: { role: "research", task: "will fail" } }]);
+    const harness = fakeHarness({ denial: "provider_error" });
+    const result = await runOutcomeExecutor(
+      db.pool,
+      { outcomeId: id, ref },
+      `run-${randomUUID()}`,
+      { waitForSignal: async () => undefined, pauseForApproval: async () => ({ approved: true }) },
+      { harness: harness.adapter, workersPolicy: WORKERS_POLICY },
+    );
+    expect(result.status).toBe("blocked");
+    const rows = await db.pool.query(`SELECT status, failure_reason FROM assignments WHERE outcome_id = $1::uuid`, [id]);
+    expect(String(rows.rows[0]!.status)).toBe("failed");
+    expect(String(rows.rows[0]!.failure_reason)).toContain("provider_error");
+  });
+
+  it("oversized worker output → envelope rejected → assignment failed → outcome blocked (nothing half-landed)", async () => {
+    const { id, ref } = await seedPlanOutcome([{ assign: { role: "research", task: "big output" } }]);
+    const oversized = JSON.stringify({
+      summary: "s",
+      artifact: { title: "t", body: "x".repeat(9000) },
+      citations: [],
+      costUsd: 0,
+    });
+    const harness = fakeHarness(oversized);
+    const result = await runOutcomeExecutor(
+      db.pool,
+      { outcomeId: id, ref },
+      `run-${randomUUID()}`,
+      { waitForSignal: async () => undefined, pauseForApproval: async () => ({ approved: true }) },
+      { harness: harness.adapter, workersPolicy: WORKERS_POLICY },
+    );
+    expect(result.status).toBe("blocked");
+    const rows = await db.pool.query(`SELECT status FROM assignments WHERE outcome_id = $1::uuid`, [id]);
+    expect(String(rows.rows[0]!.status)).toBe("failed");
+    const evidence = await db.pool.query(`SELECT count(*)::int AS n FROM evidence WHERE source_type = 'assignment'`);
+    expect(Number(evidence.rows[0]!.n)).toBe(1); // only the earlier test's citation
+  });
+});

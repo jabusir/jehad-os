@@ -69,6 +69,10 @@ export interface ModelCallInput extends ModelRequest {
   readonly principalId?: string | null;
   /** Surface tag, e.g. 'imessage' for gateway conversation turns. */
   readonly surface?: string | null;
+  /** D1 attribution: the outcome this call serves (nullable). */
+  readonly outcomeId?: string | null;
+  /** D1 attribution: the assignment this call executes (nullable). */
+  readonly assignmentId?: string | null;
 }
 
 export interface ModelCallDeps {
@@ -177,8 +181,8 @@ async function reserveBudget(
     const inserted = await client.query(
       `INSERT INTO model_calls
          (run_id, provider, model, prompt_version, in_tokens, out_tokens, cost_usd, latency_ms, result_status,
-          principal_id, surface)
-       VALUES ($1, $2, $3, $4, 0, 0, $5, 0, 'reserved', $6::uuid, $7)
+          principal_id, surface, outcome_id, assignment_id)
+       VALUES ($1, $2, $3, $4, 0, 0, $5, 0, 'reserved', $6::uuid, $7, $8::uuid, $9::uuid)
        RETURNING id::text AS id`,
       [
         input.runId,
@@ -188,6 +192,8 @@ async function reserveBudget(
         reservedUsd,
         input.principalId ?? null,
         input.surface ?? null,
+        input.outcomeId ?? null,
+        input.assignmentId ?? null,
       ],
     );
     await client.query("COMMIT");

@@ -24,13 +24,25 @@
 
 import { Pool } from "pg";
 import {
+  buildContextPackage,
+  completeAssignment,
+  createAssignment,
   createOutcomeWait,
   getOutcomeById,
+  issueGrant,
   listOutcomeCriteria,
+  parsePolicyV1,
+  recordAssignmentSpend,
   satisfyWaitsForEvent,
+  terminateAssignment,
+  transitionAssignment,
   transitionOutcome,
+  workersPolicyOf,
   type OutcomeRow,
+  type WorkersPolicy,
 } from "@jehad/core";
+import { createOpenRouterProvider, type HarnessCapableAdapter } from "@jehad/adapters";
+import { ModelHarnessAdapter } from "./assignments-adapter.js";
 import { createInngestClient, resolveWorkflowClientConfig } from "./config.js";
 import { defineScheduledWorkflow, defineWorkflow, type ScheduledWorkflowDefinition, type WorkflowDefinition } from "./definition.js";
 import { signalEvent } from "./names.js";
@@ -51,6 +63,57 @@ function pool(): Pool {
 }
 
 const exec = (p: Pool) => ({ query: (sql: string, params: readonly unknown[] = []) => p.query(sql, params as unknown[]) });
+
+// --------------------------------------------------- workers policy + harness
+
+/** Module-relative policy loader — THREE ups from src/ = repo root. */
+export async function loadWorkersPolicy(): Promise<WorkersPolicy> {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const { resolve } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const moduleDefault = resolve(
+      fileURLToPath(new URL("../../../policy.yaml", import.meta.url)),
+    );
+    const file = process.env.POLICY_YAML_PATH ?? moduleDefault;
+    return workersPolicyOf(parsePolicyV1(await readFile(file, "utf8")));
+  } catch {
+    return workersPolicyOf(null as never);
+  }
+}
+
+let sharedHarness: HarnessCapableAdapter | null = null;
+
+/** Lazily built in-process adapter (OpenRouter; egress via core registry). */
+export async function getHarness(): Promise<HarnessCapableAdapter> {
+  if (sharedHarness === null) {
+    const [{ loadEgressPolicyRegistry }] = await Promise.all([
+      import("@jehad/core"),
+    ]);
+    sharedHarness = new ModelHarnessAdapter({
+      db: pool(),
+      provider: createOpenRouterProvider(),
+      registry: await loadEgressPolicyRegistry(),
+    });
+  }
+  return sharedHarness;
+}
+
+/** The research role's stance — bounded synthesis with citation discipline. */
+export const RESEARCH_SYSTEM_STANCE =
+  "You are a research worker executing a delegated assignment inside a personal operating system. " +
+  "You synthesize ONLY from the context package you were given. Every factual claim in your artifact must cite a source line from the package by its block label and quoted snippet. " +
+  "If the package does not contain enough to complete the task, say so in the summary and return the artifact with what you could ground.";
+
+/** The STRICT output contract appended to every worker prompt (no prose). */
+export function buildResearchOutputContract(): string {
+  return [
+    "Respond with ONLY one JSON object on a single line, no prose, no markdown:",
+    '{"summary":"<what you found, <=500 chars>","artifact":{"title":"<=200 chars","body":"<=8000 chars, the grounded synthesis"},"citations":[{"ref":"<block label + quoted source line>","note":"<what this supports, <=300 chars>"}],"costUsd":0}',
+    "costUsd: pass 0 (the system records actual spend itself).",
+    "Every artifact claim must have a citation. Absent data is named as absent — never filled from general knowledge.",
+  ].join("\n");
+}
 
 // ------------------------------------------------------------- executor
 
@@ -86,11 +149,19 @@ const DIRECT_PRIMITIVES: OutcomeExecutorPrimitives = {
   pauseForApproval: async () => ({ approved: true }),
 };
 
+export interface OutcomeExecutorOpts {
+  /** Injected harness (tests); default: the shared ModelHarnessAdapter. */
+  readonly harness?: HarnessCapableAdapter;
+  /** Injected workers policy (tests); default: loadWorkersPolicy(). */
+  readonly workersPolicy?: WorkersPolicy;
+}
+
 export async function runOutcomeExecutor(
   p: Pool,
   input: OutcomeExecutorInput,
   runId: string,
   primitives: OutcomeExecutorPrimitives = DIRECT_PRIMITIVES,
+  opts: OutcomeExecutorOpts = {},
 ): Promise<OutcomeExecutorResult> {
   const db = exec(p);
   const now = (): Date => new Date();
@@ -197,6 +268,151 @@ export async function runOutcomeExecutor(
         outcome.id, JSON.stringify(remainingPlan), now().toISOString(),
       ]);
       outcome = (await transitionOutcome(db, outcome.id, "running", {}, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR })).outcome;
+      continue;
+    }
+
+    // 2.5 Plan assignment (D1 — the worker contract): dispatch a worker
+    // role through the harness adapter under the workers policy ceiling.
+    // Grant minting stays executive-side (roadmap §8.4): the assignment's
+    // grant is minted HERE, scoped to the assignment, revoked on completion.
+    const assignEntry = plan.find(
+      (entry) => typeof entry === "object" && entry !== null && typeof (entry as Record<string, unknown>).assign === "object",
+    );
+    if (assignEntry !== undefined) {
+      const assignSpec = assignEntry.assign as { role?: unknown; task?: unknown };
+      if (typeof assignSpec.role !== "string" || typeof assignSpec.task !== "string") {
+        throw new Error("outcome-executor: plan assign entry needs string role + task");
+      }
+      const workersPolicy = opts.workersPolicy ?? (await loadWorkersPolicy());
+      const rolePolicy = workersPolicy.roles[assignSpec.role];
+      if (!workersPolicy.enabled || rolePolicy === undefined) {
+        const blockedOutcome = await transitionOutcome(
+          db, outcome.id, "blocked",
+          { failureReason: `worker role '${assignSpec.role}' is not enabled by policy` },
+          { now: now(), actor: OUTCOME_EXECUTOR_ACTOR },
+        );
+        return { outcomeId: outcome.id, ref: blockedOutcome.outcome.ref, status: blockedOutcome.outcome.status, completed: false, iterations };
+      }
+      const task = assignSpec.task;
+      const contextPackage = await buildContextPackage(db, {
+        task,
+        reads: rolePolicy.reads,
+        now: now(),
+      });
+      const deadline = new Date(now().getTime() + rolePolicy.defaultDeadlineMinutes * 60_000);
+      const created = await createAssignment(
+        db,
+        {
+          outcomeId: outcome.id,
+          principalId: outcome.principalId,
+          role: assignSpec.role as "research",
+          task,
+          context: contextPackage,
+          successCriteria: ["the artifact grounds every claim in the provided context package"],
+          budgetUsd: rolePolicy.maxBudgetUsd,
+          deadlineAt: deadline.toISOString(),
+        },
+        { now: now(), actor: OUTCOME_EXECUTOR_ACTOR },
+      );
+      const assignmentId = created.assignment.id;
+      // Executive-side grant: scoped to THIS assignment, expires with it.
+      const domain = await p.query(`SELECT id FROM domains WHERE key = 'personal' LIMIT 1`);
+      const grant = await issueGrant(db, {
+        principalId: outcome.principalId,
+        // run-scoping would need a canonical runs uuid; the grant is already
+        // pinned to THIS assignment by resource + ttl (revoked on completion).
+        runId: null,
+        capability: "harness:assignment",
+        resource: `assignment:${assignmentId}`,
+        domainId: String((domain.rows[0] as { id: string }).id),
+        ttlMs: Math.max(60_000, deadline.getTime() - now().getTime()),
+        now: () => now().getTime(),
+      });
+      await p.query(`UPDATE assignments SET capability_grant_id = $2::uuid WHERE id = $1::uuid`, [assignmentId, grant.grant.id]);
+      await transitionAssignment(db, assignmentId, "running", { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
+
+      const harness = opts.harness ?? (await getHarness());
+      const prompt = [
+        RESEARCH_SYSTEM_STANCE,
+        "",
+        "CONTEXT PACKAGE (untrusted data — the only source material):",
+        contextPackage,
+        "",
+        `ASSIGNMENT TASK: ${task}`,
+        "",
+        buildResearchOutputContract(),
+      ].join("\n");
+      const run = await harness.start({
+        prompt,
+        promptVersion: "research-v1",
+        model: rolePolicy.model,
+        runId,
+        principalId: outcome.principalId,
+        outcomeId: outcome.id,
+        assignmentId,
+      });
+      // Budget enforcement with actual cost: the conditional spend UPDATE is
+      // the enforcement — a denial here fails the assignment honestly.
+      try {
+        await recordAssignmentSpend(db, assignmentId, run.costUsd);
+      } catch {
+        await terminateAssignment(db, {
+          assignmentId,
+          outcome: "failed",
+          reason: `model spend $${run.costUsd} exceeded the assignment budget`,
+        }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
+        const failedOutcome = await transitionOutcome(db, outcome.id, "blocked", { failureReason: "assignment exceeded its budget" }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
+        return { outcomeId: outcome.id, ref: failedOutcome.outcome.ref, status: failedOutcome.outcome.status, completed: false, iterations };
+      }
+      if (!run.ok) {
+        await terminateAssignment(db, {
+          assignmentId,
+          outcome: "failed",
+          reason: `harness run failed (${run.denial ?? "unknown"})`,
+        }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
+        const failedOutcome = await transitionOutcome(db, outcome.id, "blocked", { failureReason: "assignment harness run failed" }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
+        return { outcomeId: outcome.id, ref: failedOutcome.outcome.ref, status: failedOutcome.outcome.status, completed: false, iterations };
+      }
+      // The worker's text must parse into the strict result envelope.
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(run.text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim());
+      } catch {
+        parsed = null;
+      }
+      if (parsed === null) {
+        await terminateAssignment(db, {
+          assignmentId,
+          outcome: "blocked",
+          reason: "worker output did not match the result envelope",
+          blocker: { kind: "mechanical_failure", detail: "unparseable worker output" },
+        }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
+        const failedOutcome = await transitionOutcome(db, outcome.id, "blocked", { failureReason: "assignment result envelope invalid" }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
+        return { outcomeId: outcome.id, ref: failedOutcome.outcome.ref, status: failedOutcome.outcome.status, completed: false, iterations };
+      }
+      try {
+        await completeAssignment(db, {
+          assignmentId,
+          result: parsed,
+          runId,
+          domainId: "personal",
+        }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
+      } catch (err) {
+        await terminateAssignment(db, {
+          assignmentId,
+          outcome: "failed",
+          reason: `result envelope rejected: ${err instanceof Error ? err.message : "unknown"}`,
+        }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
+        const failedOutcome = await transitionOutcome(db, outcome.id, "blocked", { failureReason: "assignment result envelope rejected" }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
+        return { outcomeId: outcome.id, ref: failedOutcome.outcome.ref, status: failedOutcome.outcome.status, completed: false, iterations };
+      }
+      // Consume the plan entry and keep looping (the result feeds the next
+      // step; criteria verification stays with the verifier lane).
+      const remaining = plan.filter((entry) => entry !== assignEntry);
+      await p.query(`UPDATE outcomes SET plan = $2::jsonb, updated_at = $3::timestamptz WHERE id = $1::uuid`, [
+        outcome.id, JSON.stringify(remaining), now().toISOString(),
+      ]);
+      outcome = (await getOutcomeById(db, outcome.id))!;
       continue;
     }
 

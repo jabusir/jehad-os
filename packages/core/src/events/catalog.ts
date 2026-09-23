@@ -56,6 +56,13 @@ export const EVENT_CATALOG_V1 = [
   "outcome.completed",
   "outcome.failed",
   "outcome.cancelled",
+  // D1 — the worker contract (roadmap §8): assignment lifecycle events.
+  // Additive only (ADR-0006); existing consumers unaffected.
+  "assignment.created",
+  "assignment.status_changed",
+  "assignment.succeeded",
+  "assignment.failed",
+  "assignment.blocked",
 ] as const;
 
 export type EventTypeName = (typeof EVENT_CATALOG_V1)[number];

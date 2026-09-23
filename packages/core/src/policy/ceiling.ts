@@ -47,6 +47,8 @@ export interface PolicyV1 {
   calibration?: CalibrationPolicy;
   /** `outcomes:` (D0, roadmap §5; ADR-0017). */
   outcomes?: OutcomesPolicy;
+  /** `workers:` (D1, roadmap §8): the worker contract's autonomy ceiling. */
+  workers?: WorkersPolicy;
   /**
    * W4 interaction-profile config — the SECURITY/DEFAULT LAYER ONLY
    * (jarvis-v1.md §7 W4 rev2 R2; §5 invariant 2): the on/off flag and the
@@ -173,6 +175,84 @@ export function parseOutcomesEntry(value: string): OutcomesPolicy {
     throw new Error("policy: outcomes caps must be positive");
   }
   return { enabled: m[1] === "true", maxActivePerPrincipal: maxActive, defaultBudgetUsd: budget, defaultDeadlineDays: deadline };
+}
+
+/**
+ * The `workers:` section (D1; roadmap §8): the worker contract ceiling.
+ * `roles` maps role name → { model, max_budget_usd, default_deadline_minutes,
+ * reads }. Fail-closed: disabled until the owner ratifies; unknown roles are
+ * denied at dispatch (the parser stores exactly what the yaml says — the
+ * dispatcher consults it per role, absent role = deny).
+ */
+export interface WorkerRolePolicy {
+  readonly model: string;
+  readonly maxBudgetUsd: number;
+  readonly defaultDeadlineMinutes: number;
+  /** Read-capability allowlist for the context-package builder. */
+  readonly reads: readonly string[];
+}
+
+export interface WorkersPolicy {
+  readonly enabled: boolean;
+  readonly roles: Readonly<Record<string, WorkerRolePolicy>>;
+}
+
+/** Fail-safe defaults — disabled until the owner ratifies the section. */
+export const DEFAULT_WORKERS_POLICY: WorkersPolicy = { enabled: false, roles: {} };
+
+/**
+ * Parse ONE flow-mapping role entry:
+ * `{ model: <id>, max_budget_usd: <num>, default_deadline_minutes: <int>, reads: [a, b] }`.
+ * Throws on any deviation (fail closed — a malformed role entry refuses the
+ * whole section, refusing the whole worker fleet).
+ */
+export function parseWorkerRoleEntry(value: string): WorkerRolePolicy {
+  const m = value.match(
+    /^\{\s*model:\s*([\w./-]+),\s*max_budget_usd:\s*([\d.]+),\s*default_deadline_minutes:\s*(\d+),\s*reads:\s*\[([^\]]*)\]\s*\}$/,
+  );
+  if (m === null) throw new Error(`policy: malformed workers role entry: ${value.slice(0, 120)}`);
+  const maxBudgetUsd = Number(m[2]);
+  if (!Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0 || maxBudgetUsd > 50) {
+    throw new Error(`policy: workers max_budget_usd out of range: ${m[2]}`);
+  }
+  const defaultDeadlineMinutes = Number(m[3]);
+  if (!Number.isInteger(defaultDeadlineMinutes) || defaultDeadlineMinutes < 1 || defaultDeadlineMinutes > 24 * 60) {
+    throw new Error(`policy: workers default_deadline_minutes out of range: ${m[3]}`);
+  }
+  const reads = m[4]!.trim()
+    .split(",")
+    .map((r) => r.trim())
+    .filter((r) => r.length > 0);
+  return {
+    model: m[1]!,
+    maxBudgetUsd,
+    defaultDeadlineMinutes,
+    reads,
+  };
+}
+
+/**
+ * Parse the whole `workers:` block body (the indented lines collected by
+ * parsePolicyV1): `enabled: <bool>` plus one flow-mapping line per role.
+ */
+export function parseWorkersBody(lines: readonly string[]): WorkersPolicy {
+  let enabled: boolean | undefined;
+  const roles: Record<string, WorkerRolePolicy> = {};
+  for (const line of lines) {
+    const m = line.match(/^(enabled|([a-z_]+)):\s*(.*)$/);
+    if (m === null) throw new Error(`policy: malformed workers line: ${line.slice(0, 120)}`);
+    if (m[1] === "enabled") {
+      if (m[3] !== "true" && m[3] !== "false") throw new Error("policy: workers.enabled must be true|false");
+      if (enabled !== undefined) throw new Error("policy: duplicate workers.enabled");
+      enabled = m[3] === "true";
+    } else {
+      const role = m[2]!;
+      if (roles[role] !== undefined) throw new Error(`policy: duplicate workers role '${role}'`);
+      roles[role] = parseWorkerRoleEntry(m[3]!);
+    }
+  }
+  if (enabled === undefined) throw new Error("policy: workers block missing enabled");
+  return { enabled, roles };
 }
 
 /**
@@ -745,7 +825,7 @@ function stripComment(line: string): string {
 export function parsePolicyV1(text: string): PolicyV1 {
   const ceiling: Partial<Record<ActionType, AutonomyLevel>> = {};
   let version: number | undefined;
-  let section: "autonomy_ceiling" | "notifications" | "gateway" | "sensors" | "calibration" | "outcomes" | null = null;
+  let section: "autonomy_ceiling" | "notifications" | "gateway" | "sensors" | "calibration" | "outcomes" | "workers" | null = null;
   let sawCeiling = false;
   let sawNotifications = false;
   let sawGateway = false;
@@ -764,6 +844,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const sensorsGmail: { value: GmailSensorPolicy | null } = { value: null };
   const calibrationDaily: { value: CalibrationPolicy | null } = { value: null };
   const outcomesPolicy: { value: OutcomesPolicy | null } = { value: null };
+  const workersLines: string[] = [];
   const personasPolicy: { value: PersonasPolicy | null } = { value: null };
 
   for (const rawLine of text.split("\n")) {
@@ -812,6 +893,10 @@ export function parsePolicyV1(text: string): PolicyV1 {
         if (outcomesPolicy.value !== null) throw new Error("policy: duplicate outcomes key");
         outcomesPolicy.value = parseOutcomesEntry(value);
         section = "outcomes";
+      } else if (key === "workers") {
+        if (value !== "") throw new Error("policy: workers must be a mapping block");
+        if (workersLines.length > 0) throw new Error("policy: duplicate workers key");
+        section = "workers";
       } else if (key === "personas") {
         if (sawPersonas) throw new Error("policy: duplicate personas key");
         sawPersonas = true;
@@ -847,6 +932,10 @@ export function parsePolicyV1(text: string): PolicyV1 {
         continue;
       }
       throw new Error(`policy: unknown calibration key '${key}'`);
+    }
+    if (section === "workers") {
+      workersLines.push(line.trim());
+      continue;
     }
     if (section === "gateway") {
       if (inGatewayPrincipals) {
@@ -933,6 +1022,9 @@ export function parsePolicyV1(text: string): PolicyV1 {
   if (outcomesPolicy.value !== null) {
     policy.outcomes = outcomesPolicy.value;
   }
+  if (workersLines.length > 0) {
+    policy.workers = parseWorkersBody(workersLines);
+  }
   if (sawPersonas && personasPolicy.value !== null) {
     policy.personas = personasPolicy.value;
   }
@@ -964,6 +1056,11 @@ export function calibrationPolicyOf(policy: PolicyV1): CalibrationPolicy {
 /** The effective outcomes policy: parsed section or fail-safe defaults. */
 export function outcomesPolicyOf(policy: PolicyV1): OutcomesPolicy {
   return policy.outcomes ?? DEFAULT_OUTCOMES_POLICY;
+}
+
+/** The effective workers policy: parsed section or fail-safe (disabled). */
+export function workersPolicyOf(policy: PolicyV1): WorkersPolicy {
+  return policy.workers ?? DEFAULT_WORKERS_POLICY;
 }
 
 export interface GatewayInterpretPolicy {

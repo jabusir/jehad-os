@@ -24,7 +24,13 @@ export type {
   SourceAdapter,
 } from "./source-adapter.js";
 export type { IntegrationAdapter } from "./integration-adapter.js";
-export type { HarnessAdapter } from "./harness-adapter.js";
+export type {
+  HarnessAdapter,
+  HarnessCapableAdapter,
+  HarnessRunResult,
+  HarnessRunSpec,
+  HarnessRunStatus,
+} from "./harness-adapter.js";
 export type {
   ModelEgressPolicy,
   ModelProvider,

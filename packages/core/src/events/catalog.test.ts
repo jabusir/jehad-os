@@ -38,8 +38,14 @@ describe("event catalog v1", () => {
       "outcome.completed",
       "outcome.failed",
       "outcome.cancelled",
+      // D1 additive (roadmap §8): the worker contract lifecycle.
+      "assignment.created",
+      "assignment.status_changed",
+      "assignment.succeeded",
+      "assignment.failed",
+      "assignment.blocked",
     ]);
-    expect(EVENT_CATALOG_V1.length).toBe(33);
+    expect(EVENT_CATALOG_V1.length).toBe(38);
   });
 
   it("accepts catalog names and rejects everything else", () => {

@@ -100,5 +100,16 @@ calibration:
 
 outcomes: { enabled: true, max_active_per_principal: 3, default_budget_usd: 5, default_deadline_days: 14 }
 
+# workers — D1 (roadmap §8): the worker contract's autonomy ceiling. Workers
+# are roles with typed assignments, never free agents: each role pins its
+# model (must pass the egress policy), a per-assignment hard budget (USD, ≤50),
+# a deadline default, and a read allowlist that bounds the context-package
+# builder. Absent role = deny at dispatch; the section absent entirely =
+# worker fleet disabled (fail closed). Verification assignments land in D3
+# behind this same ceiling (role 'verifier' reserved).
+workers:
+  enabled: true
+  research: { model: openai/gpt-4.1-mini, max_budget_usd: 1, default_deadline_minutes: 30, reads: [gmail.metadata.recent, calendar.today, commitments.waiting] }
+
 sensors:
   gmail: { enabled: true, poll_cron: "*/5 * * *", bootstrap_window_days: 30, extract_senders: [billing@*, statements@*, *@stripe.com], max_messages_per_poll: 40, max_candidates_per_day: 20, content_enabled: true, content_retention_days: 7, content_max_body_bytes: 262144 }
