@@ -45,6 +45,8 @@ export interface PolicyV1 {
    * daily check until the owner ratifies the section).
    */
   calibration?: CalibrationPolicy;
+  /** `outcomes:` (D0, roadmap §5; ADR-0017). */
+  outcomes?: OutcomesPolicy;
   /**
    * W4 interaction-profile config — the SECURITY/DEFAULT LAYER ONLY
    * (jarvis-v1.md §7 W4 rev2 R2; §5 invariant 2): the on/off flag and the
@@ -130,6 +132,48 @@ export const DEFAULT_CALIBRATION_POLICY: CalibrationPolicy = {
   principals: [],
   promptLocalHour: 19,
 };
+
+/**
+ * The `outcomes:` section (D0; roadmap §5; ADR-0017): intake + executor
+ * gating and per-principal bounds. Exactly the four keys in that order
+ * (strict shape; the calibration.daily pattern). Defaults are fail-safe:
+ * disabled — the owner ratifies the section to open Delegate intake.
+ */
+export interface OutcomesPolicy {
+  readonly enabled: boolean;
+  readonly maxActivePerPrincipal: number;
+  readonly defaultBudgetUsd: number;
+  readonly defaultDeadlineDays: number;
+}
+
+/** Fail-safe defaults — disabled; conservative bounds when enabled. */
+export const DEFAULT_OUTCOMES_POLICY: OutcomesPolicy = {
+  enabled: false,
+  maxActivePerPrincipal: 3,
+  defaultBudgetUsd: 5,
+  defaultDeadlineDays: 14,
+};
+
+/**
+ * `outcomes` flow-mapping parse — exactly
+ * `{ enabled: <bool>, max_active_per_principal: <int>, default_budget_usd: <int>, default_deadline_days: <int> }`.
+ * Caps must be positive; anything else throws (fail closed).
+ */
+export function parseOutcomesEntry(value: string): OutcomesPolicy {
+  const m = value.match(
+    /^\{\s*enabled:\s*(true|false),\s*max_active_per_principal:\s*(\d+),\s*default_budget_usd:\s*(\d+),\s*default_deadline_days:\s*(\d+)\s*\}$/,
+  );
+  if (m === null) {
+    throw new Error(
+      `policy: outcomes must be "{ enabled: <bool>, max_active_per_principal: <int>, default_budget_usd: <int>, default_deadline_days: <int> }" (got '${value}')`,
+    );
+  }
+  const [maxActive, budget, deadline] = [Number(m[2]), Number(m[3]), Number(m[4])];
+  if (maxActive <= 0 || budget <= 0 || deadline <= 0) {
+    throw new Error("policy: outcomes caps must be positive");
+  }
+  return { enabled: m[1] === "true", maxActivePerPrincipal: maxActive, defaultBudgetUsd: budget, defaultDeadlineDays: deadline };
+}
 
 /**
  * The `personas:` section (W4): `{ enabled: <bool>, principals: [name, …] }`
@@ -701,7 +745,7 @@ function stripComment(line: string): string {
 export function parsePolicyV1(text: string): PolicyV1 {
   const ceiling: Partial<Record<ActionType, AutonomyLevel>> = {};
   let version: number | undefined;
-  let section: "autonomy_ceiling" | "notifications" | "gateway" | "sensors" | "calibration" | null = null;
+  let section: "autonomy_ceiling" | "notifications" | "gateway" | "sensors" | "calibration" | "outcomes" | null = null;
   let sawCeiling = false;
   let sawNotifications = false;
   let sawGateway = false;
@@ -719,6 +763,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const gatewayPasses: { value: GatewayPassesPolicy | null } = { value: null };
   const sensorsGmail: { value: GmailSensorPolicy | null } = { value: null };
   const calibrationDaily: { value: CalibrationPolicy | null } = { value: null };
+  const outcomesPolicy: { value: OutcomesPolicy | null } = { value: null };
   const personasPolicy: { value: PersonasPolicy | null } = { value: null };
 
   for (const rawLine of text.split("\n")) {
@@ -762,6 +807,11 @@ export function parsePolicyV1(text: string): PolicyV1 {
         if (sawCalibration) throw new Error("policy: duplicate calibration key");
         sawCalibration = true;
         section = "calibration";
+      } else if (key === "outcomes") {
+        if (value === "") throw new Error("policy: outcomes must be a flow mapping");
+        if (outcomesPolicy.value !== null) throw new Error("policy: duplicate outcomes key");
+        outcomesPolicy.value = parseOutcomesEntry(value);
+        section = "outcomes";
       } else if (key === "personas") {
         if (sawPersonas) throw new Error("policy: duplicate personas key");
         sawPersonas = true;
@@ -880,6 +930,9 @@ export function parsePolicyV1(text: string): PolicyV1 {
   if (sawCalibration && calibrationDaily.value !== null) {
     policy.calibration = calibrationDaily.value;
   }
+  if (outcomesPolicy.value !== null) {
+    policy.outcomes = outcomesPolicy.value;
+  }
   if (sawPersonas && personasPolicy.value !== null) {
     policy.personas = personasPolicy.value;
   }
@@ -906,6 +959,11 @@ export function gmailSensorPolicyOf(policy: PolicyV1): GmailSensorPolicy {
  */
 export function calibrationPolicyOf(policy: PolicyV1): CalibrationPolicy {
   return policy.calibration ?? DEFAULT_CALIBRATION_POLICY;
+}
+
+/** The effective outcomes policy: parsed section or fail-safe defaults. */
+export function outcomesPolicyOf(policy: PolicyV1): OutcomesPolicy {
+  return policy.outcomes ?? DEFAULT_OUTCOMES_POLICY;
 }
 
 export interface GatewayInterpretPolicy {

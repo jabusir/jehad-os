@@ -107,7 +107,7 @@ BEGIN
         (OLD.status = 'queued'           AND NEW.status IN ('running', 'cancelled', 'failed')) OR
         (OLD.status = 'running'          AND NEW.status IN ('waiting_external', 'waiting_user', 'blocked', 'verifying', 'failed', 'cancelled')) OR
         (OLD.status = 'waiting_external' AND NEW.status IN ('running', 'blocked', 'failed', 'cancelled')) OR
-        (OLD.status = 'waiting_user'     AND NEW.status IN ('running', 'blocked', 'failed', 'cancelled')) OR
+        (OLD.status = 'waiting_user'     AND NEW.status IN ('running', 'verifying', 'blocked', 'failed', 'cancelled')) OR
         (OLD.status = 'blocked'          AND NEW.status IN ('running', 'waiting_external', 'waiting_user', 'verifying', 'failed', 'cancelled')) OR
         (OLD.status = 'verifying'        AND NEW.status IN ('completed', 'running', 'blocked', 'failed', 'cancelled'))
     ) THEN

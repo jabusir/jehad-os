@@ -203,8 +203,12 @@ export async function runOutcomeExecutor(
     // 3. Nothing runnable + unresolved criteria → owner verification (D0's
     //    verifier is the owner; D3 swaps in verifier assignments behind the
     //    same gate). pauseForApproval is durable + journaled in human_waits.
-    await transitionOutcome(db, outcome.id, "waiting_user", { waitingOn: { why: "owner verification of criteria" } }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
-    const approval = await primitives.pauseForApproval(`verify:${outcome.ref}`, { reason: "owner verification of outcome criteria" });
+    // Preserve the executor runId across the waiting_user transition —
+    // the approval resume (josctl ops decide) needs it to signal the run.
+    // waiting_on carries the CURRENT run id — the approval resume (josctl
+    // ops decide) signals this run, the one actually parked below.
+    await transitionOutcome(db, outcome.id, "waiting_user", { waitingOn: { why: "owner verification of criteria", runId } }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
+    const approval = await primitives.pauseForApproval(`verify-${outcome.ref.toLowerCase()}`, { reason: "owner verification of outcome criteria" });
     // Decision (or 30-day timeout) → re-loop; criteria state decides.
     if (approval.approved === false) {
       const failed = await transitionOutcome(db, outcome.id, "failed", { failureReason: "owner verification window expired" }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
@@ -227,12 +231,14 @@ export const outcomeExecutorWorkflow: WorkflowDefinition<OutcomeExecutorInput> =
   fn: async (ctx) => {
     const p = pool();
     try {
-      return await ctx.step.run("outcome-executor-body", () =>
-        runOutcomeExecutor(p, ctx.input, ctx.runId, {
-          waitForSignal: (name, opts) => ctx.waitForSignal(name, opts),
-          pauseForApproval: (id, opts) => ctx.pauseForApproval(id, opts),
-        }),
-      );
+      // NOT wrapped in step.run: the body itself uses the durable step
+      // primitives (waitForSignal/pauseForApproval) — nesting steps is
+      // illegal, and durability here comes from canonical CAS transitions +
+      // idempotent wait creation, which make crash-replay a no-op.
+      return await runOutcomeExecutor(p, ctx.input, ctx.runId, {
+        waitForSignal: (name, opts) => ctx.waitForSignal(name, opts),
+        pauseForApproval: (id, opts) => ctx.pauseForApproval(id, opts),
+      });
     } finally {
       await p.end().catch(() => undefined);
     }

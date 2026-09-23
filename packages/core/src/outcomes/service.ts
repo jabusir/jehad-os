@@ -493,3 +493,63 @@ export async function satisfyWaitsForEvent(
   }
   return satisfied;
 }
+
+// ----------------------------------------------------------------- intake
+
+export interface DelegateOutcomeResult {
+  readonly outcome: OutcomeRow;
+  readonly criteria: readonly { ordinal: number; criterion: string }[];
+}
+
+/**
+ * The D0 intake path: owner states a directive in natural language; the
+ * derived spec is honest about its own modesty — title is the directive's
+ * first clause, and the single criterion is OWNER JUDGMENT (D0's verifier
+ * is the owner; D2/D3 add real work and independent verification behind
+ * the same gate). Max-active and budget/deadline defaults come from the
+ * parsed `outcomes:` policy (fail-closed; disabled = intake refused).
+ */
+export async function delegateOutcome(
+  db: OutcomeDb,
+  input: {
+    readonly principalId: string;
+    readonly principalName?: string;
+    readonly directive: string;
+    readonly policy: { readonly enabled: boolean; readonly maxActivePerPrincipal: number; readonly defaultBudgetUsd: number; readonly defaultDeadlineDays: number };
+    readonly sourceThreadId?: string;
+  },
+  opts: { readonly now: Date; readonly actor: string },
+): Promise<DelegateOutcomeResult> {
+  if (!input.policy.enabled) {
+    throw new Error("outcomes: delegate intake is disabled by policy (outcomes.enabled)");
+  }
+  const directive = input.directive.trim();
+  if (directive.length < 4) throw new TypeError("outcomes: directive too short to act on");
+  const active = await listActiveOutcomes(db, input.principalId);
+  if (active.length >= input.policy.maxActivePerPrincipal) {
+    throw new Error(
+      `outcomes: ${active.length} active outcomes already at the policy cap (${input.policy.maxActivePerPrincipal}) — resolve or raise the cap`,
+    );
+  }
+  const title = directive.length <= 60 ? directive : `${directive.slice(0, 57)}…`;
+  const deadline = new Date(opts.now.getTime() + input.policy.defaultDeadlineDays * 86_400_000);
+  return createOutcome(
+    db,
+    {
+      principalId: input.principalId,
+      title,
+      directive,
+      criteria: [
+        {
+          criterion: "Outcome achieved, judged by the owner",
+          verificationMethod: { kind: "owner_judgment" },
+        },
+      ],
+      budgetUsd: input.policy.defaultBudgetUsd,
+      deadlineAt: deadline.toISOString(),
+      sourceThreadId: input.sourceThreadId,
+      createdBy: input.principalName === "josctl" ? "josctl" : "conversation",
+    },
+    opts,
+  );
+}

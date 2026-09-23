@@ -4,6 +4,7 @@ import { runBriefCommand } from "./commands/brief.js";
 import { runFeedbackCommand } from "./commands/feedback.js";
 import { runImessageCommand } from "./commands/imessage.js";
 import { runMetricsCommand } from "./commands/metrics.js";
+import { runDelegateCommand, runOpsCommand } from "./commands/ops.js";
 import { readJosctlCredential } from "./keychain.js";
 
 const baseUrl = process.env.JEHAD_API_URL ?? "http://127.0.0.1:3000";
@@ -24,6 +25,15 @@ if (process.argv[2] === "metrics") {
   process.exitCode = await runFeedbackCommand(process.argv, {
     databaseUrl: process.env.DATABASE_URL ?? "postgres://localhost:5432/jehad",
   });
+} else if (process.argv[2] === "delegate") {
+  // josctl delegate "<directive>" — D0 intake; dispatches the executor via
+  // the WorkflowRuntime port (roadmap §19 D0).
+  process.exitCode = await runDelegateCommand(process.argv, { stdout: process.stdout });
+  if (process.exitCode === undefined) process.exitCode = 0;
+} else if (process.argv[2] === "ops") {
+  // josctl ops now|outcome|criterion|decide — CR0 (roadmap §16).
+  process.exitCode = await runOpsCommand(process.argv, { stdout: process.stdout });
+  if (process.exitCode === undefined) process.exitCode = 0;
 } else if (process.argv[2] === "imessage") {
   // josctl imessage pair|identities — direct-DB pairing admin (Lane P; the
   // code is printed ONCE and never persisted plaintext).

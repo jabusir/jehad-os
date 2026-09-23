@@ -17,6 +17,7 @@
   "dependencies": {
     "@jehad/adapters": "workspace:*",
     "@jehad/core": "workspace:*",
+    "@jehad/workflow": "workspace:*",
     "pg": "^8.13.0"
   },
   "devDependencies": {
