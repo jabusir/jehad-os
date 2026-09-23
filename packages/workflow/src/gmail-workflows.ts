@@ -21,6 +21,7 @@ import {
   issueGrant,
   parsePolicyV1,
   revokeGrant,
+  sweepGmailContentRetention,
   syncGmail,
   verifyGrant,
   type GmailSyncPort,
@@ -192,7 +193,9 @@ export function gmailWorkflowPort(adapter: GmailAdapter): GmailSyncPort {
         from: m.from,
         to: [],
         subject: m.subject,
+        snippet: m.snippet,
         textPlain: m.textPlain,
+        attachments: m.attachments,
       };
     },
   };
@@ -243,4 +246,48 @@ export const gmailSyncWorkflow: ScheduledWorkflowDefinition = defineScheduledWor
   cron: "*/5 * * * *",
   fn: async (ctx): Promise<GmailSyncResult> =>
     ctx.step.run("sync-gmail", () => syncWithPool()),
+});
+
+// ------------------------------------------------------- content retention
+
+export interface GmailContentSweepResult {
+  readonly skipped?: string;
+  readonly deleted: number;
+}
+
+/**
+ * ADR-0016 §5 retention sweeper (GC0): deletes unpinned `gmail_messages`
+ * rows past the policy window. Runs regardless of content_enabled so a
+ * disabled class still drains (deletion is always safe for minimization).
+ * Audit carries counts only — never message ids.
+ */
+export async function runGmailContentSweep(db: SqlExecutor): Promise<GmailContentSweepResult> {
+  const policy = await loadGmailSensorPolicy();
+  const retentionDays = policy?.contentRetentionDays ?? 7;
+  const deleted = await sweepGmailContentRetention(db, {
+    retentionDays,
+    now: new Date(),
+    actor: GMAIL_SYNC_ACTOR,
+  });
+  const outcome: GmailContentSweepResult = { deleted };
+  console.log(JSON.stringify({ workflow: "gmail-content-sweep", ...outcome }));
+  return outcome;
+}
+
+async function sweepWithPool(): Promise<GmailContentSweepResult> {
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL ?? "postgres://localhost:5432/jehad",
+  });
+  try {
+    return await runGmailContentSweep(pool);
+  } finally {
+    await pool.end();
+  }
+}
+
+export const gmailContentSweepWorkflow: ScheduledWorkflowDefinition = defineScheduledWorkflow({
+  name: "gmail-content-sweep",
+  cron: "17 * * * *",
+  fn: async (ctx): Promise<GmailContentSweepResult> =>
+    ctx.step.run("gmail-content-sweep", () => sweepWithPool()),
 });

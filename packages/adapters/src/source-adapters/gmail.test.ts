@@ -289,8 +289,10 @@ describe("createGmailAdapter", () => {
       from: "billing@stripe.com",
       fromDomain: "stripe.com",
       subject: "Your invoice is ready",
+      snippet: null,
       internalDate: 1694956800000,
       textPlain: "Invoice body: pay $120 by Oct 1",
+      attachments: [],
       sizeEstimate: 10234,
     });
     const url = new URL(calls[0]!.url);
@@ -338,8 +340,10 @@ describe("createGmailAdapter", () => {
       from: null,
       fromDomain: null,
       subject: null,
+      snippet: null,
       internalDate: null,
       textPlain: null,
+      attachments: [],
       sizeEstimate: null,
     });
   });

@@ -57,12 +57,15 @@ export {
 } from "./reminder-workflows.js";
 export { grantReminderWorkflow } from "./grant-workflows.js";export {
   gmailSyncWorkflow,
+  gmailContentSweepWorkflow,
   GMAIL_INGEST_CAPABILITY,
   GMAIL_INGEST_RESOURCE,
   GMAIL_SYNC_ACTOR,
   GMAIL_SYNC_DOMAIN_KEY,
   GMAIL_SYNC_GRANT_TTL_MS,
+  runGmailContentSweep,
   runGmailSyncTick,
+  type GmailContentSweepResult,
   type GmailSyncResult,
 } from "./gmail-workflows.js";
 export {

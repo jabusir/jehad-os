@@ -99,4 +99,4 @@ calibration:
   daily: { enabled: true, principals: [josctl], prompt_local_hour: 20 }
 
 sensors:
-  gmail: { enabled: true, poll_cron: "*/5 * * *", bootstrap_window_days: 30, extract_senders: [billing@*, statements@*, *@stripe.com], max_messages_per_poll: 40, max_candidates_per_day: 20 }
+  gmail: { enabled: true, poll_cron: "*/5 * * *", bootstrap_window_days: 30, extract_senders: [billing@*, statements@*, *@stripe.com], max_messages_per_poll: 40, max_candidates_per_day: 20, content_enabled: true, content_retention_days: 7, content_max_body_bytes: 262144 }

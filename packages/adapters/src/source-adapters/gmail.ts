@@ -93,6 +93,15 @@ export interface GmailBootstrapListResult {
   readonly nextPageToken: string | null;
 }
 
+export interface GmailAttachmentMeta {
+  readonly filename: string;
+  readonly mimeType: string | null;
+  /** Declared part size in bytes (Gmail body.size); null when absent. */
+  readonly size: number | null;
+  /** Gmail attachmentId — fetching the bytes is NOT this adapter's job. */
+  readonly attachmentId: string | null;
+}
+
 export interface GmailMessage {
   readonly id: string;
   readonly threadId: string | null;
@@ -100,15 +109,19 @@ export interface GmailMessage {
   /** Normalized From address (angle brackets/display name stripped); null if unparseable. */
   readonly from: string | null;
   readonly fromDomain: string | null;
-  /** Raw Subject header value. */
+  /** Decoded Subject header (RFC 2047 words resolved). */
   readonly subject: string | null;
+  /** Gmail-provided snippet (whitespace-collapsed, hard-capped). */
+  readonly snippet: string | null;
   /** internalDate in epoch ms; null when absent/malformed. */
   readonly internalDate: number | null;
   /**
-   * Body text: the text/plain part; when only text/html exists, its
-   * htmlToText() conversion. Null when no textual body survives.
+   * Body text: the text/plain part (charset-aware); when only text/html
+   * exists, its htmlToText() conversion. Null when no textual body survives.
    */
   readonly textPlain: string | null;
+  /** Attachment METADATA only — bytes are never fetched (ADR-0016). */
+  readonly attachments: readonly GmailAttachmentMeta[];
   readonly sizeEstimate: number | null;
 }
 
@@ -220,6 +233,7 @@ export function createGmailAdapter(opts: {
         labelIds?: unknown;
         sizeEstimate?: unknown;
         internalDate?: unknown;
+        snippet?: unknown;
         payload?: unknown;
       };
       if (typeof body.id !== "string" || body.id.length === 0) {
@@ -236,11 +250,8 @@ export function createGmailAdapter(opts: {
           : {};
       const fromRaw = headerValue(payload.headers, "from");
       const from = parseEmailAddress(fromRaw);
-      let textPlain = findPartText(payload, "text/plain");
-      if (textPlain === null) {
-        const html = findPartText(payload, "text/html");
-        textPlain = html === null ? null : htmlToText(html);
-      }
+      const textPlain = findPartText(payload, "text/plain")
+        ?? maybeHtmlToText(findPartText(payload, "text/html"));
       return {
         id: body.id,
         threadId: asString(body.threadId),
@@ -249,9 +260,11 @@ export function createGmailAdapter(opts: {
           : [],
         from,
         fromDomain: from === null ? null : (from.split("@").pop() ?? "").toLowerCase() || null,
-        subject: headerValue(payload.headers, "subject"),
+        subject: maybeDecodeHeader(headerValue(payload.headers, "subject")),
+        snippet: collapseSnippet(asString(body.snippet)),
         internalDate: asInt(body.internalDate),
         textPlain,
+        attachments: collectAttachmentMeta(payload),
         sizeEstimate: asInt(body.sizeEstimate),
       };
     },
@@ -298,18 +311,35 @@ export async function gmailEnvOrKeychainTokenProvider(
 }
 
 /**
- * Deterministic HTML→text (§6.2, no DOM dependency): drop script/style,
- * <br> and closing <p>/<div> become newlines, strip remaining tags, decode
- * the common entities (&amp; LAST so double-escapes stay single), collapse
- * 2+ blank lines to one, trim. Bounded/truncated use is the caller's.
+ * Deterministic HTML→text (§6.2, no DOM dependency; ADR-0016 §3):
+ * remove script/style/iframe/object/embed blocks entirely, drop all remote
+ * loads (img/video/audio tags and their URLs vanish — HTML is never
+ * rendered or fetched), keep http(s) links as `label (URL)` metadata
+ * (non-http(s) hrefs degrade to their label), mark quoted sections: every
+ * <blockquote> opening emits a `\n> ` boundary marker (nesting emits one
+ * per level) — quoted history is distinguishable by boundary, NOT perfectly
+ * separated from authored text (v1 honesty: the whole body stays ONE
+ * untrusted document), <br> and closing <p>/<div>/<blockquote> become
+ * newlines, <li> becomes "- ", strip remaining tags, decode the common
+ * entities (&amp; LAST so double-escapes stay single), collapse 2+ blank
+ * lines to one, trim. Bounded/truncated use is the caller's.
  */
 export function htmlToText(html: string): string {
   let text = html
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, "")
+    .replace(/<(script|style|iframe|object|embed)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+    .replace(/<(img|video|audio|source|track)\b[^>]*\/?>/gi, "")
+    .replace(/<a\s[^>]*href\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)<\/a\s*>/gi, (_m, href: string, label: string) => {
+      const text = label.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+      return /^https?:\/\//i.test(href)
+        ? text.length > 0 ? `${text} (${href})` : `(${href})`
+        : text;
+    })
+    .replace(/<blockquote\b[^>]*>/gi, "\n> ")
     .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div)\s*>/gi, "\n")
-    .replace(/<(p|div)\b[^>]*>/gi, "")
+    .replace(/<\/(p|div|li|tr|blockquote|h[1-6])\s*>/gi, "\n")
+    .replace(/<(p|div|h[1-6])\b[^>]*>/gi, "")
+    .replace(/<li\b[^>]*>/gi, "- ")
+    .replace(/<\/t[dh]\s*>/gi, " | ")
     .replace(/<[^>]*>/g, "")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
@@ -317,8 +347,15 @@ export function htmlToText(html: string): string {
     .replace(/&gt;/g, ">")
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&");
-  text = text.replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n");
+  text = text.replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n");
   return text.trim();
+}
+
+/** html→text for the only-html fallback; empty results become null. */
+function maybeHtmlToText(html: string | null): string | null {
+  if (html === null) return null;
+  const text = htmlToText(html);
+  return text.length > 0 ? text : null;
 }
 
 /**
@@ -394,9 +431,15 @@ function asMessageRef(raw: unknown): GmailMessageRef | null {
 
 function findPartText(part: unknown, mimeType: string): string | null {
   if (typeof part !== "object" || part === null) return null;
-  const p = part as { mimeType?: unknown; body?: { data?: unknown }; parts?: unknown[] };
+  const p = part as {
+    mimeType?: unknown;
+    headers?: unknown;
+    body?: { data?: unknown };
+    parts?: unknown[];
+  };
   if (p.mimeType === mimeType) {
-    const decoded = decodeBodyData(p.body?.data);
+    const charset = charsetFromContentType(headerValue(p.headers, "content-type"));
+    const decoded = decodeBodyData(p.body?.data, charset);
     if (decoded !== null) return decoded;
   }
   if (Array.isArray(p.parts)) {
@@ -408,11 +451,112 @@ function findPartText(part: unknown, mimeType: string): string | null {
   return null;
 }
 
-/** Gmail part bodies are URL-safe base64 without padding. */
-function decodeBodyData(data: unknown): string | null {
+/** `text/plain; charset="ISO-8859-1"` → `iso-8859-1` (unquoted); else null. */
+export function charsetFromContentType(contentType: string | null): string | null {
+  if (contentType === null) return null;
+  const m = /charset\s*=\s*"?\s*([A-Za-z0-9_-]+)\s*"?/i.exec(contentType);
+  return m === null ? null : m[1]!.toLowerCase();
+}
+
+/**
+ * Gmail part bodies are URL-safe base64 without padding, decoded per the
+ * part's declared charset. TextDecoder throws on unknown labels → fail-safe
+ * utf-8 (never a rejected message over an exotic charset label).
+ */
+function decodeBodyData(data: unknown, charset: string | null): string | null {
   if (typeof data !== "string" || data.length === 0) return null;
-  const text = Buffer.from(data, "base64url").toString("utf8");
+  const bytes = Buffer.from(data, "base64url");
+  let text: string;
+  try {
+    text = new TextDecoder(charset ?? "utf-8").decode(bytes);
+  } catch {
+    text = bytes.toString("utf8");
+  }
   return text.length > 0 ? text : null;
+}
+
+const MIME_WORD_RE = /=\?([^?]+)\?([bBqQ])\?([^?]*)\?=/g;
+
+/**
+ * RFC 2047 encoded header words (`=?utf-8?Q?...?=` / `=?iso-8859-1?B?...?=`)
+ * → decoded UTF-8 text. Undecodable words drop to empty strings rather than
+ * leaking encoded forms into subjects (fail-safe, deterministic).
+ */
+export function decodeMimeHeaderWords(value: string): string {
+  return value.replace(MIME_WORD_RE, (_full, charset: string, enc: string, text: string) => {
+    try {
+      const bytes =
+        enc.toLowerCase() === "b"
+          ? Buffer.from(text, "base64")
+          : Buffer.from(decodeQEncoding(text), "binary");
+      return new TextDecoder(charset.toLowerCase()).decode(bytes);
+    } catch {
+      return "";
+    }
+  }).trim();
+}
+
+/** RFC 2047 Q-encoding: `_` = space, `=XX` = hex byte. */
+function decodeQEncoding(text: string): string {
+  return text.replace(/_/g, " ").replace(/=([0-9A-Fa-f]{2})/g, (_m, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16)),
+  );
+}
+
+/** Subject-style header decode; null/absent stays null. */
+function maybeDecodeHeader(value: string | null): string | null {
+  if (value === null) return null;
+  const decoded = decodeMimeHeaderWords(value).trim();
+  return decoded.length > 0 ? decoded : null;
+}
+
+/** Whitespace-collapsed snippet, hard-capped (defensive; core truncates too). */
+function collapseSnippet(value: string | null): string | null {
+  if (value === null) return null;
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  return collapsed.length === 0 ? null : collapsed.slice(0, 600);
+}
+
+const ATTACHMENT_META_CAP = 10;
+
+/**
+ * Attachment METADATA only (filename/mime/size/attachmentId) — the bytes are
+ * never fetched by this adapter (ADR-0016 §3; directive §3). Bounded count;
+ * order-stable recursion.
+ */
+function collectAttachmentMeta(part: unknown): readonly GmailAttachmentMeta[] {
+  const out: GmailAttachmentMeta[] = [];
+  walkAttachmentMeta(part, out);
+  return out;
+}
+
+function walkAttachmentMeta(part: unknown, out: GmailAttachmentMeta[]): void {
+  if (out.length >= ATTACHMENT_META_CAP || typeof part !== "object" || part === null) return;
+  const p = part as {
+    filename?: unknown;
+    mimeType?: unknown;
+    headers?: unknown;
+    body?: { size?: unknown; attachmentId?: unknown };
+    parts?: unknown[];
+  };
+  const filename = typeof p.filename === "string" && p.filename.length > 0 ? p.filename : null;
+  const disposition = headerValue(p.headers, "content-disposition");
+  const isAttachment = filename !== null || (disposition !== null && /attachment/i.test(disposition));
+  if (isAttachment) {
+    out.push({
+      filename: (filename ?? "unnamed").slice(0, 255),
+      mimeType: typeof p.mimeType === "string" ? p.mimeType : null,
+      size: asInt(p.body?.size),
+      attachmentId: asString(p.body?.attachmentId),
+    });
+    if (out.length >= ATTACHMENT_META_CAP) return;
+  }
+  if (Array.isArray(p.parts)) {
+    for (const sub of p.parts) {
+      walkAttachmentMeta(sub, out);
+      if (out.length >= ATTACHMENT_META_CAP) return;
+    }
+  }
 }
 
 function headerValue(headers: unknown, lowerName: string): string | null {

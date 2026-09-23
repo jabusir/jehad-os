@@ -636,7 +636,23 @@ describe("policy sensors.gmail (GMAIL §5/§10.3)", () => {
       extractSenders: ["billing@*", "statements@*", "*@stripe.com"],
       maxMessagesPerPoll: 50,
       maxCandidatesPerDay: 20,
+      contentEnabled: false,
+      contentRetentionDays: 7,
+      contentMaxBodyBytes: 256 * 1024,
     });
+  });
+
+  it("parses the ADR-0016 extended shape (content_* keys) onto GmailSensorPolicy", () => {
+    const entry = 'gmail: { enabled: true, poll_cron: "*/5 * * *", bootstrap_window_days: 30, extract_senders: [billing@*], max_messages_per_poll: 40, max_candidates_per_day: 20, content_enabled: true, content_retention_days: 7, content_max_body_bytes: 131072 }';
+    const policy = parsePolicyV1(`${VALID}\nsensors:\n  ${entry}\n`);
+    expect(policy.sensors?.gmail?.contentEnabled).toBe(true);
+    expect(policy.sensors?.gmail?.contentRetentionDays).toBe(7);
+    expect(policy.sensors?.gmail?.contentMaxBodyBytes).toBe(131072);
+  });
+
+  it("rejects malformed content_* keys (fail closed)", () => {
+    const entry = 'gmail: { enabled: true, poll_cron: "*/5 * * *", bootstrap_window_days: 30, extract_senders: [billing@*], max_messages_per_poll: 40, max_candidates_per_day: 20, content_enabled: true }';
+    expect(() => parsePolicyV1(`${VALID}\nsensors:\n  ${entry}\n`)).toThrow(/sensors.gmail/);
   });
 
   it("absent section → gmailSensorPolicyOf returns fail-safe defaults (enabled:false)", () => {

@@ -32,6 +32,7 @@ import { acceptEvent, type EventStoreExecutor } from "../events/store.js";
 import { LATEST_PAYLOAD_SCHEMA_VERSION } from "../events/catalog.js";
 import { DEFAULT_GMAIL_SENSOR_POLICY, type GmailSensorPolicy } from "../policy/ceiling.js";
 import { extractCandidates, landGmailCandidates, normalizeFromAddress } from "./extraction.js";
+import { persistGmailContent, type GmailAttachmentRecord } from "./content.js";
 
 /** Event source stamp (the envelope SOURCE_RE admits adapter:<id>). */
 export const GMAIL_SOURCE = "adapter:gmail";
@@ -94,8 +95,12 @@ export interface GmailMessage {
   /** Raw To-header addresses. */
   readonly to: readonly string[];
   readonly subject: string | null;
+  /** Gmail-provided snippet (decoded/collapsed at the adapter). */
+  readonly snippet: string | null;
   /** text/plain part (adapter applies the deterministic HTML→text fallback). */
   readonly textPlain: string | null;
+  /** Attachment METADATA only — bytes are never fetched (ADR-0016). */
+  readonly attachments: readonly GmailAttachmentRecord[];
 }
 
 /**
@@ -160,7 +165,9 @@ export interface NormalizedGmailMessage {
   readonly senderSha256: string | null;
   readonly sizeClass: "small" | "medium" | "large";
   readonly subject: string | null;
+  readonly snippet: string | null;
   readonly textPlain: string | null;
+  readonly attachments: readonly GmailAttachmentRecord[];
 }
 
 function domainOfAddress(address: string): string | null {
@@ -203,7 +210,9 @@ export function normalizeGmailMessage(raw: GmailMessage): NormalizedGmailMessage
     senderSha256: from === null ? null : createHash("sha256").update(from, "utf8").digest("hex"),
     sizeClass,
     subject: raw.subject,
+    snippet: raw.snippet,
     textPlain: raw.textPlain,
+    attachments: raw.attachments,
   };
 }
 
@@ -214,16 +223,18 @@ export type GmailDb = EventStoreExecutor & SqlExecutor;
 
 export type GmailHealthDim = "healthy" | "degraded" | "failed";
 
-/** §3.7 health dimensions (jsonb snapshot in gmail_sync_state). */
+/** §3.7 health dimensions (jsonb snapshot in gmail_sync_state) + the
+ *  ADR-0016 `content` dim (body-lane fetch/parse health; GC0). */
 export interface GmailSyncHealth {
   readonly process: GmailHealthDim;
   readonly credential: GmailHealthDim;
   readonly cursor: GmailHealthDim;
   readonly decode: GmailHealthDim;
   readonly quota: GmailHealthDim;
+  readonly content: GmailHealthDim;
 }
 
-export const GMAIL_HEALTH_DIMS = ["process", "credential", "cursor", "decode", "quota"] as const;
+export const GMAIL_HEALTH_DIMS = ["process", "credential", "cursor", "decode", "quota", "content"] as const;
 
 export interface GmailSyncStateRow {
   readonly cursorHistoryId: number | null;
@@ -351,6 +362,9 @@ interface TickTally {
   deferred: number;
   capped: boolean;
   cursorHistoryId: number | null;
+  /** ADR-0016 content lane (GC0): attempts vs failures (audit/health only). */
+  contentAttempted: number;
+  contentFailed: number;
 }
 
 /**
@@ -390,6 +404,7 @@ export async function syncGmail(
         cursor: "degraded",
         decode: "healthy",
         quota: "healthy",
+        content: "healthy",
       },
     };
   }
@@ -403,6 +418,7 @@ export async function syncGmail(
       cursor: state?.cursorHistoryId != null ? "healthy" : "degraded",
       decode: "healthy",
       quota: "healthy",
+      content: "healthy",
     };
     await upsertGmailSyncState(db, {
       cursorHistoryId: state?.cursorHistoryId ?? null,
@@ -489,6 +505,42 @@ export async function syncGmail(
       }
     }
 
+    // ADR-0016 content lane (GC0): persist the bounded source record when
+    // the `gmail.content` class is enabled. Deterministic, model-free,
+    // additive: a persist failure never fails the observation event — it
+    // degrades the `content` health dim and the row simply stays absent
+    // (honest coverage: metadata without body).
+    if (policy.contentEnabled) {
+      tally.contentAttempted += 1;
+      const persisted = await persistGmailContent(db, {
+        id: message.id,
+        threadId: message.threadId,
+        from: message.from,
+        to: [],
+        subject: message.subject,
+        snippet: message.snippet,
+        textPlain: message.textPlain,
+        internalDate: message.internalDateIso,
+        attachments: message.attachments,
+      }, {
+        policy: {
+          enabled: true,
+          retentionDays: policy.contentRetentionDays,
+          maxBodyBytes: policy.contentMaxBodyBytes,
+        },
+        observedHistoryId: null,
+        now,
+        actor,
+      });
+      if (persisted.status === "failed") {
+        tally.contentFailed += 1;
+        await audit(db, "gmail.content.persist-failed", {
+          messageId: message.id,
+          error: persisted.error,
+        }, actor);
+      }
+    }
+
     const outcome: GmailSyncMessageOutcome = {
       messageId: ref.id,
       inbox: true,
@@ -511,6 +563,8 @@ export async function syncGmail(
     deferred: 0,
     capped: false,
     cursorHistoryId: null,
+    contentAttempted: 0,
+    contentFailed: 0,
   };
 
   // §3.4 bootstrap: drain the window list; ONLY new accepts consume the
@@ -622,19 +676,24 @@ export async function syncGmail(
       tally.deferred = 0;
       tally.capped = false;
       tally.cursorHistoryId = null;
+      tally.contentAttempted = 0;
+      tally.contentFailed = 0;
       await audit(db, "gmail.sync.expired", { priorCursor: priorState.cursorHistoryId }, actor);
       await runBootstrap();
     }
   }
 
   // §3.7 health snapshot — dims are independent; counts never masquerade
-  // as health by themselves.
+  // as health by themselves. The `content` dim (ADR-0016): degraded when
+  // any persist failed, healthy otherwise (no attempts = nothing observed
+  // wrong — the class may simply be disabled).
   const health: GmailSyncHealth = {
     process: tally.failed > 0 ? "degraded" : "healthy",
     credential: "healthy",
     cursor: tally.cursorHistoryId !== null ? "healthy" : "degraded",
     decode: tally.failed > 0 ? "degraded" : "healthy",
     quota: tally.deferred > 0 || tally.capped ? "degraded" : "healthy",
+    content: tally.contentFailed > 0 ? "degraded" : "healthy",
   };
   await upsertGmailSyncState(db, {
     cursorHistoryId: tally.cursorHistoryId,
@@ -658,6 +717,8 @@ export async function syncGmail(
     deferred: tally.deferred,
     cursor: tally.cursorHistoryId,
     fullResync,
+    contentAttempted: tally.contentAttempted,
+    contentFailed: tally.contentFailed,
   }, actor);
 
   return {

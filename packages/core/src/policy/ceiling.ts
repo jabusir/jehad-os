@@ -87,6 +87,13 @@ export interface GmailSensorPolicy {
   readonly maxMessagesPerPoll: number;
   /** Candidate-lane flood cap per UTC day (§6.6; default 20). */
   readonly maxCandidatesPerDay: number;
+  /**
+   * `gmail.content` class (ADR-0016): bounded body ingestion. Fail-safe
+   * default OFF; retention window + byte cap ride along (O-9 default 14d).
+   */
+  readonly contentEnabled: boolean;
+  readonly contentRetentionDays: number;
+  readonly contentMaxBodyBytes: number;
 }
 
 /** §10.3 defaults — fail-safe (disabled) until the owner ratifies. */
@@ -97,6 +104,9 @@ export const DEFAULT_GMAIL_SENSOR_POLICY: GmailSensorPolicy = {
   extractSenders: [],
   maxMessagesPerPoll: 50,
   maxCandidatesPerDay: 20,
+  contentEnabled: false,
+  contentRetentionDays: 7,
+  contentMaxBodyBytes: 256 * 1024,
 };
 
 /**
@@ -185,29 +195,48 @@ export function parseCalibrationEntry(value: string): CalibrationPolicy {
 const EXTRACT_SENDER_RE = /^[A-Za-z0-9_.%+-]*\*[A-Za-z0-9_.%+-]*@[A-Za-z0-9.*-]+|[A-Za-z0-9_.%+-]+@[A-Za-z0-9.*-]*\*[A-Za-z0-9.*-]*$/;
 
 /**
- * `sensors.gmail` flow-mapping parse — exactly
- * `{ enabled: <bool>, poll_cron: "<cron>", bootstrap_window_days: <int>,
- * extract_senders: [glob, …], max_messages_per_poll: <int>,
- * max_candidates_per_day: <int> }` in that key order (§10.3 strict shape;
- * the gateway.capture pattern). Anything else throws (fail closed).
+ * `sensors.gmail` flow-mapping parse — either the original six-key shape
+ * `{ enabled, poll_cron, bootstrap_window_days, extract_senders,
+ * max_messages_per_poll, max_candidates_per_day }` or the ADR-0016 extended
+ * shape appending `, content_enabled: <bool>, content_retention_days: <int>,
+ * content_max_body_bytes: <int>` (§10.3 strict shape; the gateway.capture
+ * pattern). Anything else throws (fail closed).
  */
 export function parseSensorsGmailEntry(value: string): GmailSensorPolicy {
   const m = value.match(
     /^\{\s*enabled:\s*(true|false),\s*poll_cron:\s*"([^"]+)",\s*bootstrap_window_days:\s*(\d+),\s*extract_senders:\s*\[([A-Za-z0-9_@.*%+\s,-]*)\],\s*max_messages_per_poll:\s*(\d+),\s*max_candidates_per_day:\s*(\d+)\s*\}$/,
   );
-  if (m === null) {
-    throw new Error(
-      `policy: sensors.gmail must be '{ enabled: <bool>, poll_cron: "<cron>", bootstrap_window_days: <int>, extract_senders: [glob, …], max_messages_per_poll: <int>, max_candidates_per_day: <int> }' (got '${value}')`,
+  if (m !== null) {
+    return buildSensorsGmail(m[1] === "true", m[2]!, Number(m[3]), m[4] ?? "", Number(m[5]), Number(m[6]), null);
+  }
+  const c = value.match(
+    /^\{\s*enabled:\s*(true|false),\s*poll_cron:\s*"([^"]+)",\s*bootstrap_window_days:\s*(\d+),\s*extract_senders:\s*\[([A-Za-z0-9_@.*%+\s,-]*)\],\s*max_messages_per_poll:\s*(\d+),\s*max_candidates_per_day:\s*(\d+),\s*content_enabled:\s*(true|false),\s*content_retention_days:\s*(\d+),\s*content_max_body_bytes:\s*(\d+)\s*\}$/,
+  );
+  if (c !== null) {
+    return buildSensorsGmail(
+      c[1] === "true", c[2]!, Number(c[3]), c[4] ?? "", Number(c[5]), Number(c[6]),
+      { enabled: c[7] === "true", retentionDays: Number(c[8]), maxBodyBytes: Number(c[9]) },
     );
   }
-  const [bootstrapDays, maxMessagesPerPoll, maxCandidatesPerDay] = [
-    Number(m[3]), Number(m[5]), Number(m[6]),
-  ];
+  throw new Error(
+    `policy: sensors.gmail must be '{ enabled: <bool>, poll_cron: "<cron>", bootstrap_window_days: <int>, extract_senders: [glob, …], max_messages_per_poll: <int>, max_candidates_per_day: <int>[, content_enabled: <bool>, content_retention_days: <int>, content_max_body_bytes: <int>] }' (got '${value}')`,
+  );
+}
+
+function buildSensorsGmail(
+  enabled: boolean,
+  pollCron: string,
+  bootstrapDays: number,
+  sendersRaw: string,
+  maxMessagesPerPoll: number,
+  maxCandidatesPerDay: number,
+  content: { readonly enabled: boolean; readonly retentionDays: number; readonly maxBodyBytes: number } | null,
+): GmailSensorPolicy {
   if (bootstrapDays <= 0 || maxMessagesPerPoll <= 0 || maxCandidatesPerDay <= 0) {
     throw new Error("policy: sensors.gmail caps must be positive");
   }
   const senders = [...new Set(
-    (m[4] ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0),
+    sendersRaw.split(",").map((x) => x.trim()).filter((x) => x.length > 0),
   )];
   for (const pattern of senders) {
     if (!EXTRACT_SENDER_RE.test(pattern)) {
@@ -216,13 +245,19 @@ export function parseSensorsGmailEntry(value: string): GmailSensorPolicy {
       );
     }
   }
+  if (content !== null && (content.retentionDays <= 0 || content.maxBodyBytes <= 0)) {
+    throw new Error("policy: sensors.gmail content caps must be positive");
+  }
   return {
-    enabled: m[1] === "true",
-    pollCron: m[2]!,
+    enabled,
+    pollCron,
     bootstrapDays,
     extractSenders: senders,
     maxMessagesPerPoll,
     maxCandidatesPerDay,
+    contentEnabled: content?.enabled ?? DEFAULT_GMAIL_SENSOR_POLICY.contentEnabled,
+    contentRetentionDays: content?.retentionDays ?? DEFAULT_GMAIL_SENSOR_POLICY.contentRetentionDays,
+    contentMaxBodyBytes: content?.maxBodyBytes ?? DEFAULT_GMAIL_SENSOR_POLICY.contentMaxBodyBytes,
   };
 }
 

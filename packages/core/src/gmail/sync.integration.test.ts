@@ -30,6 +30,9 @@ const POLICY = {
   extractSenders: ["billing@*", "*@stripe.com"],
   maxMessagesPerPoll: 50,
   maxCandidatesPerDay: 20,
+  contentEnabled: false,
+  contentRetentionDays: 7,
+  contentMaxBodyBytes: 256 * 1024,
 } as const;
 
 /** The 404-expiry contract error (the G1 adapter's class, structurally). */
@@ -108,7 +111,9 @@ function message(overrides: Partial<GmailMessage> & { id: string }): GmailMessag
     from: "Billing <billing@acme.com>",
     to: ["Jehad <jehad@example.com>"],
     subject: "Your September invoice",
+    snippet: "Your September invoice is ready",
     textPlain: null,
+    attachments: [],
     ...overrides,
   };
 }
@@ -167,8 +172,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail sync (integration)", () => {
     );
   }
 
-  it("bootstrap: empty cursor → window list → one event per message; cursor = newest historyId (§13.1)", async () => {
-    await setCursor(null);
+  it("bootstrap: empty cursor → window list → one event per message; cursor = newest historyId (§13.1)", async () => {    await setCursor(null);
     const fake = fakeGmail();
     fake.store.set("m1", message({ id: "m1" }));
     fake.store.set("m2", message({ id: "m2", from: "Sam <sam@other.org>" }));
@@ -214,6 +218,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail sync (integration)", () => {
       cursor: "healthy",
       decode: "healthy",
       quota: "healthy",
+      content: "healthy",
     });
     expect(s.lastTick?.toISOString()).toBe(NOW.toISOString());
   });
@@ -663,4 +668,49 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail sync (integration)", () => {
     expect((await state()).cursor).toBe(5000);
     expect((await state()).health.cursor).toBe("healthy");
   });
+  it("GC0 content lane: contentEnabled tick persists source records; disabled tick does not (ADR-0016)", async () => {
+    await setCursor(null);
+    const fake = fakeGmail();
+    fake.store.set("gc1", message({
+      id: "gc1",
+      threadId: "t-gc1",
+      from: "Acme Quotes <quotes@acme.com>",
+      subject: "Packaging quote",
+      snippet: "quote snippet",
+      textPlain: "GC0-SYNC-MARKER: $1.20/unit at 5000 MOQ",
+      attachments: [{ filename: "quote.pdf", mimeType: "application/pdf", size: 51234, attachmentId: "att-1" }],
+    }));
+    fake.bootstrapPage = { messages: [{ id: "gc1", threadId: "t-gc1" }], nextPageToken: null, historyId: 7100 };
+
+    const contentPolicy = { ...POLICY, contentEnabled: true };
+    const report = await syncGmail(db.pool, fake.adapter, { now, policy: contentPolicy });
+    expect(report.status).toBe("ok");
+    expect(report.health.content).toBe("healthy");
+
+    const rows = await db.pool.query(`SELECT gmail_message_id, body_text, attachments, source_trust_class FROM gmail_messages`);
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0]!.gmail_message_id).toBe("gc1");
+    expect(rows.rows[0]!.body_text).toContain("GC0-SYNC-MARKER");
+    expect(rows.rows[0]!.source_trust_class).toBe("untrusted_external");
+    expect(rows.rows[0]!.attachments).toEqual([
+      { filename: "quote.pdf", mimeType: "application/pdf", size: 51234, attachmentId: "att-1" },
+    ]);
+
+    // The observation event payload stays content-free (no body/snippet/subject).
+    const events = await db.pool.query(
+      `SELECT payload FROM events WHERE payload->>'messageId' = 'gc1'`,
+    );
+    expect(JSON.stringify(events.rows[0]!.payload)).not.toContain("GC0-SYNC-MARKER");
+    expect(JSON.stringify(events.rows[0]!.payload)).not.toContain("quote snippet");
+
+    // Disabled class: reset cursor, change the message, re-run → no new rows
+    // from the disabled tick (and the prior row is untouched by re-ingest).
+    await setCursor(null);
+    fake.store.set("gc2", message({ id: "gc2", threadId: "t-gc2", textPlain: "c2 body" }));
+    fake.bootstrapPage = { messages: [{ id: "gc2", threadId: "t-gc2" }], nextPageToken: null, historyId: 7200 };
+    await syncGmail(db.pool, fake.adapter, { now, policy: POLICY });
+    const after = await db.pool.query(`SELECT count(*)::int AS n FROM gmail_messages WHERE gmail_message_id = 'gc2'`);
+    expect(after.rows[0]!.n).toBe(0);
+  });
+
 });
