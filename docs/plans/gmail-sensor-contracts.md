@@ -8,6 +8,16 @@ calendar sensor (`packages/adapters/src/source-adapters/google-calendar.ts`,
 pipeline. **ADRs:** 0004 (candidates, never direct writes), 0007 (grants),
 0012 (model/data egress), 0013 (injection doors), 0014 (working memory).
 
+> **2026-09-22 update (ADR-0016):** the "bodies are never persisted"
+> guardrail below is superseded **for message bodies only** by
+> `docs/adr/ADR-0016-gmail-content-ingestion.md`: a bounded, policy-gated
+> `gmail.content` class (`sensors.gmail.content`) persists normalized
+> bodies in a retention-managed `gmail_messages` source table
+> (`source_trust_class='untrusted_external'`). Everything else here stands:
+> read-only scope, content-free observation events, allowlist extraction,
+> bodies-as-data-never-authority, ESCALATE-7's retention question is
+> answered by the ADR's policy window (O-9).
+
 Guardrails encoded here: **read-only toward Google** — `gmail.readonly`
 scope, GET-only calls, adversarially pinned; **the sensor NEVER sends,
 replies, or composes email in v1** — no code path from this sensor to

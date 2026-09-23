@@ -271,6 +271,27 @@ restore verifies **database rows AND artifact content** (plan §7, plan §15 M1)
 *Tests:* M1 — backup → destroy → restore → database + artifact both
 verifiably restored (plan §13, review §25).
 
+### T17 — Gmail content store: leak, over-retention, injection amplification (ADR-0016, 2026-09-22)
+
+Vector: bounded Gmail **body** persistence (ADR-0016 `gmail.content` class)
+creates a new sensitive store. Three sub-risks: (a) bodies leak into
+audit_log / event payloads / `model_calls` / metrics / logs; (b) bodies are
+retained indefinitely ("available ⇒ kept forever"); (c) hostile body text
+amplifies into authority (injection via stored source). Mitigations:
+ids/refs-only ledger payloads (existing rule, now scan-test-enforced);
+policy-gated class `sensors.gmail.content {enabled, retention_days,
+max_body_bytes}` with a deterministic retention sweeper and outcome/verifier
+artifact-pinning as the only extension path; `source_trust_class=
+'untrusted_external'` on every row + the ADR-0013 authorization invariant
+extended to stored-source reads (content may inform prose/evidence, never
+mint work, criteria, grants, actions, spend, or completion). Principal
+isolation is structural (principal_id scoping; cross-principal reads deny).
+
+*Tests:* GC0 suite — MIME variant fixtures; injection fixtures (hostile
+bodies quoted, never obeyed); no-body-leak scans across audit/events/
+model_calls; retention deletion test; foreign message-id/thread-id/
+cross-principal-search denial tests (roadmap §19 GC0).
+
 ---
 
 ## 4. Threat → acceptance-test mapping
@@ -298,6 +319,7 @@ mean waived.
 | T14 | Claim-not-fact test ("Company X has 3M customers" stays a claim/episode); 7-class promotion eval incl. claim-vs-fact | M5 | Phase 1 |
 | T15 | Fake federated domain exports only policy-approved sanitized metadata; fake opaque domain exports no semantic payload — personal DB clean | M4 (cleanup §3) | Phase 1 |
 | T16 | Backup → destroy → restore → database + artifact both verifiably restored | M1 | Phase 1 |
+| T17 | GC0 suite: injection fixtures; no-body-leak scans (audit/events/model_calls); retention sweeper; cross-principal denial (ADR-0016; roadmap §19 GC0) | GC0 (roadmap) | Accepted 2026-09-22 |
 
 Items from plan §13 not threat-bearing (audit trail item 10, human-blocked
 time item 12, leverage query, brief determinism) are tracked in
