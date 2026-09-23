@@ -223,21 +223,21 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail sync (integration)", () => {
     expect(s.lastTick?.toISOString()).toBe(NOW.toISOString());
   });
 
-  it("bootstrap replay: identical window → zero duplicate events (§13.1 dedupe)", async () => {
+  it("bootstrap replay: identical window → deduped refs skip free, zero duplicate events (§13.1 dedupe)", async () => {
     await setCursor(null);
     const before = await gmailEventCount();
     const fake = fakeGmail();
-    fake.store.set("m1", message({ id: "m1" }));
-    fake.store.set("m2", message({ id: "m2" }));
-    fake.store.set("m3", message({ id: "m3" }));
+    // m1/m2/m3 already ingested by the first bootstrap test — the replay
+    // window is fully known, so NOTHING is refetched (bounded-work rule).
     fake.bootstrapPage = {
       messages: [{ id: "m1", threadId: "t-m1" }, { id: "m2", threadId: "t-m2" }, { id: "m3", threadId: "t-m3" }],
       nextPageToken: null,
       historyId: 7000,
     };
     const report = await syncGmail(db.pool, fake.adapter, { now, policy: POLICY });
-    expect(report.deduped).toBe(3);
+    expect(report.deduped).toBe(0);
     expect(report.emitted).toBe(0);
+    expect(fake.fetched).toEqual([]); // known refs skip without getMessage
     expect(await gmailEventCount()).toBe(before);
     expect((await state()).cursor).toBe(7000);
   });
@@ -421,8 +421,9 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail sync (integration)", () => {
 
     expect(report.fullResync).toBe(true);
     expect(report.mode).toBe("bootstrap");
-    expect(report.emitted).toBe(1); // m9 only — m1/m4 deduped by externalId
-    expect(report.deduped).toBe(2);
+    expect(report.emitted).toBe(1); // m9 only — m1/m4 known, skipped free
+    expect(report.deduped).toBe(0);
+    expect(fake.fetched).toEqual(["m9"]); // known refs never refetched
     expect(await gmailEventCount()).toBe(before + 1);
     expect((await state()).cursor).toBe(9100);
 
@@ -644,7 +645,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail sync (integration)", () => {
     expect(normalized.senderSha256).toHaveLength(64);
   });
 
-  it("bootstrap flood cap: budget counts only new accepts; cursor held null until drained", async () => {
+  it("bootstrap flood cap: budget counts FETCHED refs; deduped refs skip free; converges across ticks", async () => {
     // Isolated cursor view: clear state first (this test owns its world).
     await db.pool.query(`DELETE FROM gmail_sync_state`);
     const capped = { ...POLICY, maxMessagesPerPoll: 2 };
@@ -658,16 +659,88 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail sync (integration)", () => {
     const first = await syncGmail(db.pool, fake.adapter, { now, policy: capped });
     expect(first.emitted).toBe(2);
     expect(first.capped).toBe(true);
+    expect(fake.fetched).toEqual(["b1", "b2"]); // budget = fetched refs, not accepts
     expect((await state()).cursor).toBeNull(); // not yet bootstrapped
     expect((await state()).health.cursor).toBe("degraded");
 
+    // Second tick: b1/b2 are known → skipped FREE (no refetch); the budget
+    // applies to the next unknown batch — b3 completes the drain.
     const second = await syncGmail(db.pool, fake.adapter, { now, policy: capped });
-    // b1/b2 are dedupes (free); b3 is the one new accept.
-    expect(second.deduped).toBe(2);
     expect(second.emitted).toBe(1);
+    expect(second.deduped).toBe(0);
+    expect(second.capped).toBe(false);
+    expect(fake.fetched).toEqual(["b1", "b2", "b3"]);
     expect((await state()).cursor).toBe(5000);
     expect((await state()).health.cursor).toBe("healthy");
   });
+
+  it("fully-deduped re-bootstrap is ONE cheap bounded pass: no refetches, cursor lands (GC0 dogfood finding)", async () => {
+    // The degenerate case that motivated the fix: every ref already has an
+    // accepted event (e.g. forced cursor clear after the window was
+    // ingested). The old cap (new accepts) never tripped → unbounded drain.
+    await db.pool.query(`DELETE FROM gmail_sync_state`);
+    const capped = { ...POLICY, maxMessagesPerPoll: 2 };
+    const fake = fakeGmail();
+    for (const id of ["d1", "d2", "d3", "d4", "d5"]) fake.store.set(id, message({ id }));
+    fake.bootstrapPage = {
+      messages: ["d1", "d2", "d3", "d4", "d5"].map((id) => ({ id, threadId: `t-${id}` })),
+      nextPageToken: null,
+      historyId: 5100,
+    };
+    // Seed the events so every ref is known BEFORE the bootstrap tick.
+    const seeded = await syncGmail(db.pool, fake.adapter, { now, policy: POLICY });
+    expect(seeded.emitted).toBe(5);
+    fake.fetched.length = 0;
+
+    await db.pool.query(`UPDATE gmail_sync_state SET cursor_history_id = NULL WHERE id = 'singleton'`);
+    const drained = await syncGmail(db.pool, fake.adapter, { now, policy: capped });
+    expect(drained.emitted).toBe(0);
+    expect(drained.capped).toBe(false); // nothing needed fetching
+    expect(fake.fetched).toEqual([]);   // deduped refs skipped without a single getMessage
+    expect((await state()).cursor).toBe(5100); // cursor lands — bootstrap DONE
+    expect((await state()).health.cursor).toBe("healthy");
+  });
+
+  it("mixed re-bootstrap: at most K fetched refs per tick; cursor lands only on full drain (regression: unbounded deduped drain)", async () => {
+    await db.pool.query(`DELETE FROM gmail_sync_state`);
+    const capped = { ...POLICY, maxMessagesPerPoll: 3 };
+    const fake = fakeGmail();
+    for (const id of ["k1", "k2", "k3", "u1", "u2", "u3", "u4", "u5", "u6"]) {
+      fake.store.set(id, message({ id }));
+    }
+    // Seeding tick sees ONLY the k-window: k1..k3 become known; u-refs are
+    // not yet listed (the mailbox "grows" them for the capped ticks below).
+    fake.bootstrapPage = {
+      messages: ["k1", "k2", "k3"].map((id) => ({ id, threadId: `t-${id}` })),
+      nextPageToken: null,
+      historyId: 5100,
+    };
+    const seeded = await syncGmail(db.pool, fake.adapter, { now, policy: POLICY });
+    expect(seeded.emitted).toBe(3);
+    fake.fetched.length = 0;
+    await db.pool.query(`UPDATE gmail_sync_state SET cursor_history_id = NULL WHERE id = 'singleton'`);
+
+    // The re-listed window now includes 6 unknown refs beyond the known 3.
+    fake.bootstrapPage = {
+      messages: ["k1", "k2", "k3", "u1", "u2", "u3", "u4", "u5", "u6"].map((id) => ({ id, threadId: `t-${id}` })),
+      nextPageToken: null,
+      historyId: 5200,
+    };
+
+    const tick1 = await syncGmail(db.pool, fake.adapter, { now, policy: capped });
+    expect(tick1.capped).toBe(true);
+    expect(fake.fetched).toEqual(["u1", "u2", "u3"]); // K budget on unknowns only
+    expect((await state()).cursor).toBeNull();
+
+    const tick2 = await syncGmail(db.pool, fake.adapter, { now, policy: capped });
+    // u4..u6 are the last 3 unknowns — the budget hits K exactly at the end
+    // of the page, so the drain COMPLETES this tick (cap is checked before
+    // fetching; a full page drain at exactly K is completion, not a cap).
+    expect(tick2.capped).toBe(false);
+    expect(fake.fetched).toEqual(["u1", "u2", "u3", "u4", "u5", "u6"]); // resumed past known, nothing refetched
+    expect((await state()).cursor).toBe(5200);
+  });
+
   it("GC0 content lane: contentEnabled tick persists source records; disabled tick does not (ADR-0016)", async () => {
     await setCursor(null);
     const fake = fakeGmail();

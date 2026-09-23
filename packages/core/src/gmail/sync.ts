@@ -7,10 +7,12 @@
 //
 // Bootstrap (§3.4): empty cursor → messages.list over the policy window;
 // the newest historyId becomes the cursor once the window is fully
-// drained (a capped bootstrap keeps the cursor null and re-lists next
-// tick — externalId dedupe makes the re-list free of duplicate events,
-// and only NEW accepts consume the per-poll budget, so every tick makes
-// progress). 404 expiry (§3.5): the adapter surfaces GmailHistoryExpired
+// drained. A capped bootstrap keeps the cursor null and converges across
+// ticks: deduped refs (events already accepted) skip free via a batched
+// existence check, and the per-poll budget counts FETCHED refs — so a
+// fully-deduped re-bootstrap is one cheap pass (cursor lands, done), and
+// a mixed window processes at most max_messages_per_poll unknown refs per
+// tick (bounded work even when nothing is "new" — GC0 dogfood finding). 404 expiry (§3.5): the adapter surfaces GmailHistoryExpired
 // (isHistoryExpired below) → cursor cleared → automatic re-bootstrap with
 // idempotent re-emit (the calendar 410 precedent).
 //
@@ -30,6 +32,7 @@ import { createHash } from "node:crypto";
 import { recordAudit, type SqlExecutor } from "../actions/audit.js";
 import { acceptEvent, type EventStoreExecutor } from "../events/store.js";
 import { LATEST_PAYLOAD_SCHEMA_VERSION } from "../events/catalog.js";
+import { idempotencyKeyFor } from "../events/envelope.js";
 import { DEFAULT_GMAIL_SENSOR_POLICY, type GmailSensorPolicy } from "../policy/ceiling.js";
 import { extractCandidates, landGmailCandidates, normalizeFromAddress } from "./extraction.js";
 import { persistGmailContent, type GmailAttachmentRecord } from "./content.js";
@@ -365,6 +368,8 @@ interface TickTally {
   /** ADR-0016 content lane (GC0): attempts vs failures (audit/health only). */
   contentAttempted: number;
   contentFailed: number;
+  /** Bounded-work bootstrap rule: refs actually fetched this tick (§3.4). */
+  bootstrapProcessed: number;
 }
 
 /**
@@ -565,33 +570,63 @@ export async function syncGmail(
     cursorHistoryId: null,
     contentAttempted: 0,
     contentFailed: 0,
+    bootstrapProcessed: 0,
   };
 
-  // §3.4 bootstrap: drain the window list; ONLY new accepts consume the
-  // per-poll budget (dedupes are free), so a capped bootstrap converges
-  // across ticks. The cursor stays null until the window fully drains.
+  // §3.4 bootstrap: drain the window list. Budget rule (bounded-work, GC0
+  // dogfood finding): at most max_messages_per_poll refs are FETCHED per
+  // tick — deduped refs (events already in the store, batched existence
+  // check) skip free without a fetch, so a fully-deduped re-bootstrap
+  // (forced cursor clear, 404-expiry recovery) cannot become unbounded
+  // work just because nothing is "new". A capped window converges across
+  // ticks: fetched refs become known, so the next tick's budget applies to
+  // the next unknown batch. The cursor stays null until the window fully
+  // drains (list has no resumable position; setting it early would strand
+  // the undrained middle forever). Known-refs skip also means content
+  // backfill is not re-run for pre-content messages after a cursor loss —
+  // bounded work wins; a manual drain is the owner-correctable path.
   async function runBootstrap(): Promise<void> {
     let completed = true;
     let pageToken: string | undefined;
     let newestHistoryId = 0;
+    let processed = 0;
     do {
       const page = await adapter.listBootstrapMessages({
         newerThanDays: policy.bootstrapDays,
         pageToken,
       });
       newestHistoryId = page.historyId;
+      const known = await knownEventKeys(page.messages.map((r) => r.id));
       for (const ref of page.messages) {
-        if (tally.emitted >= policy.maxMessagesPerPoll) {
+        if (known.has(idempotencyKeyFor(adapter.id, `${GMAIL_EXTERNAL_ID_PREFIX}${ref.id}`))) continue;
+        if (processed >= policy.maxMessagesPerPoll) {
           tally.capped = true;
           completed = false;
           break;
         }
+        processed += 1;
         await processMessage(ref);
       }
       if (!completed) break;
       pageToken = page.nextPageToken ?? undefined;
     } while (pageToken !== undefined);
     tally.cursorHistoryId = completed ? newestHistoryId : null;
+    tally.bootstrapProcessed = processed;
+  }
+
+  /** One batched existence check: which of these message ids already have
+   *  accepted events? Keys are minted exactly as acceptEvent does —
+   *  idempotencyKeyFor(source, `gmail:<id>`) (sha256; envelope.ts). Fail
+   *  open to an empty set is WRONG (refetch storm) — a query failure
+   *  propagates (tick fails, cursor untouched, next tick retries). */
+  async function knownEventKeys(messageIds: readonly string[]): Promise<Set<string>> {
+    if (messageIds.length === 0) return new Set();
+    const keys = messageIds.map((id) => idempotencyKeyFor(adapter.id, `${GMAIL_EXTERNAL_ID_PREFIX}${id}`));
+    const result = await db.query(
+      `SELECT idempotency_key FROM events WHERE idempotency_key = ANY($1::text[])`,
+      [keys],
+    );
+    return new Set((result.rows as { idempotency_key: string }[]).map((r) => r.idempotency_key));
   }
 
   // §3.3 incremental: walk history pages; the cursor advances only past
@@ -678,6 +713,7 @@ export async function syncGmail(
       tally.cursorHistoryId = null;
       tally.contentAttempted = 0;
       tally.contentFailed = 0;
+      tally.bootstrapProcessed = 0;
       await audit(db, "gmail.sync.expired", { priorCursor: priorState.cursorHistoryId }, actor);
       await runBootstrap();
     }
@@ -719,6 +755,7 @@ export async function syncGmail(
     fullResync,
     contentAttempted: tally.contentAttempted,
     contentFailed: tally.contentFailed,
+    bootstrapProcessed: tally.bootstrapProcessed,
   }, actor);
 
   return {
