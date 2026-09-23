@@ -27,10 +27,17 @@ export async function runGrantReminderTick(
 ): Promise<GrantReminderOutcome> {
   const now = opts.now?.() ?? new Date();
   const target = REMINDER_GRANTS[0]!;
+  // EARLIEST-expiring live grant, not latest: the reminder must protect the
+  // token the sensor actually holds. A minted-but-never-deployed newer
+  // grant would otherwise park the reminder past the held token's death
+  // (F5 finding, 2026-09-22: sensor held the Sep 25 grant while the
+  // reminder aimed at a Sep 28 mint — two days late). renew:ingest now
+  // revokes superseded grants, so drift self-heals; earliest is the
+  // conservative target either way.
   const grant = await pool.query(
     `SELECT id, expires_at FROM capability_grants
       WHERE capability = $1 AND resource = $2 AND revoked_at IS NULL
-      ORDER BY expires_at DESC LIMIT 1`,
+      ORDER BY expires_at ASC LIMIT 1`,
     [target.capability, target.resource],
   );
   const row = grant.rows[0];
@@ -77,7 +84,7 @@ export async function runGrantReminderTick(
       createdBy: String(service.rows[0].id),
     },
     // Policy config explicit: the reminder must be born approved and
-    // claimable (Sep 26 deadline path) — never the default fallback.
+    // claimable (the F5 renewal-deadline path) — never the default fallback.
     {
       actor: opts.actor ?? "system:grant-reminder",
       now: () => now,

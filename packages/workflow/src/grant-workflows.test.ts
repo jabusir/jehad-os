@@ -1,10 +1,11 @@
-// Grant-expiry reminder tick (owner directive 2026-09-21): the Sep 26
-// deadline path. Integration-only — the tick drives real SQL end to end.
-// Needs PostgreSQL 16, skipped unless TEST_DATABASE_URL is set (per-file
-// isolated db). Pins the F1/F2 contract: the workflow-path grant-reminder
-// notification lands APPROVED under the repo-root policy (the tick loads
-// the config itself — never the default fallback), hence claimable by the
-// edge, and the once-per-grant dedupe holds.
+// Grant-expiry reminder tick (owner directive 2026-09-21; F5). Integration
+// only — the tick drives real SQL end to end. Needs PostgreSQL 16, skipped
+// unless TEST_DATABASE_URL is set (per-file isolated db). Pins the F1/F2
+// contract: the workflow-path grant-reminder notification lands APPROVED
+// under the repo-root policy (the tick loads the config itself — never the
+// default fallback), hence claimable by the edge, the once-per-grant dedupe
+// holds, and (F5 fix, 2026-09-22) the reminder targets the EARLIEST-
+// expiring live grant — the token the sensor actually holds.
 
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -82,9 +83,24 @@ describe.skipIf(!TEST_DATABASE_URL)("grant-expiry-reminder tick (integration)", 
     expect(count.rows[0].n).toBe(1);
   });
 
-  it("outside the window (more than 48h left) → no reminder", async () => {
+  it("outside the window (only far-future grants live) → no reminder", async () => {
+    // Clean world: retire the earlier, already-reminded grant so the
+    // earliest-live target is the far-future one this test seeds.
+    await db.pool.query("UPDATE capability_grants SET revoked_at = now() WHERE revoked_at IS NULL");
     await seedGrant(new Date(NOW.getTime() + 7 * 24 * 60 * 60 * 1000));
     const outcome = await runGrantReminderTick(db.pool, { now });
     expect(outcome).toMatchObject({ status: "outside-window" });
+  });
+
+  it("F5 regression: two live grants → the reminder targets the EARLIEST (the sensor-held token), not the newest mint", async () => {
+    // The 2026-09-22 finding: the sensor's Keychain held a grant expiring
+    // Sep 25 while a minted-but-never-deployed Sep 28 grant existed; the
+    // latest-first query aimed the reminder two days past the sensor's
+    // death. Earliest-first is the conservative contract.
+    await db.pool.query("UPDATE capability_grants SET revoked_at = now() WHERE revoked_at IS NULL");
+    const heldToken = await seedGrant(new Date(NOW.getTime() + 26 * 60 * 60 * 1000)); // dies first
+    await seedGrant(new Date(NOW.getTime() + 96 * 60 * 60 * 1000)); // newer mint, later expiry
+    const outcome = await runGrantReminderTick(db.pool, { now });
+    expect(outcome).toMatchObject({ status: "reminded", grantId: heldToken });
   });
 });
