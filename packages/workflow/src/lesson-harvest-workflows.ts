@@ -61,6 +61,9 @@ export const SAFE_FALLBACK_THRESHOLD = 1;
 export const EXPIRED_RATIFIED_THRESHOLD = 1;
 /** Rate-limit denials must repeat this often (per principal) to earn one. */
 export const RATE_LIMIT_THRESHOLD = 3;
+/** Action attempts stuck `unknown` longer than this earn the ADR-0011
+ *  reconciliation lesson (NOW wave: reconcile-unknown sentinel). */
+export const UNKNOWN_ATTEMPT_MIN_AGE_HOURS = 24;
 /** The F3 dead-letter scope: ratified (auto-approved) notification kinds. */
 export const RATIFIED_SENTINEL_KINDS: readonly string[] = [
   "calibration",
@@ -73,6 +76,7 @@ const SAFE_FALLBACK = "safe_fallback";
 export const CLAIM_DRIFT_SUBJECT_PREFIX = "answers drift on";
 export const EXPIRED_RATIFIED_SUBJECT = "ratified notifications expire undelivered";
 export const RATE_LIMIT_SUBJECT = "reply budget denials repeat";
+export const UNKNOWN_ATTEMPT_SUBJECT = "action outcomes stuck unknown";
 
 export interface LessonHarvestResult {
   readonly proposed: number;
@@ -80,6 +84,7 @@ export interface LessonHarvestResult {
   readonly claimAuditRows: number;
   readonly expiredRatified: number;
   readonly rateLimited: number;
+  readonly unknownAttempts: number;
   readonly scope: readonly string[];
 }
 
@@ -308,6 +313,51 @@ export function aggregateRateLimits(
 }
 
 /**
+ * ADR-0011 reconcile-unknown sentinel (NOW wave): action attempts whose
+ * outcome is still `unknown` after UNKNOWN_ATTEMPT_MIN_AGE_HOURS. One
+ * candidate covers the tick's findings — each unknown is honest until
+ * reconciled, but an AGING unknown means reconciliation never ran.
+ */
+export async function aggregateUnknownAttempts(
+  db: SqlExecutor,
+  now: Date,
+): Promise<{ unknownAttempts: number; candidates: LessonCandidate[] }> {
+  // No window bound: an unknown attempt does not stop needing reconciliation
+  // because it aged out of a scan window. Bounded by reality — outcome
+  // 'unknown' is rare by design (ADR-0011) and reconciled rows leave the set.
+  const cutoff = new Date(now.getTime() - UNKNOWN_ATTEMPT_MIN_AGE_HOURS * 3_600_000).toISOString();
+  const rows = await db.query(
+    `SELECT id, started_at, provider FROM action_attempts
+      WHERE outcome = 'unknown'
+        AND started_at < $1::timestamptz
+      ORDER BY started_at ASC, id ASC`,
+    [cutoff],
+  );
+  const typed = rows.rows as { id: string; started_at: Date | string; provider: string }[];
+  if (typed.length === 0) return { unknownAttempts: 0, candidates: [] };
+  const civil = (value: Date | string): string =>
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Los_Angeles",
+      month: "short",
+      day: "numeric",
+    }).format(value instanceof Date ? value : new Date(value));
+  const dates = [...new Set(typed.map((row) => civil(row.started_at)))];
+  return {
+    unknownAttempts: typed.length,
+    candidates: [
+      {
+        subject: UNKNOWN_ATTEMPT_SUBJECT,
+        note:
+          `${typed.length} action ${typed.length === 1 ? "attempt" : "attempts"} still ` +
+          `unknown beyond ${UNKNOWN_ATTEMPT_MIN_AGE_HOURS}h on ${dates.join(", ")} — ` +
+          `reconciliation owed (ADR-0011)`,
+        sourceRefs: typed.map((row) => row.id),
+      },
+    ],
+  };
+}
+
+/**
  * One harvest tick against an injected executor. `principalIds` is the
  * attribution scope (the nightly workflow resolves it from policy.yaml's
  * gateway principals; tests pass ids directly). Re-runs are idempotent by
@@ -321,7 +371,7 @@ export async function runLessonHarvestTick(
   const scope = [...new Set(opts.principalIds)];
   if (scope.length === 0) {
     console.log(JSON.stringify({ workflow: "lesson-harvest", status: "no-scope" }));
-    return { proposed: 0, refreshed: 0, claimAuditRows: 0, expiredRatified: 0, rateLimited: 0, scope: [] };
+    return { proposed: 0, refreshed: 0, claimAuditRows: 0, expiredRatified: 0, rateLimited: 0, unknownAttempts: 0, scope: [] };
   }
   const sinceIso = new Date(now.getTime() - LESSON_HARVEST_WINDOW_HOURS * 3_600_000).toISOString();
 
@@ -333,6 +383,7 @@ export async function runLessonHarvestTick(
     await loadAuditRefs(db, "notification.expired", sinceIso),
   );
   const rate = aggregateRateLimits(await loadAuditRefs(db, "imessage.converse.rate-limited", sinceIso));
+  const unknown = await aggregateUnknownAttempts(db, now);
 
   let proposed = 0;
   let refreshed = 0;
@@ -341,6 +392,7 @@ export async function runLessonHarvestTick(
       ...claim.candidates,
       ...expired.candidates,
       ...(rate.perPrincipal.get(principalId) ?? []),
+      ...unknown.candidates,
     ].sort((a, b) => (a.subject < b.subject ? -1 : a.subject > b.subject ? 1 : 0));
     for (const candidate of candidates) {
       const { created } = await proposeLesson(
@@ -371,6 +423,7 @@ export async function runLessonHarvestTick(
     claimAuditRows: claim.claimAuditRows,
     expiredRatified: expired.expiredRatified,
     rateLimited: rate.rateLimited,
+    unknownAttempts: unknown.unknownAttempts,
     scope,
   };
   console.log(JSON.stringify({ workflow: "lesson-harvest", ...result }));

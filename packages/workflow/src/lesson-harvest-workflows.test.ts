@@ -74,6 +74,9 @@ describe.skipIf(!TEST_DATABASE_URL)("lesson-harvest tick (integration)", () => {
     await db.pool.query(`DELETE FROM feedback WHERE item_type = 'lesson'`);
     await db.pool.query(`DELETE FROM audit_log WHERE actor = 'system:test'`);
     await db.pool.query(`DELETE FROM notifications WHERE title = 'harvest-test'`);
+    await db.pool.query(`DELETE FROM action_attempts WHERE provider = 'test-provider'`);
+    await db.pool.query(`DELETE FROM action_intents WHERE capability = 'act:test'`);
+    await db.pool.query(`DELETE FROM runs WHERE kind = 'workflow'`);
   });
 
   async function seedAudit(action: string, ref: unknown, occurredAt: Date): Promise<string> {
@@ -207,6 +210,66 @@ describe.skipIf(!TEST_DATABASE_URL)("lesson-harvest tick (integration)", () => {
     expect([...(rows[1]!.source_refs as string[])].sort()).toEqual([...rateIds].sort());
   });
 
+  it("reconcile-unknown sentinel: attempts stuck unknown beyond 24h earn one lesson; fresh unknowns and reconciled rows never count", async () => {
+    // Parent intent (FK target) + domain (this suite seeds no domains).
+    await db.pool.query(
+      `INSERT INTO domains (key, name, sensitivity, retention_class, storage_mode)
+       VALUES ('personal', 'Personal', 'normal', 'standard', 'local') ON CONFLICT (key) DO NOTHING`,
+    );
+    const domainRow = await db.pool.query("SELECT id FROM domains WHERE key = 'personal'");
+    const runRow = await db.pool.query(
+      `INSERT INTO runs (kind, status, principal_id, domain_id)
+       SELECT 'workflow', 'running', p.id, d.id FROM principals p, domains d
+       WHERE p.id = $1::uuid AND d.key = 'personal' RETURNING id`,
+      [principalId],
+    );
+    const intent = await db.pool.query(
+      `INSERT INTO action_intents (run_id, capability, resource, domain_id, status)
+       VALUES ($1::uuid, 'act:test', 'test', $2::uuid, 'approved') RETURNING id`,
+      [String(runRow.rows[0]!.id), String(domainRow.rows[0]!.id)],
+    );
+    const intentId = String(intent.rows[0]!.id);
+
+    async function seedAttempt(outcome: string, startedAt: Date): Promise<string> {
+      const row = await db.pool.query(
+        `INSERT INTO action_attempts (intent_id, provider, outcome, started_at)
+         VALUES ($1::uuid, 'test-provider', $2, $3::timestamptz) RETURNING id`,
+        [intentId, outcome, startedAt.toISOString()],
+      );
+      return String(row.rows[0]!.id);
+    }
+
+    // NOW is 2026-09-22T12:00Z. No scan window for this signal: an unknown
+    // attempt owes reconciliation regardless of age. Aging unknown: 2 days ✓.
+    const agingUnknown = await seedAttempt("unknown", new Date(NOW.getTime() - 48 * 3_600_000));
+    // Fresh unknown: 2h old — honest unknown, not yet owed reconciliation.
+    await seedAttempt("unknown", new Date(NOW.getTime() - 2 * 3_600_000));
+    // Ancient unknown (3 days): STILL owed — age never excuses it.
+    const ancientUnknown = await seedAttempt("unknown", new Date(NOW.getTime() - 72 * 3_600_000));
+    // Reconciled: never counts (distinct started_at — (intent, started_at) is unique).
+    await seedAttempt("reconciled", new Date(NOW.getTime() - 47 * 3_600_000));
+
+    const result = await runLessonHarvestTick(db.pool, { principalIds: [principalId], now: NOW });
+    expect(result.unknownAttempts).toBe(2);
+
+    const rows = await lessonRows();
+    const mine = rows.find((r) => r.item_id === "action outcomes stuck unknown");
+    expect(mine).toBeDefined();
+    expect(mine!.verdict).toBe("proposed");
+    expect(mine!.note).toBe(
+      "2 action attempts still unknown beyond 24h on Sep 19, Sep 20 — reconciliation owed (ADR-0011)",
+    );
+    expect(mine!.source_refs).toEqual([ancientUnknown, agingUnknown]);
+
+    // Idempotent: a second tick refreshes, never duplicates.
+    const again = await runLessonHarvestTick(db.pool, { principalIds: [principalId], now: NOW });
+    expect(again.unknownAttempts).toBe(2);
+    const count = await db.pool.query(
+      `SELECT count(*)::int AS n FROM feedback WHERE item_type = 'lesson' AND item_id = 'action outcomes stuck unknown'`,
+    );
+    expect(count.rows[0].n).toBe(1);
+  });
+
   it("an empty day proposes nothing and never crashes", async () => {
     const result = await runLessonHarvestTick(db.pool, { principalIds: [principalId], now: NOW });
     expect(result).toEqual({
@@ -215,6 +278,7 @@ describe.skipIf(!TEST_DATABASE_URL)("lesson-harvest tick (integration)", () => {
       claimAuditRows: 0,
       expiredRatified: 0,
       rateLimited: 0,
+      unknownAttempts: 0,
       scope: [principalId],
     });
     expect(await lessonRows()).toEqual([]);
