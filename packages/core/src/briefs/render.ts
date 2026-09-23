@@ -221,6 +221,10 @@ export function renderOutcomesSection(outcomes: OutcomesBriefSection | null | un
   lines.push(...cap(outcomes.needsYou, (o) => `- ${o.ref} needs your verification — "${o.title}"`));
   lines.push(...cap(outcomes.active, (o) => `- ${o.ref} in progress — "${o.title}"`));
   lines.push(...cap(outcomes.resolved, (o) => `- ${o.ref} ${o.status === "completed" ? "completed" : "failed"} — "${o.title}"`));
+  for (const result of outcomes.results ?? []) {
+    const summary = result.summary.length > 0 ? `: ${result.summary}` : "";
+    lines.push(`- ${result.ref} ${result.role} result — "${result.title}"${summary}`);
+  }
   return lines.length > 1 ? lines : [];
 }
 

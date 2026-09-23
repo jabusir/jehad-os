@@ -106,6 +106,15 @@ export interface OutcomesBriefSection {
   readonly active: readonly OutcomeBriefItem[];
   /** Terminal transitions inside the delta window (completed/failed). */
   readonly resolved: readonly OutcomeBriefItem[];
+  /** D2: assignment results delivered inside the window (the answer the brief carries). */
+  readonly results: readonly OutcomeBriefResult[];
+}
+
+export interface OutcomeBriefResult {
+  readonly ref: string;
+  readonly role: string;
+  readonly title: string;
+  readonly summary: string;
 }
 
 export interface MorningBriefData {
@@ -309,8 +318,28 @@ async function collectOutcomesBriefSection(
   const needsYou = open.rows.filter((r) => String(r.status) === "waiting_user").map(toItem);
   const active = open.rows.filter((r) => String(r.status) !== "waiting_user").map(toItem);
   const resolvedItems = resolved.rows.map(toItem);
-  if (needsYou.length + active.length + resolvedItems.length === 0) return null;
-  return { needsYou, active, resolved: resolvedItems };
+  // D2: assignment results delivered in the window — the artifact title +
+  // summary are what the brief carries forward (the verified answer).
+  const resultRows = await db.query(
+    `SELECT o.ref AS outcome_ref, a.role, a.result->'artifact'->>'title' AS title,
+            a.result->>'summary' AS summary
+       FROM assignments a JOIN outcomes o ON o.id = a.outcome_id
+      WHERE a.principal_id = $1::uuid AND a.status = 'succeeded'
+        AND o.status <> 'cancelled'
+        AND a.updated_at >= $2::timestamptz
+      ORDER BY a.updated_at DESC LIMIT 4`,
+    [principalId, since.toISOString()],
+  );
+  const results = resultRows.rows
+    .filter((row) => row.title !== null)
+    .map((row) => ({
+      ref: String(row.outcome_ref),
+      role: String(row.role),
+      title: String(row.title),
+      summary: String(row.summary ?? "").slice(0, 200),
+    }));
+  if (needsYou.length + active.length + resolvedItems.length + results.length === 0) return null;
+  return { needsYou, active, resolved: resolvedItems, results };
 }
 
 export async function collectMorningBriefData(

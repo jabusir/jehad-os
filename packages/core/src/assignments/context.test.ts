@@ -39,7 +39,7 @@ describe.skipIf(!TEST_DATABASE_URL)("context package builder (D1)", () => {
     });
     expect(pkg.startsWith(CONTEXT_CAVEAT)).toBe(true);
     expect(pkg).toContain("TASK: Summarize pending billing threads");
-    expect(pkg).toContain("[Gmail (recent metadata");
+    expect(pkg).toContain("[Gmail (last 8 received");
     expect(pkg).toContain("[Commitments (open)]");
     // calendar planned-only framing rides its label
     expect(pkg).not.toContain("[Calendar");

@@ -124,6 +124,8 @@ export const RESULT_TITLE_MAX_CHARS = 200;
 export const RESULT_MAX_CITATIONS = 20;
 export const RESULT_CITATION_REF_MAX_CHARS = 100;
 export const RESULT_CITATION_NOTE_MAX_CHARS = 300;
+export const RESULT_MAX_OPEN_QUESTIONS = 5;
+export const RESULT_OPEN_QUESTION_MAX_CHARS = 200;
 /** The stored input package may not exceed this (bounded context, §12). */
 export const ASSIGNMENT_INPUT_MAX_CHARS = 16_000;
 
@@ -133,12 +135,16 @@ export interface AssignmentCitation {
   readonly note?: string;
 }
 
-/** The validated result envelope a worker returns (roadmap §8.3). */
+/** The validated result envelope a worker returns (roadmap §8.3 + D2). */
 export interface AssignmentResult {
   readonly summary: string;
   readonly artifactTitle: string;
   readonly artifactBody: string;
   readonly citations: readonly AssignmentCitation[];
+  /** D2: the worker's self-assessed grounding confidence, 0..1. */
+  readonly confidence: number | null;
+  /** D2: what the worker could NOT answer from the package (bounded). */
+  readonly openQuestions: readonly string[];
   readonly costUsd: number;
 }
 
@@ -185,11 +191,33 @@ export function parseAssignmentResult(raw: unknown): AssignmentResult {
   if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) {
     throw new AssignmentError("assignment result costUsd must be a non-negative number");
   }
+  // D2: confidence (0..1) and open_questions are OPTIONAL but bounded.
+  let confidence: number | null = null;
+  if (obj.confidence !== undefined && obj.confidence !== null) {
+    if (typeof obj.confidence !== "number" || !Number.isFinite(obj.confidence) || obj.confidence < 0 || obj.confidence > 1) {
+      throw new AssignmentError("assignment result confidence must be within 0..1");
+    }
+    confidence = obj.confidence;
+  }
+  let openQuestions: string[] = [];
+  if (obj.open_questions !== undefined && obj.open_questions !== null) {
+    if (!Array.isArray(obj.open_questions) || obj.open_questions.length > RESULT_MAX_OPEN_QUESTIONS) {
+      throw new AssignmentError(`assignment result open_questions must be an array (≤ ${RESULT_MAX_OPEN_QUESTIONS})`);
+    }
+    openQuestions = obj.open_questions.map((q) => {
+      if (typeof q !== "string" || q.trim().length === 0 || q.length > RESULT_OPEN_QUESTION_MAX_CHARS) {
+        throw new AssignmentError(`each open question must be a non-empty string (≤ ${RESULT_OPEN_QUESTION_MAX_CHARS} chars)`);
+      }
+      return q.trim();
+    });
+  }
   return {
     summary: summary.trim(),
     artifactTitle: title.trim(),
     artifactBody: body,
     citations,
+    confidence,
+    openQuestions,
     costUsd: cost,
   };
 }
@@ -467,6 +495,8 @@ export async function completeAssignment(
         summary: parsed.summary,
         artifact: { title: parsed.artifactTitle, body: parsed.artifactBody },
         citations: parsed.citations,
+        confidence: parsed.confidence,
+        openQuestions: parsed.openQuestions,
         costUsd: parsed.costUsd,
         evidenceIds,
       }),

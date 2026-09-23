@@ -483,7 +483,7 @@ describe.skipIf(!TEST_DATABASE_URL)("executor assignment dispatch (D1: the worke
     const oversized = JSON.stringify({
       summary: "s",
       artifact: { title: "t", body: "x".repeat(9000) },
-      citations: [],
+      citations: [{ ref: "[Gmail] billing@acme.com", note: "grounds it" }],
       costUsd: 0,
     });
     const harness = fakeHarness(oversized);
