@@ -13,10 +13,12 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
-    "@jehad/workflow": "workspace:*"
+    "@jehad/workflow": "workspace:*",
+    "pg": "^8.13.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
