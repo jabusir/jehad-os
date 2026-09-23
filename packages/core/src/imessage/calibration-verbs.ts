@@ -88,6 +88,63 @@ export function missEligibility(input: MissEligibilityInput): MissEligibility {
     : "not-eligible";
 }
 
+// ------------------------------------------- explicit correction intake §9
+
+/**
+ * A structured day-state correction (quality fix 2026-09-23 §9): explicit
+ * mismatch feedback like "you missed X", "I skipped the 3pm thing",
+ * "I did them in a different order". Small fixed taxonomy — deliberately
+ * NOT a generic behavior classifier; every pattern below requires a
+ * first-person correction or a direct "you missed/your picture" address
+ * so ordinary chat ("I skipped leg day" gossip) never rides this lane.
+ */
+export type CalibrationCorrectionCategory =
+  | "planned_not_observed"
+  | "observed_but_missing"
+  | "wrong_sequence"
+  | "wrong_priority"
+  | "wrong_completion_state"
+  | "source_coverage_gap"
+  | "overclaim";
+
+export interface CalibrationCorrectionMatch {
+  readonly category: CalibrationCorrectionCategory;
+}
+
+/**
+ * Ordered most-specific-first; first match wins. Order-priority:
+ * sequence/priority/completion claims are more specific than the broad
+ * planned-not-observed denial, and "you missed" (observed gap) is the
+ * canonical correction the daily check invites.
+ */
+const CORRECTION_GRAMMARS: readonly {
+  readonly category: CalibrationCorrectionCategory;
+  readonly re: RegExp;
+}[] = [
+  { category: "wrong_sequence", re: /\b(?:in |the )?(?:a )?different order|out of order|wrong order|didn'?t follow the (?:calendar )?order|sequence was (?:wrong|off)/i },
+  { category: "wrong_priority", re: /\b(?:the )?(?:biggest|most important|main) (?:thing|part) was|what (?:actually )?mattered was|priority was (?:wrong|off)/i },
+  { category: "source_coverage_gap", re: /\byour (?:picture|info|data|sources) (?:is |are )?(?:wrong|incomplete|missing)|you can'?t see\b|not connected/i },
+  { category: "observed_but_missing", re: /\byou missed\b|you don'?t (?:know|mention|have)|left out|didn'?t show up (?:in|on) your|your picture (?:missed|left)|\bi did (?:this|that|it) instead\b|\bi (?:did|worked on|spent) .+ instead\b/i },
+  { category: "wrong_completion_state", re: /\b(?:wasn'?t|isn'?t|not) (?:actually )?(?:done|finished|complete[dt]?)|i didn'?t finish|still in progress|incomplete\b/i },
+  { category: "overclaim", re: /\bthat didn'?t happen|i (?:never|didn'?t) (?:do|did|complete|completed|work on|finish)\b|you claimed/i },
+  { category: "planned_not_observed", re: /\bi (?:didn'?t|did not|never) (?:do|attend|go to|make it to)|\bi skipped\b|\bskipped the\b|\bnothing (?:after|before) \d/i },
+];
+
+/**
+ * Parse an explicit calibration correction from the current inbound turn's
+ * text (trimmed). null = not a correction — the orchestrator falls through
+ * unchanged. Never reads history, never guesses: every pattern matches the
+ * CURRENT text only (never-from table inherited from the rating parser).
+ */
+export function parseCalibrationCorrection(text: string): CalibrationCorrectionMatch | null {
+  const trimmed = text.trim();
+  if (trimmed.length < 8) return null;
+  for (const grammar of CORRECTION_GRAMMARS) {
+    if (grammar.re.test(trimmed)) return { category: grammar.category };
+  }
+  return null;
+}
+
 // ------------------------------------------------------------- honest replies
 
 /** Ack bound (contract-style reply cap for the rating ack). */
@@ -121,4 +178,63 @@ export function renderMissedAck(): string {
  */
 export function renderAmbiguousCalibration(): string {
   return "Something went wrong tracking today's check-in — more than one is open. Reply with the rating anyway and I'll sort it.";
+}
+
+/**
+ * Correction ack (§8/§9): acknowledge the structured correction, hold the
+ * memory boundary exactly like the miss ack — the correction improves the
+ * reconstructed day first; it never becomes semantic memory implicitly.
+ */
+export function renderCorrectionAck(): string {
+  return 'Correction logged for today\'s picture — that\'s exactly what keeps my world model honest. (Say "remember …" if you want it kept as a memory.)';
+}
+
+// ------------------------------------------ skipped-occurrence time helpers
+
+/** A local wall-clock reference parsed out of a skip correction ("3pm"). */
+export interface SkippedTimeRef {
+  readonly hour: number;
+  readonly minute: number;
+}
+
+const TIME_REF_RE = /\b(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i;
+
+/**
+ * Extract an explicit local wall-clock time ("the 3pm thing", "at 12:30")
+ * from a skip correction. null when no unambiguous time is present —
+ * 24h-style bare numbers ("the 15 thing") deliberately do NOT parse (too
+ * collision-prone with counts); am/pm or H:MM forms only.
+ */
+export function parseSkippedTimeRef(text: string): SkippedTimeRef | null {
+  const match = TIME_REF_RE.exec(text.trim());
+  if (match === null) return null;
+  let hour = Number(match[1]);
+  const minute = Number(match[2] ?? "0");
+  if (hour < 1 || hour > 12 || minute > 59) return null;
+  const pm = match[3]!.toLowerCase() === "pm";
+  if (pm && hour !== 12) hour += 12;
+  if (!pm && hour === 12) hour = 0;
+  return { hour, minute };
+}
+
+/**
+ * True when the event's start instant lands at the referenced LOCAL
+ * wall-clock time (owner timezone supplied by the caller — this module
+ * stays free of config imports). Deterministic exact match: "3pm" means
+ * the 3:00 PM event, not "somewhere in the afternoon".
+ */
+export function eventStartsAtLocalTime(
+  startIso: string,
+  time: SkippedTimeRef,
+  timeZone: string,
+): boolean {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: false,
+    timeZone,
+  }).formatToParts(new Date(startIso));
+  const hour = Number(parts.find((p) => p.type === "hour")?.value);
+  const minute = Number(parts.find((p) => p.type === "minute")?.value);
+  return hour === time.hour && minute === time.minute;
 }

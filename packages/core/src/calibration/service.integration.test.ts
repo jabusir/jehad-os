@@ -26,6 +26,7 @@ import {
   storeMissedFeedback,
   weeklyRollup,
 } from "./service.js";
+import { parseCalibrationCorrection } from "../imessage/calibration-verbs.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
@@ -156,9 +157,26 @@ describe.skipIf(!TEST_DATABASE_URL)("calibration service (integration)", () => {
       { sourceKey: "commitments", label: "Commitments", lines: ["2 new commitments, 1 completed"] },
       { sourceKey: "gmail", label: "Gmail", lines: ["2 emails received"] },
     ]);
-    // Never raw content: the snapshot carries counts, not titles/bodies.
-    expect(JSON.stringify(summary)).not.toContain("Return the drill");
-    expect(JSON.stringify(summary)).not.toContain("Sync");
+    // Epistemic classes (quality fix 2026-09-23): the met commitment is
+    // OBSERVED (canonical transition); the calendar events are PLANNED —
+    // present with local-time labels but never rendered as done.
+    expect(summary.reconstruction?.observed).toEqual([
+      { label: 'Commitment met: "Return the drill"' },
+    ]);
+    expect(summary.reconstruction?.planned.map((p) => p.label)).toEqual([
+      "8:00 AM — Sync",
+      "10:00 AM — Sync",
+      "2 new commitments recorded",
+    ]);
+    expect(summary.reconstruction?.activity).toEqual([{ label: "2 emails arrived" }]);
+    expect(summary.reconstruction?.uncertain).toContain(
+      "which of the 2 scheduled items actually happened, or in what order",
+    );
+    // Email activity is a count with an explicit uncertainty line — never a
+    // significance claim, never a body.
+    expect(JSON.stringify(summary.reconstruction)).not.toMatch(/email.*about|read|inbox zero/i);
+    // Never an occurrence claim for planned items:
+    expect(JSON.stringify(summary.reconstruction)).not.toMatch(/you (?:did|attended)/i);
   });
 
   it("a connected-but-zero sensor contributes no entry (observed counts only)", async () => {
@@ -203,7 +221,44 @@ describe.skipIf(!TEST_DATABASE_URL)("calibration service (integration)", () => {
       "3 planned calendar items",
       "1 block moved or cancelled same-day (plan churn)",
     ]);
-    expect(JSON.stringify(summary)).not.toContain("Churned sync");
+    // Count lines stay counts-only; the event title may appear ONLY as a
+    // planned label in the reconstruction (never as an occurrence claim).
+    expect(JSON.stringify(summary.entries)).not.toContain("Churned sync");
+    expect(summary.reconstruction?.planned.some((p) => p.label.endsWith("— Churned sync"))).toBe(true);
+  });
+
+  it("explicit occurrence graduation moves a calendar item to OBSERVED (quality fix §14)", async () => {
+    // calendar already connected by the earlier summary test (shared DB)
+    // evt-1 (in-day): the owner later says "it happened" → observed_missed
+    // sibling path; here mark it observed_occurred with an in-day stamp.
+    await db.pool.query(
+      `UPDATE calendar_events SET occurrence = 'observed_occurred',
+         occurrence_confirmed_by = '{"kind": "user_declared", "via": "imessage"}'::jsonb,
+         updated_at = '2026-09-20T19:00:00.000Z'
+       WHERE google_event_id = 'evt-1'`,
+    );
+    const summary = await collectCalibrationSummary(db.pool, { principalId, day: DAY });
+    expect(summary.reconstruction?.observed).toContainEqual({
+      label: 'You confirmed "Sync" happened',
+    });
+    const plannedLabels = summary.reconstruction?.planned.map((p) => p.label) ?? [];
+    expect(plannedLabels.some((l) => l.endsWith("— Sync"))).toBe(true);
+    // The corroborated item no longer feeds the unverifiable-planned count
+    // (evt-2 + the churned event remain unverified → 2, not 3):
+    expect(summary.reconstruction?.uncertain.join(" ")).toContain("2 scheduled items");
+  });
+
+  it("a completed outcome surfaces under OBSERVED with its title (quality fix §14)", async () => {
+    await db.pool.query(
+      `INSERT INTO outcomes (id, principal_id, ref, title, directive, status, created_by, created_at, updated_at)
+       VALUES ($1::uuid, $2::uuid, 'OBST', 'Plaid security review', 'do the review', 'completed',
+               'conversation', '2026-09-20T18:00:00.000Z', '2026-09-20T21:00:00.000Z')`,
+      [randomUUID(), principalId],
+    );
+    const summary = await collectCalibrationSummary(db.pool, { principalId, day: DAY });
+    expect(summary.reconstruction?.observed).toContainEqual({
+      label: 'Outcome "Plaid security review" completed',
+    });
   });
 
   // --------------------------------------------------------------- open item
@@ -282,7 +337,7 @@ describe.skipIf(!TEST_DATABASE_URL)("calibration service (integration)", () => {
     expect(row.source_type).toBe("calibration");
     expect(row.status).toBe("approved"); // calibration is on the ratified policy auto-approve list, loaded by the producer hook
     expect(row.payload).toMatchObject({ calibrationItemId: notified.item.id, periodDate: "2026-09-21" });
-    expect(JSON.stringify(row.payload)).toContain("very little happened today");
+    expect(JSON.stringify(row.payload)).toContain("I don't have a strong picture of today");
   });
 
 
@@ -540,6 +595,42 @@ describe.skipIf(!TEST_DATABASE_URL)("calibration service (integration)", () => {
       ).rows[0]!;
       expect(row.source_attribution).toBe(expected);
     }
+  });
+
+  it("explicit correction categories ride the structured path (quality fix §9)", async () => {
+    const cases: ReadonlyArray<[string, string]> = [
+      ["I did them in a different order", "wrong_sequence"],
+      ["you missed the call with the landlord", "observed_but_missing"],
+      ["I skipped the 3pm thing", "planned_not_observed"],
+      ["the report wasn't actually done", "wrong_completion_state"],
+      ["that didn't happen", "overclaim"],
+    ];
+    for (const [text, expected] of cases) {
+      // The orchestrator parses; the service stores — explicit beats heuristic.
+      const parsed = parseCalibrationCorrection(text);
+      expect(parsed?.category).toBe(expected);
+      const stored = await storeMissedFeedback(db.pool, {
+        principalId,
+        itemId: null,
+        text,
+        category: parsed!.category,
+        now: () => new Date("2026-09-29T21:00:00.000Z"),
+      });
+      expect(stored.category).toBe(expected);
+      const row = (
+        await db.pool.query(`SELECT source_attribution FROM feedback WHERE id = $1::uuid`, [stored.feedbackId])
+      ).rows[0]!;
+      expect(row.source_attribution).toBe(expected);
+    }
+    // Explicit category beats the classifier when supplied:
+    const explicit = await storeMissedFeedback(db.pool, {
+      principalId,
+      itemId: null,
+      text: "the granola meeting notes",
+      category: "wrong_priority",
+      now: () => new Date("2026-09-29T21:30:00.000Z"),
+    });
+    expect(explicit.category).toBe("wrong_priority");
   });
 
   it("DB-level feedback CHECKs: widened item_type admits 'calibration'; target_type vocabulary enforced", async () => {

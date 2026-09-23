@@ -5,6 +5,7 @@
 // trust classes, and content-leak scans.
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 import { migrateUp, seedDomains } from "@jehad/db";
 import { FakeModelProvider } from "@jehad/adapters";
 import {
@@ -609,6 +610,85 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
       await db.pool.query("SELECT count(*)::int AS n FROM feedback WHERE verdict = 'missed' AND item_type = 'calibration'")
     ).rows[0]!.n;
     expect(missedCount).toBe(1); // unchanged
+  });
+
+  it("CALIBRATION: an explicit correction stores its category — NO 2h window required, zero model calls", async () => {
+    await grant(jehadId);
+    await openCalibrationItem(db.pool, {
+      principalId: jehadId,
+      periodDate: civilDateOf(now),
+      summary: { day: civilDateOf(now), entries: [] },
+      surface: "imessage",
+    });
+    now = new Date(now.getTime() + 4 * 60 * 60_000); // far outside the 2h window
+    const callsBefore = provider.requests.length;
+    await turn(jehadId, JEHAD, "you missed the walk I took at noon — that's the biggest thing");
+    const row = (
+      await db.pool.query("SELECT source_attribution FROM feedback WHERE verdict = 'missed' AND item_type = 'calibration' ORDER BY created_at DESC LIMIT 1")
+    ).rows[0]!;
+    expect(row.source_attribution).toBe("observed_but_missing"); // first-match grammar
+    expect(provider.requests.length).toBe(callsBefore); // deterministic lane, no model
+    const reply = (
+      await db.pool.query(
+        "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
+      )
+    ).rows[0]!.c as string;
+    expect(reply).toContain("Correction logged");
+    // memory boundary: no candidates ever
+    const cands = await db.pool.query("SELECT count(*)::int AS n FROM memory_candidates");
+    expect(cands.rows[0]!.n).toBe(0);
+  });
+
+  it("CALIBRATION: 'I skipped the 3pm thing' graduates the matched event's occurrence canonically", async () => {
+    await grant(jehadId);
+    await openCalibrationItem(db.pool, {
+      principalId: jehadId,
+      periodDate: civilDateOf(now),
+      summary: { day: civilDateOf(now), entries: [] },
+      surface: "imessage",
+    });
+    // One unverified event yesterday at 3:00 PM local (22:00Z in PDT):
+    const sourceEventId = randomUUID();
+    await db.pool.query(
+      `INSERT INTO events (id, type, source, occurred_at, recorded_at, idempotency_key, domain_id, payload, sensitivity, schema_version)
+       VALUES ($1::uuid, 'calendar.event.created', 'adapter:google-calendar', now() - interval '2 days', now(), $2, $3::uuid, '{}', 'normal', 1)`,
+      [sourceEventId, randomUUID(), domainId],
+    );
+    await db.pool.query(
+      `INSERT INTO calendar_events
+         (google_event_id, google_calendar_id, status, summary, start_time, end_time,
+          timezone, attendees, location, metadata, source_event_id, content_hash, occurrence)
+       VALUES ('evt-skip', 'primary', 'confirmed', 'Dentist', (now() - interval '1 day')::timestamptz - interval '9 hours', (now() - interval '1 day')::timestamptz - interval '8 hours',
+               NULL, '[]', NULL, '{}', $1::uuid, 'y', 'scheduled_past_unverified')`,
+      [sourceEventId],
+    );
+    // Force the event's local start to exactly 15:00 America/Los_Angeles:
+    await db.pool.query(
+      `UPDATE calendar_events SET start_time = '2020-06-01T22:00:00.000Z' WHERE google_event_id = 'evt-skip'`,
+    );
+    now = new Date(now.getTime() + 30 * 60_000);
+    await turn(jehadId, JEHAD, "I skipped the 3pm thing today");
+    const event = (
+      await db.pool.query("SELECT occurrence, occurrence_confirmed_by FROM calendar_events WHERE google_event_id = 'evt-skip'")
+    ).rows[0]!;
+    expect(event.occurrence).toBe("observed_missed");
+    expect(event.occurrence_confirmed_by).toMatchObject({ kind: "user_declared" });
+    const reply = (
+      await db.pool.query(
+        "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
+      )
+    ).rows[0]!.c as string;
+    expect(reply).toContain("skipped");
+  });
+
+  it("CALIBRATION: correction-shaped text with NO open item is ordinary chat (no feedback row)", async () => {
+    await grant(jehadId);
+    queue = [{ text: '{"tool":"none"}' }, { text: "Got it — tell me more about that." }];
+    await turn(jehadId, JEHAD, "you missed my point earlier");
+    const feedbackRows = await db.pool.query(
+      "SELECT count(*)::int AS n FROM feedback WHERE verdict = 'missed' AND item_type = 'calibration'",
+    );
+    expect(feedbackRows.rows[0]!.n).toBe(0);
   });
 
   it("CALIBRATION: bare '4' with no open item is normal chat (falls through to the model)", async () => {

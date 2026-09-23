@@ -334,14 +334,33 @@ describe("notification text rendering", () => {
     );
   });
 
-  it("unknown kind falls back to title + payload JSON (inert data)", () => {
+  it("unknown kind falls back to TITLE ONLY — payload JSON is never user-visible (2026-09-23 envelope-leak fix)", () => {
     const out = renderNotificationText({
       id: "n6",
       kind: "mystery",
       title: "T",
       payload: { whatever: 1 },
     });
-    expect(out).toBe(`T\n${JSON.stringify({ whatever: 1 })}`);
+    expect(out).toBe("T");
+    expect(out).not.toContain("{");
+  });
+
+  it("kind calibration → payload.content ONLY (the 2026-09-22 envelope leak, pinned)", () => {
+    const out = renderNotificationText({
+      id: "c1",
+      kind: "calibration",
+      title: "Daily calibration check",
+      payload: {
+        content: "Jehad OS — daily check\n\nI don't have a strong picture of today.",
+        surface: "imessage",
+        periodDate: "2026-09-22",
+        calibrationItemId: "0d9a6c47-0f8e-4a4a-9d86-9f0aa2eb2cf1",
+      },
+    });
+    expect(out).toBe("Jehad OS — daily check\n\nI don't have a strong picture of today.");
+    expect(out).not.toContain("calibrationItemId");
+    expect(out).not.toContain("periodDate");
+    expect(out).not.toContain("imessage");
   });
 
   it("kind reply → payload.content ONLY (chat surface: no title prefix)", () => {

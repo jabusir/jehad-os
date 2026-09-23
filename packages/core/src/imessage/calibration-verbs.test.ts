@@ -9,10 +9,14 @@ import {
   CALIBRATION_ACK_CHAR_LIMIT,
   CALIBRATION_MISS_ACK_CHAR_LIMIT,
   type CalibrationRating,
+  eventStartsAtLocalTime,
   missEligibility,
+  parseCalibrationCorrection,
   parseCalibrationRating,
+  parseSkippedTimeRef,
   renderAmbiguousCalibration,
   renderCalibrationAck,
+  renderCorrectionAck,
   renderMissedAck,
 } from "./calibration-verbs.js";
 
@@ -174,5 +178,81 @@ describe("renderAmbiguousCalibration", () => {
     expect(renderAmbiguousCalibration().length).toBeLessThanOrEqual(
       CALIBRATION_MISS_ACK_CHAR_LIMIT,
     );
+  });
+});
+
+describe("parseCalibrationCorrection — the seven structured categories (§9)", () => {
+  it.each([
+    ["I did them in a different order than the calendar", "wrong_sequence"],
+    ["that's out of order", "wrong_sequence"],
+    ["I didn't follow the calendar order today", "wrong_sequence"],
+    ["the biggest thing was the deadline scare", "wrong_priority"],
+    ["what actually mattered was the call with mom", "wrong_priority"],
+    ["the report wasn't actually done", "wrong_completion_state"],
+    ["I didn't finish the security review", "wrong_completion_state"],
+    ["you missed the walk I took at noon", "observed_but_missing"],
+    ["you don't have the morning in there", "observed_but_missing"],
+    ["your picture is incomplete because you can't see my notebook", "source_coverage_gap"],
+    ["that didn't happen", "overclaim"],
+    ["I never did that", "overclaim"],
+    ["I skipped the 3pm thing", "planned_not_observed"],
+    ["I didn't go to the review", "planned_not_observed"],
+    ["I did this instead of the gym thing", "observed_but_missing"],
+  ])("'%s' → %s", (input, category) => {
+    expect(parseCalibrationCorrection(input)).toEqual({ category });
+  });
+
+  it.each([
+    "what's the weather",
+    "remind me to call Sam tomorrow",
+    "I had a granola bar",
+    "4",
+    "hey",
+    "how did the sync go", // question about work, not a correction
+    "",
+    "  ",
+  ])("'%s' is not a correction (falls through to chat)", (input) => {
+    expect(parseCalibrationCorrection(input)).toBeNull();
+  });
+
+  it("needs substance — sub-8-char fragments never parse", () => {
+    expect(parseCalibrationCorrection("nope")).toBeNull();
+  });
+});
+
+describe("parseSkippedTimeRef / eventStartsAtLocalTime (§8 skip disambiguation)", () => {
+  it.each([
+    ["I skipped the 3pm thing", 15, 0],
+    ["I skipped the 12:30pm one", 12, 30],
+    ["didn't go to the 9am", 9, 0],
+    ["I skipped the thing at 12 pm", 12, 0],
+  ])("'%s' → %i:%02d", (input, hour, minute) => {
+    expect(parseSkippedTimeRef(input)).toEqual({ hour, minute });
+  });
+
+  it.each([
+    "I skipped the thing", // no time at all
+    "I skipped the 15 thing", // bare 24h numbers never parse (count collision)
+    "I skipped the 3 thing", // ambiguous bare hour
+    "I skipped the 3:75pm thing", // invalid minutes
+  ])("'%s' has no unambiguous time ref", (input) => {
+    expect(parseSkippedTimeRef(input)).toBeNull();
+  });
+
+  it("eventStartsAtLocalTime matches the exact local wall clock (America/Los_Angeles)", () => {
+    // 22:00Z == 3:00 PM PDT
+    expect(eventStartsAtLocalTime("2026-09-20T22:00:00.000Z", { hour: 15, minute: 0 }, "America/Los_Angeles")).toBe(true);
+    expect(eventStartsAtLocalTime("2026-09-20T22:00:00.000Z", { hour: 15, minute: 30 }, "America/Los_Angeles")).toBe(false);
+    expect(eventStartsAtLocalTime("2026-09-20T22:00:00.000Z", { hour: 22, minute: 0 }, "UTC")).toBe(true);
+  });
+});
+
+describe("renderCorrectionAck (§8/§9)", () => {
+  it("is deterministic, bounded, and holds the memory boundary", () => {
+    const ack = renderCorrectionAck();
+    expect(renderCorrectionAck()).toBe(ack);
+    expect(ack.length).toBeLessThanOrEqual(CALIBRATION_MISS_ACK_CHAR_LIMIT + 60);
+    expect(ack).toMatch(/correction/i);
+    expect(ack).toMatch(/remember/i); // never implicit semantic memory
   });
 });

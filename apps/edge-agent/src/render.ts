@@ -55,11 +55,20 @@ function asString(value: unknown): string | null {
 
 /**
  * Kind-specific projection:
- *   brief          → title + content
- *   reply          → title + content (conversational body = payload.content)
+ *   brief           → title + content
+ *   reply           → content only (conversational body = payload.content)
+ *   calibration     → content only (the rendered daily-check prompt)
  *   calendar-change → title only (the title IS the message: `X: moved to Y`)
- *   escalation     → title + consequenceOfWaiting (when present)
- *   anything else  → title + payload JSON (forward-compatible fallback)
+ *   escalation      → title + consequenceOfWaiting (when present)
+ *   anything else   → title only
+ *
+ * INVARIANT (owner directive 2026-09-23): the transport envelope — payload
+ * keys like content/surface/periodDate/calibrationItemId, or ANY serialized
+ * payload JSON — is internal routing/audit metadata and must NEVER become
+ * user-visible text. The former default rendered `JSON.stringify(payload)`
+ * verbatim and leaked the envelope to iMessage (calibration, 2026-09-22
+ * 20:30 delivery); unknown kinds now degrade to the title alone, never a
+ * payload dump.
  */
 export function renderNotificationText(notification: DeliverableNotification): string {
   let text: string;
@@ -68,9 +77,10 @@ export function renderNotificationText(notification: DeliverableNotification): s
       text = [notification.title, asString(notification.payload["content"])].filter(Boolean).join("\n");
       break;
     case "reply":
-      // Conversational: content ONLY — a "Reply" title prefix is noise on a
-      // chat surface (owner feedback 2026-09-19). Title stays on the row for
-      // audit; it is never rendered.
+    case "calibration":
+      // Conversational/bounded human copy: content ONLY — title prefixes and
+      // payload metadata are noise (or worse: envelope leakage) on a chat
+      // surface. Title stays on the row for audit; it is never rendered.
       text = asString(notification.payload["content"]) ?? notification.title;
       break;
     case "calendar-change":
@@ -82,7 +92,7 @@ export function renderNotificationText(notification: DeliverableNotification): s
       break;
     }
     default:
-      text = `${notification.title}\n${JSON.stringify(notification.payload)}`;
+      text = notification.title;
   }
   return truncateForImessage(text);
 }

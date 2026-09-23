@@ -47,10 +47,14 @@ import {
   storeMissedFeedback,
 } from "../calibration/service.js";
 import {
+  eventStartsAtLocalTime,
   missEligibility,
+  parseCalibrationCorrection,
   parseCalibrationRating,
+  parseSkippedTimeRef,
   renderAmbiguousCalibration,
   renderCalibrationAck,
+  renderCorrectionAck,
   renderMissedAck,
 } from "./calibration-verbs.js";
 import {
@@ -1200,6 +1204,86 @@ async function converseTurn(
       });
     }
     // zero eligible → fall through to the model path
+  }
+
+  // Day-state correction via explicit skip (quality fix 2026-09-23 §8):
+  // "I skipped the 3pm thing" graduates the matched event's occurrence
+  // state through the SAME canonical path as "it didn't happen" — never
+  // a conversational side write. Time reference disambiguates; no time
+  // falls back to the sole-recent-event rule; ambiguity clarifies.
+  if (
+    policy.reads.includes("calendar") &&
+    /\bI skipped\b|\bI (?:didn'?t|did not) (?:go to|attend|make it to)\b/i.test(input.text)
+  ) {
+    const timeRef = parseSkippedTimeRef(input.text);
+    const recent = await db.query(
+      `SELECT id, summary, start_time FROM calendar_events
+        WHERE occurrence = 'scheduled_past_unverified'
+          AND end_time < $1::timestamptz
+          AND end_time > $2::timestamptz
+        ORDER BY start_time DESC LIMIT 8`,
+      [now.toISOString(), new Date(now.getTime() - 48 * 60 * 60_000).toISOString()],
+    );
+    const candidates = timeRef === null
+      ? recent.rows
+      : recent.rows.filter((r) => eventStartsAtLocalTime(String(r.start_time), timeRef, BRIEF_TIMEZONE));
+    if (candidates.length === 1) {
+      const event = candidates[0]!;
+      await confirmOccurrence(db, {
+        calendarEventId: String(event.id),
+        happened: false,
+        principalId: input.principalId,
+        now,
+      });
+      return deterministicReply(deps, input, ctx, {
+        content: `Marked: ${String(event.summary)} — skipped (per you).`,
+        outboundTrust: "system_generated",
+        marker: "occurrence-skipped",
+      });
+    }
+    if (candidates.length > 1) {
+      const fmt = new Intl.DateTimeFormat("en-US", {
+        timeZone: BRIEF_TIMEZONE,
+        weekday: "short",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+      const list = candidates
+        .map((r) => `- ${String(r.summary)} (${fmt.format(new Date(String(r.start_time)))})`)
+        .join("\n");
+      return deterministicReply(deps, input, ctx, {
+        content: `Which one?\n${list}`,
+        outboundTrust: "system_generated",
+        marker: "occurrence-skipped-ambiguous",
+      });
+    }
+    // zero candidates → fall through (structured correction below still applies)
+  }
+
+  // Structured correction intake (quality fix 2026-09-23 §9): an explicit
+  // mismatch ("you missed X", "wrong order", "I never did that") becomes
+  // calibrated feedback with its category — NOT gated on the 2-hour miss
+  // window (the conversation itself carries the correction) and NEVER a
+  // memory write. Requires an open (or rated-today) item for this
+  // principal; otherwise ordinary chat must not ride this lane (§17).
+  const correction = parseCalibrationCorrection(input.text);
+  if (correction !== null) {
+    const eligible = await eligibleCalibrationItem(db, { principalId: input.principalId, now });
+    if (eligible.kind === "sole") {
+      await storeMissedFeedback(db, {
+        principalId: input.principalId,
+        itemId: eligible.item.id,
+        text: input.text,
+        category: correction.category,
+        surface: "imessage",
+      });
+      return deterministicReply(deps, input, ctx, {
+        content: renderCorrectionAck(),
+        outboundTrust: "system_generated",
+        marker: "calibration-corrected",
+      });
+    }
+    // none/ambiguous → fall through to chat (never guess, §17)
   }
 
   // W6-phase-2: replies to reminder check-ins resolve deterministically
