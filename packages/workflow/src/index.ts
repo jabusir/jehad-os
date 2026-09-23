@@ -69,6 +69,23 @@ export { grantReminderWorkflow } from "./grant-workflows.js";export {
   type GmailSyncResult,
 } from "./gmail-workflows.js";
 export {
+  outcomeExecutorWorkflow,
+  outcomeReaperWorkflow,
+  outcomeResumeScannerWorkflow,
+  OUTCOME_EXECUTOR_ACTOR,
+  OUTCOME_EXECUTOR_MAX_ITERATIONS,
+  OUTCOME_REAPER_ACTOR,
+  OUTCOME_SCANNER_ACTOR,
+  runOutcomeExecutor,
+  runOutcomeReapTick,
+  runOutcomeResumeScan,
+  type OutcomeExecutorInput,
+  type OutcomeExecutorPrimitives,
+  type OutcomeExecutorResult,
+  type OutcomeReapResult,
+  type OutcomeScanResult,
+} from "./outcome-workflows.js";
+export {
   threadRetentionWorkflow,
   type ThreadRetentionResult,
 } from "./thread-workflows.js";

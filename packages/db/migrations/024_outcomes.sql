@@ -87,7 +87,8 @@ CREATE TABLE outcome_waits (
                   CHECK (status IN ('waiting', 'satisfied', 'expired', 'cancelled')),
     created_at    timestamptz NOT NULL DEFAULT now(),
     satisfied_at  timestamptz,
-    expires_at    timestamptz
+    expires_at    timestamptz,
+    updated_at    timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE INDEX outcome_waits_waiting_idx ON outcome_waits (event_type) WHERE status = 'waiting';
