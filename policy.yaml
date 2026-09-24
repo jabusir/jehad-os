@@ -110,6 +110,7 @@ outcomes: { enabled: true, max_active_per_principal: 3, default_budget_usd: 5, d
 workers:
   enabled: true
   research: { model: openai/gpt-4.1-mini, max_budget_usd: 1, default_deadline_minutes: 30, reads: [gmail.metadata.recent, calendar.today, commitments.waiting, memory.relevant] }
+  verifier: { model: openai/gpt-4.1-mini, max_budget_usd: 0.5, default_deadline_minutes: 15, reads: [] }
 
 sensors:
   gmail: { enabled: true, poll_cron: "*/5 * * *", bootstrap_window_days: 30, extract_senders: [billing@*, statements@*, *@stripe.com], max_messages_per_poll: 40, max_candidates_per_day: 20, content_enabled: true, content_retention_days: 7, content_max_body_bytes: 262144 }

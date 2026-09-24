@@ -688,6 +688,10 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
 
   it("CALIBRATION: an explicit correction stores its category — NO 2h window required, zero model calls", async () => {
     await grant(jehadId);
+    // Time-of-day safety: the suite clock is wall-anchored; +4h below must
+    // not cross local midnight or the item's civil date stops matching.
+    const w = new Date(now);
+    now = new Date(w.getFullYear(), w.getMonth(), w.getDate(), 8, 0, 0);
     await openCalibrationItem(db.pool, {
       principalId: jehadId,
       periodDate: civilDateOf(now),

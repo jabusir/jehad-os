@@ -316,6 +316,30 @@ export async function createAssignment(
   if (!Number.isFinite(input.budgetUsd) || input.budgetUsd <= 0 || input.budgetUsd > 50) {
     throw new AssignmentError("assignment budget must be within (0, 50] USD");
   }
+  // Builder ≠ verifier is structural (ADR-0013): a verifier assignment MUST
+  // bind a succeeded research (builder) assignment on mint — not itself, not
+  // another verifier, not an unfinished builder.
+  let verifiesAssignmentId: string | null = null;
+  if (input.role === "verifier") {
+    if (input.verifiesAssignmentId === undefined || input.verifiesAssignmentId === null) {
+      throw new AssignmentError("a verifier assignment requires verifiesAssignmentId");
+    }
+    const verified = await db.query(
+      `SELECT id, role, status FROM assignments WHERE id = $1::uuid`,
+      [input.verifiesAssignmentId],
+    );
+    const verifiedRow = verified.rows[0] as { id: string; role: string; status: string } | undefined;
+    if (verifiedRow === undefined) {
+      throw new AssignmentError(`verifier's verified assignment ${input.verifiesAssignmentId} not found`);
+    }
+    if (verifiedRow.role !== "research") {
+      throw new AssignmentError(`verifier cannot verify a ${verifiedRow.role} assignment — builders don't self-verify`);
+    }
+    if (verifiedRow.status !== "succeeded") {
+      throw new AssignmentError(`verifier's verified assignment ${verifiedRow.id} is ${verifiedRow.status}, not succeeded`);
+    }
+    verifiesAssignmentId = input.verifiesAssignmentId;
+  }
   const id = randomUUID();
   const inputPackage = {
     task,
@@ -339,7 +363,7 @@ export async function createAssignment(
       input.capabilityGrantId ?? null,
       input.budgetUsd,
       input.deadlineAt ?? null,
-      input.verifiesAssignmentId ?? null,
+      input.role === "verifier" ? verifiesAssignmentId : input.verifiesAssignmentId ?? null,
     ],
   );
   const assignment = rowToAssignment(inserted.rows[0] as Record<string, unknown>);
@@ -454,13 +478,15 @@ export async function completeAssignment(
 
   // Citations land as evidence rows — claims enter the world model only as
   // evidence pointing at their source refs (§8.4: findings, never writes).
+  // metadata.assignmentId makes each row traceable to the assignment that
+  // produced it — the D3 verifier gate (027) keys on it.
   const evidenceIds: string[] = [];
   for (const citation of parsed.citations) {
     const inserted = await db.query(
-      `INSERT INTO evidence (domain_id, source_type, source_ref, claim, observed_at)
-       VALUES ((SELECT id FROM domains WHERE key = 'personal'), 'assignment', $1, $2, $3::timestamptz)
+      `INSERT INTO evidence (domain_id, source_type, source_ref, claim, observed_at, metadata)
+       VALUES ((SELECT id FROM domains WHERE key = 'personal'), 'assignment', $1, $2, $3::timestamptz, $4::jsonb)
        RETURNING id`,
-      [citation.ref, citation.note ?? parsed.summary, opts.now.toISOString()],
+      [citation.ref, citation.note ?? parsed.summary, opts.now.toISOString(), JSON.stringify({ assignmentId: input.assignmentId })],
     );
     evidenceIds.push(String(inserted.rows[0]!.id));
   }

@@ -89,6 +89,11 @@ export {
   type OutcomeScanResult,
 } from "./outcome-workflows.js";
 export {
+  VERIFIER_SYSTEM_STANCE,
+  buildVerifierOutputContract,
+  buildVerifierTask,
+} from "./verifier-stance.js";
+export {
   threadRetentionWorkflow,
   type ThreadRetentionResult,
 } from "./thread-workflows.js";

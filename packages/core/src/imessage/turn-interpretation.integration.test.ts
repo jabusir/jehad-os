@@ -673,6 +673,7 @@ describe.skipIf(!TEST_DATABASE_URL)("turn interpretation bridges (integration)",
 
     // Roll back exactly 020 — the down path purges then narrows.
     expect(await migrateDown(db.pool, { to: "019_grant_reminder_kind" }, defaultMigrationsDir())).toEqual([
+      "027_verifier_gate",
       "026_assignments",
       "024_outcomes",
       "023_gmail_content",
@@ -702,7 +703,7 @@ describe.skipIf(!TEST_DATABASE_URL)("turn interpretation bridges (integration)",
       "022_lesson_vocabulary",
       "023_gmail_content",
       "024_outcomes",
-      "026_assignments",
+      "026_assignments", "027_verifier_gate",
     ]);
     await db.pool.query(
       `INSERT INTO feedback (item_type, item_id, verdict, note, created_by)

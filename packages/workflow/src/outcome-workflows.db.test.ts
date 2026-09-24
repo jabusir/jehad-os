@@ -501,3 +501,226 @@ describe.skipIf(!TEST_DATABASE_URL)("executor assignment dispatch (D1: the worke
     expect(Number(evidence.rows[0]!.n)).toBe(1); // only the earlier test's citation
   });
 });
+
+describe.skipIf(!TEST_DATABASE_URL)("executor verifier lane (D3: independent verification)", () => {
+  let db: IsolatedDb;
+  let principalId: string;
+
+  beforeAll(async () => {
+    db = await createIsolatedTestDb(TEST_DATABASE_URL!, "outcomesverify");
+    await migrateUp(db.pool);
+    await seedDomains(db.pool);
+    const row = await db.pool.query(
+      `INSERT INTO principals (type, name) VALUES ('user', 'verifier-exec-owner') RETURNING id`,
+    );
+    principalId = String(row.rows[0]!.id);
+  });
+
+  afterAll(async () => {
+    await dropIsolatedTestDb(TEST_DATABASE_URL!, db);
+  });
+
+  const exec = {
+    query: (sql: string, params: readonly unknown[] = []) => db.pool.query(sql, params as unknown[]),
+  };
+
+  const WORKERS_POLICY = {
+    enabled: true,
+    roles: {
+      research: {
+        model: "fake/research-model",
+        maxBudgetUsd: 0.05,
+        defaultDeadlineMinutes: 30,
+        reads: ["gmail.metadata.recent"] as const,
+      },
+      verifier: {
+        model: "fake/verifier-model",
+        maxBudgetUsd: 0.05,
+        defaultDeadlineMinutes: 15,
+        reads: [] as const,
+      },
+    },
+  };
+
+  function scriptHarness(responses: string[]) {
+    const calls: Array<{ prompt: string; model: string; assignmentId: string | null }> = [];
+    return {
+      calls,
+      adapter: {
+        id: "fake-harness",
+        capabilities: () => ["model:call"],
+        start: async (spec: { prompt: string; model: string; assignmentId: string | null }) => {
+          calls.push({ prompt: spec.prompt, model: spec.model, assignmentId: spec.assignmentId });
+          const text = responses[Math.min(calls.length - 1, responses.length - 1)]!;
+          return { ok: true, text, costUsd: 0.001, latencyMs: 5 };
+        },
+        status: () => ({ runKey: "", state: "unknown" as const, latencyMs: null }),
+        cancel: async () => ({ cancelled: false, reason: "n/a" }),
+        artifacts: async () => ({ text: null }),
+      } as never,
+    };
+  }
+
+  const RESEARCH_ENVELOPE = JSON.stringify({
+    summary: "The Acme quote is pending finance sign-off per the inbox record.",
+    artifact: { title: "Acme quote state", body: "Grounded synthesis of the two records." },
+    citations: [{ ref: "src-a — inbox record", note: "quote email" }, { ref: "src-b — ledger", note: "finance state" }],
+    costUsd: 0,
+  });
+
+  function verdictEnvelope(verdicts: Array<Record<string, unknown>>): string {
+    return JSON.stringify({ summary: "checked against the records", verdicts, confidence: 0.9 });
+  }
+
+  async function seedPlanOutcome(criteria: string[]): Promise<{ id: string; ref: string }> {
+    const created = await createOutcome(
+      exec,
+      {
+        principalId,
+        title: "Chase the Acme quote",
+        directive: "find the quote state",
+        criteria: criteria.map((criterion) => ({ criterion })),
+        createdBy: "josctl",
+      },
+      { now: NOW, actor: "system:outcome-test" },
+    );
+    await db.pool.query(`UPDATE outcomes SET plan = $2::jsonb WHERE id = $1::uuid`, [
+      created.outcome.id,
+      JSON.stringify([{ assign: { role: "research", task: "Find the Acme quote state" } }]),
+    ]);
+    return { id: created.outcome.id, ref: created.outcome.ref };
+  }
+
+  it("verifier dispatch → both criteria confirmed → outcome COMPLETES through the 027 gate (builder ≠ verifier structural)", async () => {
+    const { id, ref } = await seedPlanOutcome(["quote state grounded", "finance state grounded"]);
+    const harness = scriptHarness([
+      RESEARCH_ENVELOPE,
+      verdictEnvelope([
+        { ordinal: 1, verdict: "confirmed", reasoning: "The cited inbox record supports it.", citation_ids: [1] },
+        { ordinal: 2, verdict: "confirmed", reasoning: "The cited ledger supports it.", citation_ids: [2] },
+      ]),
+    ]);
+    const result = await runOutcomeExecutor(
+      db.pool,
+      { outcomeId: id, ref },
+      `run-${randomUUID()}`,
+      { waitForSignal: async () => undefined, pauseForApproval: async () => { throw new Error("should not park"); } },
+      { harness: harness.adapter, workersPolicy: WORKERS_POLICY },
+    );
+    expect(result.completed).toBe(true);
+    expect(result.status).toBe("completed");
+    // Two invocations, different stances/models: the builder pass and the
+    // verifier pass are distinct model invocations (roadmap §9).
+    expect(harness.calls.length).toBe(2);
+    expect(harness.calls[0]!.model).toBe("fake/research-model");
+    expect(harness.calls[1]!.model).toBe("fake/verifier-model");
+    expect(harness.calls[1]!.prompt).toContain("You are a verifier");
+    expect(harness.calls[1]!.prompt).toContain("citation_ids");
+    // Structural builder ≠ verifier on the rows.
+    const assignments = await db.pool.query(
+      `SELECT id, role, status, verifies_assignment_id FROM assignments WHERE outcome_id = $1::uuid ORDER BY created_at, role`,
+      [id],
+    );
+    expect(assignments.rows.length).toBe(2);
+    expect(String(assignments.rows[0]!.role)).toBe("research");
+    expect(String(assignments.rows[1]!.role)).toBe("verifier");
+    expect(String(assignments.rows[1]!.verifies_assignment_id)).toBe(String(assignments.rows[0]!.id));
+    expect(assignments.rows[0]!.verifies_assignment_id).toBeNull();
+    // Criteria worker-verified THROUGH the verifier assignment.
+    const criteria = await db.pool.query(
+      `SELECT status, verified_by_assignment_id FROM outcome_criteria WHERE outcome_id = $1::uuid ORDER BY ordinal`,
+      [id],
+    );
+    expect(criteria.rows.map((c) => String(c.status))).toEqual(["verified", "verified"]);
+    expect(String(criteria.rows[0]!.verified_by_assignment_id)).toBe(String(assignments.rows[1]!.id));
+    // The verifier landed its OWN evidence rows (the 027 gate's provenance).
+    const evidence = await db.pool.query(
+      `SELECT count(*)::int AS n FROM evidence WHERE source_type = 'assignment' AND metadata->>'assignmentId' = $1`,
+      [String(assignments.rows[1]!.id)],
+    );
+    expect(Number(evidence.rows[0]!.n)).toBe(2);
+  });
+
+  it("refuted criterion → criterion failed → honest owner park (no completion on a refuted claim)", async () => {
+    const { id, ref } = await seedPlanOutcome(["quote state grounded", "finance state grounded"]);
+    const harness = scriptHarness([
+      RESEARCH_ENVELOPE,
+      verdictEnvelope([
+        { ordinal: 1, verdict: "confirmed", reasoning: "Supported.", citation_ids: [1] },
+        { ordinal: 2, verdict: "refuted", reasoning: "The ledger contradicts the claim.", citation_ids: [2] },
+      ]),
+    ]);
+    await expect(
+      runOutcomeExecutor(
+        db.pool,
+        { outcomeId: id, ref },
+        `run-${randomUUID()}`,
+        { waitForSignal: async () => undefined, pauseForApproval: async () => { throw new Error("owner has not replied yet"); } },
+        { harness: harness.adapter, workersPolicy: WORKERS_POLICY },
+      ),
+    ).rejects.toThrow("owner has not replied yet");
+    const parked = await db.pool.query(`SELECT status FROM outcomes WHERE id = $1::uuid`, [id]);
+    expect(String(parked.rows[0]!.status)).toBe("waiting_user");
+    const criteria = await db.pool.query(
+      `SELECT status FROM outcome_criteria WHERE outcome_id = $1::uuid ORDER BY ordinal`,
+      [id],
+    );
+    expect(criteria.rows.map((c) => String(c.status))).toEqual(["verified", "failed"]);
+  });
+
+  it("uncertain residue → criterion unverified → owner park carries the residue", async () => {
+    const { id, ref } = await seedPlanOutcome(["quote state grounded", "finance state grounded"]);
+    const harness = scriptHarness([
+      RESEARCH_ENVELOPE,
+      verdictEnvelope([
+        { ordinal: 1, verdict: "confirmed", reasoning: "Supported.", citation_ids: [1] },
+        { ordinal: 2, verdict: "uncertain", reasoning: "The package lacks the ledger.", citation_ids: [] },
+      ]),
+    ]);
+    await expect(
+      runOutcomeExecutor(
+        db.pool,
+        { outcomeId: id, ref },
+        `run-${randomUUID()}`,
+        { waitForSignal: async () => undefined, pauseForApproval: async () => { throw new Error("owner has not replied yet"); } },
+        { harness: harness.adapter, workersPolicy: WORKERS_POLICY },
+      ),
+    ).rejects.toThrow("owner has not replied yet");
+    const criteria = await db.pool.query(
+      `SELECT status FROM outcome_criteria WHERE outcome_id = $1::uuid ORDER BY ordinal`,
+      [id],
+    );
+    expect(criteria.rows.map((c) => String(c.status))).toEqual(["verified", "unverified"]);
+    const assignments = await db.pool.query(
+      `SELECT count(*)::int AS n FROM assignments WHERE outcome_id = $1::uuid AND role = 'verifier'`,
+      [id],
+    );
+    expect(Number(assignments.rows[0]!.n)).toBe(1); // exactly one verifier pass, no loop
+  });
+
+  it("fail-closed: confirmed verdict citing an out-of-range builder citation → rejected BEFORE completion → outcome blocked", async () => {
+    const { id, ref } = await seedPlanOutcome(["quote state grounded", "finance state grounded"]);
+    const harness = scriptHarness([
+      RESEARCH_ENVELOPE,
+      verdictEnvelope([
+        { ordinal: 1, verdict: "confirmed", reasoning: "Fabricated grounding.", citation_ids: [99] },
+        { ordinal: 2, verdict: "confirmed", reasoning: "Fine.", citation_ids: [2] },
+      ]),
+    ]);
+    const result = await runOutcomeExecutor(
+      db.pool,
+      { outcomeId: id, ref },
+      `run-${randomUUID()}`,
+      { waitForSignal: async () => undefined, pauseForApproval: async () => ({ approved: true }) },
+      { harness: harness.adapter, workersPolicy: WORKERS_POLICY },
+    );
+    expect(result.status).toBe("blocked");
+    const rows = await db.pool.query(`SELECT status, failure_reason FROM assignments WHERE outcome_id = $1::uuid AND role = 'verifier'`, [id]);
+    expect(String(rows.rows[0]!.status)).toBe("blocked");
+    const criteria = await db.pool.query(
+      `SELECT status FROM outcome_criteria WHERE outcome_id = $1::uuid ORDER BY ordinal`,
+      [id],
+    );
+    expect(criteria.rows.map((c) => String(c.status))).toEqual(["pending", "pending"]); // nothing applied
+  });
+});
