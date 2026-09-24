@@ -371,9 +371,21 @@ export function parseInterpretationJson(text: string): readonly Proposal[] | nul
   const proposals: Proposal[] = [];
   const seenTypes = new Set<string>();
   for (const entry of parsed) {
-    const proposal = coerceProposal(entry);
+    let proposal = coerceProposal(entry);
     if (proposal === null) return null;
-    if (seenTypes.has(proposal.type)) return null; // at most one per type
+    // Reset C2: a preference-shaped memory proposal belongs in the profile
+    // lane — re-type it before dedup (an explicit configuration_directive
+    // of the same type wins; the re-typed entry is then dropped, not fatal).
+    if (proposal.type === "memory_candidate") {
+      const retyped = preferenceRoutingRetype(proposal);
+      if (retyped !== null && coerceProposal(retyped) !== null) {
+        proposal = retyped;
+      }
+    }
+    if (seenTypes.has(proposal.type)) {
+      if (proposal.type === "configuration_directive") continue;
+      return null; // at most one per type
+    }
     seenTypes.add(proposal.type);
     proposals.push(proposal);
   }
@@ -409,9 +421,9 @@ export function buildInterpretationPrompt(
     "[] — when the turn is a question or command about the world, or pure chat. Do NOT invent proposals for questions.",
     "Proposal shapes (at most one of each type, at most 4 total):",
     `{"type":"task_batch","items":[{"title":"<task>","due":"<deadline words>"|null}]} — the user listed tasks or to-dos for THEMSELVES; title at most ${TASK_TITLE_MAX_CHARS} chars; due is the USER'S words exactly as written (e.g. "wednesday", "by friday"), null (or the key may be omitted) when no deadline was stated — never invent one.`,
-    `{"type":"configuration_directive","target_principal":"self"|"<other person's name>","target":"interaction_profile","change":{"<key>":"<value>"}} — the user asked to change how the assistant talks to them (or to a named person); change carries 1 to ${DIRECTIVE_CHANGE_MAX_PAIRS} key-value pairs, each value at most ${DIRECTIVE_CHANGE_VALUE_MAX_CHARS} chars.`,
+    `{"type":"configuration_directive","target_principal":"self"|"<other person's name>","target":"interaction_profile","change":{"<key>":"<value>"}} — the user asked to change how the assistant talks to them (or to a named person); change carries 1 to ${DIRECTIVE_CHANGE_MAX_PAIRS} key-value pairs, each value at most ${DIRECTIVE_CHANGE_VALUE_MAX_CHARS} chars. Known keys: "ownerName" (what to call that person — "call me Sir" → {"ownerName":"Sir"}; "stop calling me Chief" → {"removeAddress":"stop"}), "tone" (voice/register note), anything else becomes a plain directive line.`,
     `{"type":"system_feedback","category":"capability_gap"|"bug"|"request","subject":"<short summary>","detail":"<what happened>"|null} — the user expressed a gap, defect, or wish about the assistant itself; subject at most ${FEEDBACK_SUBJECT_MAX_CHARS} chars, detail at most ${FEEDBACK_DETAIL_MAX_CHARS} chars.`,
-    `{"type":"memory_candidate","summary":"<durable fact or preference worth keeping>"} — only when the user states one; at most ${MEMORY_SUMMARY_MAX_CHARS} chars.`,
+    `{"type":"memory_candidate","summary":"<durable fact or preference worth keeping>"} — only when the user states one; at most ${MEMORY_SUMMARY_MAX_CHARS} chars. NEVER for how the assistant should address or treat the user ("call me X", "be warmer") — those are configuration_directive proposals.`,
     `{"type":"outcome_spec","title":"<short name for the work>","directive":"<the user's ask in their words>","criteria":["<checkable condition for done>"],"budget_usd":null,"deadline_days":null} — ONLY when the user explicitly asks the assistant to OWN or CARRY work forward for them ("delegate this", "own this until it's done", "make sure this happens").`,
     `outcome_spec ceilings: title at most ${OUTCOME_TITLE_MAX_CHARS} chars; directive copies the user's ask (at most ${OUTCOME_DIRECTIVE_MAX_CHARS} chars); 1-${OUTCOME_MAX_CRITERIA} criteria, each an objective checkable condition derived ONLY from what the user said, at most ${OUTCOME_CRITERION_MAX_CHARS} chars; budget_usd and deadline_days stay null unless the user stated numbers (budget ≤ ${OUTCOME_MAX_BUDGET_USD}, deadline 1-${OUTCOME_MAX_DEADLINE_DAYS} days).`,
     "Rules:",
@@ -474,7 +486,7 @@ function renderTaskBatchOffer(
   const noun = n === 1 ? "task" : "tasks";
   const them = n === 1 ? "it" : "them";
   const cta = behaviors.preferNextAction
-    ? ` Reply 'track them' and I'll track ${them}${d > 0 && behaviors.surfaceDeadlines ? ` (the ${d} with deadlines)` : ""}.`
+    ? ` Want me to track ${them}${d > 0 && behaviors.surfaceDeadlines ? ` (the ${d} with deadlines)` : ""}?`
     : "";
   const lead =
     d > 0 && behaviors.surfaceDeadlines
@@ -492,12 +504,12 @@ function renderConfigurationDirectiveOffer(
   const pairs = Object.entries(proposal.change)
     .map(([key, value]) => `${key}=${value}`)
     .join(", ");
-  const cta = behaviors.preferNextAction ? " Reply 'approve' to apply." : "";
+  const cta = behaviors.preferNextAction ? " Want this applied?" : "";
   if (proposal.target_principal === "self") {
     return `Profile change staged: ${pairs}.${cta}`;
   }
   const honestActivation = ` It only takes effect for ${proposal.target_principal} once the owner adds them to the personas policy allowlist — I can't switch that on from chat.`;
-  const stageCta = behaviors.preferNextAction ? " Reply 'approve' to stage it." : "";
+  const stageCta = behaviors.preferNextAction ? " Want it staged?" : "";
   return `Profile change for ${proposal.target_principal}: ${pairs}.${honestActivation}${stageCta}`;
 }
 
@@ -505,7 +517,7 @@ function renderSystemFeedbackOffer(
   proposal: SystemFeedbackProposal,
   behaviors: Required<ProfileBehaviors>,
 ): string {
-  const cta = behaviors.preferNextAction ? " Reply 'log it' to record that." : "";
+  const cta = behaviors.preferNextAction ? " Want me to log that?" : "";
   return `Worth logging about me: "${proposal.subject}" (${proposal.category.replace("_", " ")}).${cta}`;
 }
 
@@ -514,7 +526,7 @@ function renderMemoryCandidateOffer(
   behaviors: Required<ProfileBehaviors>,
 ): string {
   const cta = behaviors.preferNextAction
-    ? " Reply 'remember it' and I'll capture it for your review."
+    ? " Keep this?"
     : "";
   return `Worth keeping in mind: "${proposal.summary}".${cta}`;
 }
@@ -530,7 +542,7 @@ function renderOutcomeSpecOffer(
   if (proposal.budget_usd !== null) extras.push(`budget $${proposal.budget_usd}`);
   if (proposal.deadline_days !== null) extras.push(`due in ${proposal.deadline_days} day${proposal.deadline_days === 1 ? "" : "s"}`);
   const extrasText = extras.length > 0 ? ` (${extras.join(", ")})` : "";
-  const cta = behaviors.preferNextAction ? " Reply 'approve' to start it." : "";
+  const cta = behaviors.preferNextAction ? " Want me to start it?" : "";
   return `Staged as a delegated outcome: "${proposal.title}"${extrasText} — done means: ${done}.${cta}`;
 }
 
@@ -938,6 +950,74 @@ export interface ApplyConfigurationDirectiveResult extends BridgeOutcome {
 
 /** Change pairs land as directive lines ("key: value") — the only
  *  ProfileDefinition surface a conversational directive can touch. */
+/**
+ * Reset C2: profile-addressing keys a configuration_directive may carry.
+ * `ownerName`/`address` set the address term (applyDefinitionDelta's
+ * addressOwnerName); `removeAddress`/`stopAddress` clear it; `tone`/
+ * `register`/`voice` and everything else become extra-directive lines
+ * (the previous behavior).
+ */
+const PROFILE_ADDRESS_KEYS: ReadonlySet<string> = new Set(["ownerName", "address"]);
+const PROFILE_REMOVE_ADDRESS_KEYS: ReadonlySet<string> = new Set([
+  "removeAddress",
+  "stopAddress",
+  "stopCallingMe",
+]);
+const PROFILE_TONE_KEYS: ReadonlySet<string> = new Set(["tone", "register", "voice"]);
+
+/** DefinitionDelta from one configuration-directive change pair (C2). */
+function changeDelta(
+  key: string,
+  value: string,
+):
+  | { readonly addressOwnerName: string }
+  | { readonly removeAddress: true }
+  | { readonly extraDirective: string } {
+  if (PROFILE_ADDRESS_KEYS.has(key) && value.trim().length > 0) {
+    return { addressOwnerName: value.trim() };
+  }
+  if (PROFILE_REMOVE_ADDRESS_KEYS.has(key)) {
+    return { removeAddress: true };
+  }
+  if (PROFILE_TONE_KEYS.has(key)) {
+    return { extraDirective: `Voice note: ${key}: ${value}` };
+  }
+  return { extraDirective: `${key}: ${value}` };
+}
+
+/** Preference-shape detector (C2): address/tone/about-you statements. */
+const PREFERENCE_STATEMENT_RE =
+  /\b(?:call|address|refer to) (?:me|him|her|them)\b|\bmy (?:name|tone|persona|profile)\b|\bhow you (?:talk|speak|address) to me\b|\bprefer(?:ably)?\b.{0,40}\b(?:call|address|tone|name)\b/i;
+/** Name-shaped term extractor for re-typed address preferences (C2). */
+const ADDRESS_TERM_RE = /\b(?:call|address) (?:me|him|her|them) ([A-Za-z][A-Za-z'.-]{0,59})/i;
+
+/**
+ * Reset C2: preference-shaped memory proposals are re-typed to
+ * configuration_directive at parse — "how you treat me" belongs in the
+ * profile lane, never in semantic memory. Returns the re-typed proposal or
+ * null when the input is an ordinary memory_candidate.
+ */
+export function preferenceRoutingRetype(
+  proposal: MemoryCandidateProposal,
+): ConfigurationDirectiveProposal | null {
+  if (!PREFERENCE_STATEMENT_RE.test(proposal.summary)) return null;
+  const term = ADDRESS_TERM_RE.exec(proposal.summary);
+  if (term !== null) {
+    return {
+      type: "configuration_directive",
+      target_principal: "self",
+      target: "interaction_profile",
+      change: { ownerName: term[1]!.trim() },
+    };
+  }
+  return {
+    type: "configuration_directive",
+    target_principal: "self",
+    target: "interaction_profile",
+    change: { tone: proposal.summary },
+  };
+}
+
 function changeDirectives(change: Readonly<Record<string, string>>): string[] {
   return Object.entries(change).map(([key, value]) => `${key}: ${value}`);
 }
@@ -984,8 +1064,8 @@ export async function applyConfigurationDirective(
       base = { definition: JOSCTL_PROFILE_DEFINITION, version: 1 };
     }
     let definition = base.definition;
-    for (const line of directives) {
-      definition = applyDefinitionDelta(definition, { extraDirective: line });
+    for (const [key, value] of Object.entries(proposal.change)) {
+      definition = applyDefinitionDelta(definition, changeDelta(key, value));
     }
     const version = await nextProfileVersion(db, {
       principalId: input.principalId,
@@ -1044,8 +1124,8 @@ export async function applyConfigurationDirective(
     (await activeProfile(db, { principalId: targetId, surface: PROFILE_SURFACE }))?.definition ??
     JOSCTL_PROFILE_DEFINITION;
   let definition = base;
-  for (const line of directives) {
-    definition = applyDefinitionDelta(definition, { extraDirective: line });
+  for (const [key, value] of Object.entries(proposal.change)) {
+    definition = applyDefinitionDelta(definition, changeDelta(key, value));
   }
   const version = await nextProfileVersion(db, {
     principalId: targetId,
@@ -1301,7 +1381,7 @@ export async function applyMemoryCandidate(
     return {
       applied: false,
       reason: "duplicate",
-      reply: "Already captured — it's in your review queue.",
+      reply: "Already noted — it's waiting in your review queue.",
       candidateId,
     };
   }

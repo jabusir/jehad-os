@@ -357,7 +357,29 @@ export interface ThreadMetadata {
   readonly lastStance?: ThreadStance;
   readonly profile_override?: ThreadProfileOverride;
   readonly pendingProposal?: ThreadPendingProposal;
+  /** Amendment 5: per-type pending slots (ordered oldest→newest). */
+  readonly pendingProposals?: readonly ThreadPendingProposal[];
   readonly pendingProbe?: ThreadPendingProbe;
+}
+
+/**
+ * Amendment 5 salience view: pending proposals keyed by type (at most one
+ * per type by the interpreter contract). Derives from the array when
+ * present, else from the legacy single slot.
+ */
+export function pendingProposalsByType(
+  metadata: ThreadMetadata | null,
+): ReadonlyMap<ThreadPendingProposalType, ThreadPendingProposal> {
+  const map = new Map<ThreadPendingProposalType, ThreadPendingProposal>();
+  if (metadata === null) return map;
+  if (metadata.pendingProposals !== undefined) {
+    for (const proposal of metadata.pendingProposals) map.set(proposal.type, proposal);
+    return map;
+  }
+  if (metadata.pendingProposal !== undefined) {
+    map.set(metadata.pendingProposal.type, metadata.pendingProposal);
+  }
+  return map;
 }
 
 /**
@@ -411,6 +433,7 @@ type MutableThreadMetadata = {
   lastStance?: ThreadStance;
   profile_override?: ThreadProfileOverride;
   pendingProposal?: ThreadPendingProposal;
+  pendingProposals?: ThreadPendingProposal[];
   pendingProbe?: ThreadPendingProbe;
 };
 
@@ -487,6 +510,7 @@ export function mergeThreadState(
   // never produce or mutate it (setThreadPendingProposal owns it); a NEW
   // turn's proposal replaces it only through that writer.
   if (base.pendingProposal !== undefined) merged.pendingProposal = base.pendingProposal;
+  if (base.pendingProposals !== undefined) merged.pendingProposals = [...base.pendingProposals];
   // W6-phase-2: the reminder probe rides along untouched — turn artifacts
   // never produce or mutate it (setThreadPendingProbe owns it; the sweep
   // writes it, the probe-reply pre-pass clears it).
@@ -505,6 +529,9 @@ export function retractLastStance(metadata: ThreadMetadata | null): ThreadMetada
     ...(metadata.pendingProposal !== undefined
       ? { pendingProposal: metadata.pendingProposal }
       : {}),
+    ...(metadata.pendingProposals !== undefined
+      ? { pendingProposals: metadata.pendingProposals }
+      : {}),
     ...(metadata.pendingProbe !== undefined ? { pendingProbe: metadata.pendingProbe } : {}),
   };
 }
@@ -520,6 +547,7 @@ export function parseThreadMetadata(value: unknown): ThreadMetadata | null {
       key !== "lastStance" &&
       key !== "profile_override" &&
       key !== "pendingProposal" &&
+      key !== "pendingProposals" &&
       key !== "pendingProbe"
     ) {
       return null;
@@ -568,6 +596,20 @@ export function parseThreadMetadata(value: unknown): ThreadMetadata | null {
     const pending = parsePendingProposal(obj.pendingProposal);
     if (pending === null) return null;
     metadata.pendingProposal = pending;
+  }
+  if (obj.pendingProposals !== undefined) {
+    if (!Array.isArray(obj.pendingProposals)) return null;
+    if (obj.pendingProposals.length === 0) return null;
+    const seen = new Set<string>();
+    const entries: ThreadPendingProposal[] = [];
+    for (const item of obj.pendingProposals) {
+      const pending = parsePendingProposal(item);
+      if (pending === null) return null;
+      if (seen.has(pending.type)) return null;
+      seen.add(pending.type);
+      entries.push(pending);
+    }
+    metadata.pendingProposals = entries;
   }
   if (obj.pendingProbe !== undefined) {
     const probe = parsePendingProbe(obj.pendingProbe);
@@ -750,6 +792,64 @@ export async function setThreadPendingProposal(
       : {}),
     ...(existing.pendingProbe !== undefined ? { pendingProbe: existing.pendingProbe } : {}),
     ...(opts.pending !== null ? { pendingProposal: opts.pending } : {}),
+    ...(opts.pending !== null ? { pendingProposals: [opts.pending] } : {}),
+  };
+  await db.query(
+    `UPDATE interaction_threads SET metadata = $2::jsonb WHERE id = $1::uuid`,
+    [opts.threadId, JSON.stringify(merged)],
+  );
+}
+
+/**
+ * Amendment 5: write the full per-type pending set (ordered oldest→newest,
+ * at most one per type). Keeps the legacy single `pendingProposal` slot
+ * pointing at the LAST entry so every existing reader (pending-state line,
+ * bare-approve deferral, claim audit) stays coherent. `null` clears both.
+ */
+export async function setThreadPendingProposals(
+  db: QueryExecutor,
+  opts: {
+    readonly threadId: string;
+    readonly principalId: string;
+    readonly pending: readonly ThreadPendingProposal[] | null;
+  },
+): Promise<void> {
+  if (opts.pending !== null) {
+    if (opts.pending.length === 0) {
+      throw new Error("setThreadPendingProposals: empty array — pass null to clear");
+    }
+    const seen = new Set<string>();
+    for (const proposal of opts.pending) {
+      if (seen.has(proposal.type)) {
+        throw new Error("setThreadPendingProposals: duplicate proposal type");
+      }
+      seen.add(proposal.type);
+    }
+    const candidate: unknown = { pendingProposals: [...opts.pending] };
+    if (parseThreadMetadata(candidate) === null) {
+      throw new Error("setThreadPendingProposals: entries failed the strict shape");
+    }
+  }
+  const row = await db.query(
+    `SELECT principal_id, metadata FROM interaction_threads WHERE id = $1::uuid FOR UPDATE`,
+    [opts.threadId],
+  );
+  const thread = row.rows[0];
+  if (thread === undefined || String(thread.principal_id) !== opts.principalId) {
+    throw new Error("setThreadPendingProposals: thread does not belong to the requesting principal");
+  }
+  const existing = parseThreadMetadata(thread.metadata) ?? {};
+  const last = opts.pending === null ? undefined : opts.pending[opts.pending.length - 1]!;
+  const merged: Record<string, unknown> = {
+    ...(existing.topic !== undefined ? { topic: existing.topic } : {}),
+    ...(existing.referents !== undefined ? { referents: existing.referents } : {}),
+    ...(existing.lastStance !== undefined ? { lastStance: existing.lastStance } : {}),
+    ...(existing.profile_override !== undefined
+      ? { profile_override: existing.profile_override }
+      : {}),
+    ...(existing.pendingProbe !== undefined ? { pendingProbe: existing.pendingProbe } : {}),
+    ...(last !== undefined ? { pendingProposal: last } : {}),
+    ...(opts.pending !== null ? { pendingProposals: [...opts.pending] } : {}),
   };
   await db.query(
     `UPDATE interaction_threads SET metadata = $2::jsonb WHERE id = $1::uuid`,

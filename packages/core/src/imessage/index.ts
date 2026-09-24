@@ -9,6 +9,7 @@ export * from "./redact.js";
 export * from "./threads.js";
 export * from "./profiles.js";
 export * from "./capture.js";
+export * from "./calibration-verbs.js";
 export * from "./review-commands.js";
 export * from "./calendar-actions.js";
 export * from "./propose-schedule.js";

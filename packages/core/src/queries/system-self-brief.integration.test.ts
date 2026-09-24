@@ -96,7 +96,7 @@ describe.skipIf(!TEST_DATABASE_URL)("system.self_brief (integration)", () => {
     });
     expect(brief.actions).toEqual({ calendarWrite: true, commitmentTracking: true });
     const text = renderSelfBrief(brief);
-    expect(text).toContain("sources: calendar read; gmail metadata_only (sender patterns only — never subjects or bodies)");
+    expect(text).toContain("sources: calendar read; gmail metadata_only histogram + on-demand content search/read (subjects and sanitized bodies, last 7 days only)");
     expect(text).toContain("conversation: bounded iMessage threads; working context 72h; raw messages kept 7d");
   });
 

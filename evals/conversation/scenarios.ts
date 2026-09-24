@@ -13,8 +13,56 @@ export interface ScenarioTurn {
   readonly modelScript: readonly ScriptedPass[];
 }
 
+/** C11 seed: open the nightly calibration item (via the calibration service,
+ * like the service integration tests) with prompt_sent_at = the given ISO
+ * instant. The runner derives the owner-local period_date from that instant,
+ * so a prompt at 20:30 PT is eligible for turns later the same evening. */
+export interface SeedCalibrationItem {
+  readonly promptSentAt: string;
+}
+
+/** C11 seed: one gmail_messages row (ADR-0016 content store). ageHours is
+ * relative to the scenario clock, so fixtures stay inside the 7-day
+ * retention window regardless of wall-clock time. */
+export interface SeedGmailMessage {
+  readonly from: string;
+  readonly subject: string;
+  readonly body: string;
+  readonly ageHours: number;
+}
+
+/** C11 seed block — state the scenario needs BEFORE turn 1. */
+export interface ScenarioSeed {
+  readonly calibrationItem?: SeedCalibrationItem;
+  readonly gmailMessages?: readonly SeedGmailMessage[];
+}
+
+export interface Scenario {
+  readonly id: string;
+  readonly description: string;
+  readonly principal: string;
+  readonly requires: readonly string[];
+  /** C11: ISO instant of turn 1 (overrides the 2026-09-21 default anchor).
+   * One turn per minute from there, same as the default. */
+  readonly clock?: string;
+  readonly seed?: ScenarioSeed;
+  readonly turns: readonly ScenarioTurn[];
+  readonly expectations: ScenarioExpectations;
+}
+
 export interface DbPin {
   readonly sql: string;
+  readonly expectOne: boolean;
+  readonly expectZero: boolean;
+}
+
+/** C11 (intelligence-reset §6): a deterministic-reply marker pin — counts
+ * `imessage.converse.replied` audit rows whose outputs_ref carries
+ * `deterministic = <marker>`, across the WHOLE scenario. Model replies carry
+ * no deterministic marker, so expect_zero on e.g. "calibration-missed" pins
+ * "this turn class never terminates deterministically" without pinning copy. */
+export interface AuditMarkerPin {
+  readonly marker: string;
   readonly expectOne: boolean;
   readonly expectZero: boolean;
 }
@@ -32,15 +80,19 @@ export interface ScenarioExpectations {
   /** W6(a/R8): exact count of `imessage.converse.interpret` audit rows the
    * interpreter's caller must emit for the final turn. */
   readonly interpretAudits?: number;
-}
-
-export interface Scenario {
-  readonly id: string;
-  readonly description: string;
-  readonly principal: string;
-  readonly requires: readonly string[];
-  readonly turns: readonly ScenarioTurn[];
-  readonly expectations: ScenarioExpectations;
+  /** C11: needles that must be absent from EVERY turn's delivered reply
+   * (machinery vocabulary, canned acks) — not just the final turn. Turns
+   * that produced no reply are failed separately by the final-turn check. */
+  readonly everyTurnNotContains?: readonly string[];
+  /** C11: deterministic-reply marker pins over the scenario (see
+   * AuditMarkerPin). */
+  readonly auditMarkers?: readonly AuditMarkerPin[];
+  /** C11: needles that must appear in the final turn's answer-pass PROMPT
+   * (prompt-level pins: persona fragment, self-brief lines). Checked over
+   * every prompt the runner classified as the answer pass, final turn. */
+  readonly answerPromptContains?: readonly string[];
+  /** C11: needles that must NOT appear in the final turn's answer prompts. */
+  readonly answerPromptNotContains?: readonly string[];
 }
 
 export interface ScenarioFile {
@@ -144,6 +196,119 @@ function parseTurns(value: unknown, where: string, errors: string[]): readonly S
   return turns.length === value.length ? turns : undefined;
 }
 
+const isIsoInstant = (value: string): boolean => {
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
+};
+
+function parseIsoString(value: unknown, where: string, errors: string[]): string | undefined {
+  if (!isNonEmptyString(value) || !isIsoInstant(value)) {
+    errors.push(`${where}: must be an ISO-8601 instant (e.g. 2026-09-22T03:45:00.000Z)`);
+    return undefined;
+  }
+  return value;
+}
+
+/** C11 marker pin: same expect_one/expect_zero discipline as db pins. */
+function parseAuditMarkerPin(value: unknown, where: string, errors: string[]): AuditMarkerPin | undefined {
+  if (!isObject(value)) {
+    errors.push(`${where}: must be an object`);
+    return undefined;
+  }
+  const marker = value["marker"];
+  if (!isNonEmptyString(marker)) {
+    errors.push(`${where}.marker: must be a non-empty string`);
+    return undefined;
+  }
+  const expectOne = value["expect_one"] === true;
+  const expectZero = value["expect_zero"] === true;
+  if (expectOne === expectZero) {
+    errors.push(`${where}: exactly one of expect_one / expect_zero must be true`);
+    return undefined;
+  }
+  return { marker, expectOne, expectZero };
+}
+
+function markerPins(
+  value: unknown,
+  where: string,
+  errors: string[],
+): readonly AuditMarkerPin[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    errors.push(`${where}: must be a non-empty array of {marker, expect_one | expect_zero}`);
+    return undefined;
+  }
+  const pins: AuditMarkerPin[] = [];
+  for (const [index, rawPin] of value.entries()) {
+    const pin = parseAuditMarkerPin(rawPin, `${where}[${index}]`, errors);
+    if (pin !== undefined) pins.push(pin);
+  }
+  return pins.length === value.length ? pins : undefined;
+}
+
+function parseSeed(value: unknown, where: string, errors: string[]): ScenarioSeed | undefined {
+  if (value === undefined) return undefined;
+  if (!isObject(value)) {
+    errors.push(`${where}: must be an object`);
+    return undefined;
+  }
+  let calibrationItem: SeedCalibrationItem | undefined;
+  const rawCalibration = value["calibrationItem"];
+  if (rawCalibration !== undefined) {
+    if (!isObject(rawCalibration)) {
+      errors.push(`${where}.calibrationItem: must be an object`);
+      return undefined;
+    }
+    const promptSentAt = parseIsoString(
+      rawCalibration["prompt_sent_at"],
+      `${where}.calibrationItem.prompt_sent_at`,
+      errors,
+    );
+    if (promptSentAt === undefined) return undefined;
+    calibrationItem = { promptSentAt };
+  }
+  let gmailMessages: readonly SeedGmailMessage[] | undefined;
+  const rawMessages = value["gmailMessages"];
+  if (rawMessages !== undefined) {
+    if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
+      errors.push(`${where}.gmailMessages: must be a non-empty array of {from, subject, body, age_hours}`);
+      return undefined;
+    }
+    const messages: SeedGmailMessage[] = [];
+    for (const [index, rawMessage] of rawMessages.entries()) {
+      const messageWhere = `${where}.gmailMessages[${index}]`;
+      if (!isObject(rawMessage)) {
+        errors.push(`${messageWhere}: must be an object`);
+        continue;
+      }
+      const from = rawMessage["from"];
+      const subject = rawMessage["subject"];
+      const body = rawMessage["body"];
+      const ageHours = rawMessage["age_hours"];
+      if (
+        !isNonEmptyString(from) ||
+        !isNonEmptyString(subject) ||
+        !isNonEmptyString(body) ||
+        typeof ageHours !== "number" || !Number.isFinite(ageHours) || ageHours <= 0 || ageHours > 168
+      ) {
+        errors.push(
+          `${messageWhere}: from/subject/body must be non-empty strings and age_hours a number in (0, 168] (7-day retention)`,
+        );
+        continue;
+      }
+      messages.push({ from, subject, body, ageHours });
+    }
+    if (messages.length !== rawMessages.length) return undefined;
+    gmailMessages = messages;
+  }
+  if (calibrationItem === undefined && gmailMessages === undefined) {
+    errors.push(`${where}: at least one of calibrationItem / gmailMessages is required`);
+    return undefined;
+  }
+  return { calibrationItem, gmailMessages };
+}
+
 function parseExpectations(value: unknown, where: string, errors: string[]): ScenarioExpectations | undefined {
   if (!isObject(value)) {
     errors.push(`${where}: must be an object`);
@@ -174,6 +339,23 @@ function parseExpectations(value: unknown, where: string, errors: string[]): Sce
     errors.push(`${where}.interpret_audits: must be a positive integer`);
     return undefined;
   }
+  const everyTurnNotContains = stringArray(
+    value["every_turn_not_contains"],
+    `${where}.every_turn_not_contains`,
+    errors,
+  );
+  const auditMarkers = markerPins(value["audit_markers"], `${where}.audit_markers`, errors);
+  if (value["audit_markers"] !== undefined && auditMarkers === undefined) return undefined;
+  const answerPromptContains = stringArray(
+    value["answer_prompt_contains"],
+    `${where}.answer_prompt_contains`,
+    errors,
+  );
+  const answerPromptNotContains = stringArray(
+    value["answer_prompt_not_contains"],
+    `${where}.answer_prompt_not_contains`,
+    errors,
+  );
   const rawPins = value["db_pins"];
   let dbPins: readonly DbPin[] | undefined;
   if (rawPins !== undefined) {
@@ -196,7 +378,11 @@ function parseExpectations(value: unknown, where: string, errors: string[]): Sce
     replyNotContains === undefined &&
     dbPins === undefined &&
     noPersistenceClaimWithoutWrite === undefined &&
-    interpretAudits === undefined
+    interpretAudits === undefined &&
+    everyTurnNotContains === undefined &&
+    auditMarkers === undefined &&
+    answerPromptContains === undefined &&
+    answerPromptNotContains === undefined
   ) {
     errors.push(`${where}: at least one expectation is required`);
     return undefined;
@@ -209,6 +395,10 @@ function parseExpectations(value: unknown, where: string, errors: string[]): Sce
     dbPins,
     noPersistenceClaimWithoutWrite,
     interpretAudits,
+    everyTurnNotContains,
+    auditMarkers,
+    answerPromptContains,
+    answerPromptNotContains,
   };
 }
 
@@ -233,10 +423,13 @@ function parseScenario(value: unknown, where: string, errors: string[]): Scenari
     return undefined;
   }
   const requires = stringArray(value["requires"], `${where}.requires`, errors) ?? [];
+  const clock =
+    value["clock"] === undefined ? undefined : parseIsoString(value["clock"], `${where}.clock`, errors);
+  const seed = parseSeed(value["seed"], `${where}.seed`, errors);
   const turns = parseTurns(value["turns"], `${where}.turns`, errors);
   const expectations = parseExpectations(value["expectations"], `${where}.expectations`, errors);
   if (turns === undefined || expectations === undefined) return undefined;
-  return { id, description, principal, requires, turns, expectations };
+  return { id, description, principal, requires, clock, seed, turns, expectations };
 }
 
 export function parseScenarioFile(raw: unknown): ScenarioFile {

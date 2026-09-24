@@ -16,6 +16,26 @@ const CAPABILITY_EXPORT_PATTERNS: Readonly<Record<string, RegExp>> = {
   turn_interpreter: /turn[\s_.-]?interpret|Interpretation/i,
   // W6(b) live self-model (R9): matches once system.self_brief lands.
   self_brief: /self[\s_.-]?brief/i,
+  // C11 (intelligence-reset §6): probes for the parallel reset lanes. Each
+  // flips true only when core exports the lane's landing marker, so the
+  // POST-state scenarios skip cleanly until the lane merges — then run as
+  // hard gates. Deliberately shaped to NOT match today's exports (verified
+  // against the core export list).
+  // C1: the miss becomes a side effect + the answer pass still runs —
+  // matches once the lane exports its miss-context seam (e.g.
+  // buildCalibrationMissContext / CALIBRATION_MISS_SIDEEFFECT).
+  calibration_miss_side_effect: /calibration[\s_.-]?miss[\s_.-]?(side[\s_.-]?effect|context)/i,
+  // C2: configuration_directive gains address/tone keys routed into the
+  // profile definition (e.g. PROFILE_ADDRESS_KEYS / applyAddressDirective).
+  profile_address_keys: /profile[\s_.-]?address|address[\s_.-]?keys?[\s_.-]?(directive|routing)|preference[\s_.-]?routing/i,
+  // Amendment 5 / §10: per-type pendingProposal slots + bare-yes salience
+  // resolution (e.g. pendingProposalsByType / resolveSalientProposal).
+  per_type_proposal_slots: /per[\s_.-]?type[\s_.-]?proposal|proposal[\s_.-]?salience|salient[\s_.-]?proposal|pending[\s_.-]?proposals?[\s_.-]?by[\s_.-]?type/i,
+  // C4: gmail.search / gmail.read read tools over gmail_content (e.g.
+  // gmailSearchRoutingLine / renderGmailSearchBlock — the gmailRoutingLine
+  // convention). searchGmailContent (GC0 store query) deliberately does
+  // NOT match.
+  gmail_content_tools: /gmail[\s_.-]?(search|read)[\s_.-]?(tool|routing)|renderGmail(Search|Read)/i,
 };
 
 export async function probeCoreCapabilities(capabilities: readonly string[]): Promise<Record<string, boolean>> {

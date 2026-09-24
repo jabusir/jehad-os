@@ -310,6 +310,53 @@ export interface GmailContentSearch {
   readonly limit?: number;
 }
 
+export interface GmailContentKeywordSearch {
+  /** Case-insensitive literal substring (LIKE wildcards escaped), matched
+   *  over subject, from_addr, and body_text. */
+  readonly text: string;
+  /** ISO instant lower bound over internal_date (the received time). */
+  readonly since?: string;
+  readonly limit?: number;
+}
+
+/** LIKE-pattern literal: the needle wrapped for a contained substring
+ *  match, with %, _, and \ escaped so it cannot widen into a wildcard. */
+function likeLiteral(needle: string): string {
+  return `%${needle.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+}
+
+/**
+ * Bounded keyword search over retained content, principal-scoped,
+ * newest-first by received time (intelligence reset C4 — the read-tool
+ * retrieval seam). Not full mail search: a literal substring across
+ * subject, sender, and body; no operators, no attachments. Read-only.
+ */
+export async function searchGmailContentByKeyword(
+  db: SqlExecutor,
+  principalId: string,
+  query: GmailContentKeywordSearch,
+): Promise<readonly GmailContentRecord[]> {
+  if (query.text.length === 0) return [];
+  const conditions = [
+    "principal_id = $1",
+    "(lower(coalesce(subject, '')) LIKE $2 ESCAPE '\\' OR lower(coalesce(from_addr, '')) LIKE $2 ESCAPE '\\' OR lower(coalesce(body_text, '')) LIKE $2 ESCAPE '\\')",
+  ];
+  const params: unknown[] = [principalId, likeLiteral(query.text.toLowerCase())];
+  if (query.since !== undefined) {
+    params.push(query.since);
+    conditions.push(`internal_date >= $${params.length}::timestamptz`);
+  }
+  params.push(Math.min(Math.max(query.limit ?? 20, 1), 100));
+  const result = await db.query(
+    `SELECT ${RECORD_COLUMNS} FROM gmail_messages
+     WHERE ${conditions.join(" AND ")}
+     ORDER BY internal_date DESC NULLS LAST
+     LIMIT $${params.length}`,
+    params,
+  );
+  return (result.rows as RecordRow[]).map(toRecord);
+}
+
 /** Bounded recent-content read, principal-scoped, oldest-first. */
 export async function searchGmailContent(
   db: SqlExecutor,

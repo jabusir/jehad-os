@@ -615,7 +615,7 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
       )
     ).rows[0]!.c as string;
     expect(offer).toContain("Staged as a delegated outcome");
-    expect(offer).toContain("Reply 'approve' to start it");
+    expect(offer).toContain("Want me to start it?");
     // the offer stage never wrote an outcome row
     const beforeCount = (
       await db.pool.query("SELECT count(*)::int AS n FROM outcomes")
@@ -686,10 +686,49 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     expect(missedCount).toBe(1); // unchanged
   });
 
-  it("CALIBRATION: an explicit correction stores its category — NO 2h window required, zero model calls", async () => {
+  it("CALIBRATION: an explicit correction inside the window is a SIDE EFFECT — cognition still answers (reset C1)", async () => {
     await grant(jehadId);
-    // Time-of-day safety: the suite clock is wall-anchored; +4h below must
-    // not cross local midnight or the item's civil date stops matching.
+    // Time-of-day safety: the suite clock is wall-anchored; the +10min below
+    // must not cross local midnight or the item's civil date stops matching.
+    const w = new Date(now);
+    now = new Date(w.getFullYear(), w.getMonth(), w.getDate(), 8, 0, 0);
+    await openCalibrationItem(db.pool, {
+      principalId: jehadId,
+      periodDate: civilDateOf(now),
+      summary: { day: civilDateOf(now), entries: [] },
+      surface: "imessage",
+    });
+    now = new Date(now.getTime() + 10 * 60_000); // inside the 2h window
+    // Pin prompt_sent_at to the test clock (openCalibrationItem stamps the
+    // real wall clock; a future-stamped prompt would make every window test
+    // vacuously "inside").
+    await db.pool.query(
+      "UPDATE calibration_items SET prompt_sent_at = $1::timestamptz WHERE principal_id = $2::uuid",
+      [new Date(now.getTime() - 10 * 60_000).toISOString(), jehadId],
+    );
+    const callsBefore = provider.requests.length;
+    queue = [{ text: '{"tool":"none"}' }, { text: "That's on me — the walk at noon, got it." }];
+    await turn(jehadId, JEHAD, "you missed the walk I took at noon — that's the biggest thing");
+    const rows = (
+      await db.pool.query("SELECT source_attribution FROM feedback WHERE verdict = 'missed' AND item_type = 'calibration' ORDER BY created_at DESC")
+    ).rows;
+    expect(rows).toHaveLength(1); // exactly one side-effect row, never two
+    expect(rows[0]!.source_attribution).toBe("observed_but_missing"); // side effect stored
+    expect(provider.requests.length).toBeGreaterThan(callsBefore); // cognition ran
+    const reply = (
+      await db.pool.query(
+        "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
+      )
+    ).rows[0]!.c as string;
+    expect(reply).toContain("the walk at noon"); // the model's answer shipped
+    expect(reply).not.toContain("Correction logged"); // no canned ack, ever
+    // memory boundary: no candidates ever
+    const cands = await db.pool.query("SELECT count(*)::int AS n FROM memory_candidates");
+    expect(cands.rows[0]!.n).toBe(0);
+  });
+
+  it("CALIBRATION: corrections outside the window ride normal cognition — no feedback row, no hijack (reset C1)", async () => {
+    await grant(jehadId);
     const w = new Date(now);
     now = new Date(w.getFullYear(), w.getMonth(), w.getDate(), 8, 0, 0);
     await openCalibrationItem(db.pool, {
@@ -699,22 +738,25 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
       surface: "imessage",
     });
     now = new Date(now.getTime() + 4 * 60 * 60_000); // far outside the 2h window
-    const callsBefore = provider.requests.length;
+    await db.pool.query(
+      "UPDATE calibration_items SET prompt_sent_at = $1::timestamptz WHERE principal_id = $2::uuid",
+      [new Date(now.getTime() - 4 * 60 * 60_000).toISOString(), jehadId],
+    );
+    const before = (
+      await db.pool.query("SELECT count(*)::int AS n FROM feedback WHERE verdict = 'missed' AND item_type = 'calibration'")
+    ).rows[0]!.n;
+    queue = [{ text: '{"tool":"none"}' }, { text: "Makes sense — the walk at noon matters." }];
     await turn(jehadId, JEHAD, "you missed the walk I took at noon — that's the biggest thing");
-    const row = (
-      await db.pool.query("SELECT source_attribution FROM feedback WHERE verdict = 'missed' AND item_type = 'calibration' ORDER BY created_at DESC LIMIT 1")
-    ).rows[0]!;
-    expect(row.source_attribution).toBe("observed_but_missing"); // first-match grammar
-    expect(provider.requests.length).toBe(callsBefore); // deterministic lane, no model
+    const after = (
+      await db.pool.query("SELECT count(*)::int AS n FROM feedback WHERE verdict = 'missed' AND item_type = 'calibration'")
+    ).rows[0]!.n;
+    expect(after).toBe(before); // no correction lane outside the window
     const reply = (
       await db.pool.query(
         "SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply' ORDER BY created_at DESC LIMIT 1",
       )
     ).rows[0]!.c as string;
-    expect(reply).toContain("Correction logged");
-    // memory boundary: no candidates ever
-    const cands = await db.pool.query("SELECT count(*)::int AS n FROM memory_candidates");
-    expect(cands.rows[0]!.n).toBe(0);
+    expect(reply).toContain("Makes sense"); // ordinary conversation continued
   });
 
   it("CALIBRATION: 'I skipped the 3pm thing' graduates the matched event's occurrence canonically", async () => {
@@ -782,9 +824,9 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     queue = [{ text: '{"tool":"none"}' }, { text: "routed fine" }];
     await turn(jehadId, JEHAD, "hello there");
     const models = provider.requests.map((r: { model: string }) => r.model);
-    expect(models[0]).toBe("openai/gpt-4.1-mini"); // repo policy passes.route
-    expect(models[1]).toBe("openai/gpt-4.1-mini"); // interpret pass (route-class)
-    expect(models[2]).toBe("openai/gpt-4o-mini"); // W3 tier resolution: short no-tool chat → FAST
+    expect(models[0]).toBe("openai/gpt-4.1"); // repo policy passes.route (reset C7)
+    expect(models[1]).toBe("openai/gpt-4.1"); // interpret pass (route-class)
+    expect(models[2]).toBe("openai/gpt-4.1"); // W3 tier resolution: short no-tool chat → FAST (C7)
   });
 
   it("MODEL ROUTING: unparseable route output escalates ONCE to the fallback model, then proceeds", async () => {
@@ -797,9 +839,9 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
     await turn(jehadId, JEHAD, "what is on my calendar today");
     expect(provider.requests.length).toBe(4); // route + fallback retry + interpret + answer
     const models = provider.requests.map((r: { model: string }) => r.model);
-    expect(models[0]).toBe("openai/gpt-4.1-mini");
+    expect(models[0]).toBe("openai/gpt-4.1");
     expect(models[1]).toBe("google/gemini-3.8-flash");
-    expect(models[2]).toBe("openai/gpt-4.1-mini"); // interpret pass (route-class)
+    expect(models[2]).toBe("openai/gpt-4.1"); // interpret pass (route-class)
     expect(models[3]).toBe("anthropic/claude-sonnet-4.5"); // W3 tier resolution: STANDARD (question markers)
   });
 

@@ -1,10 +1,13 @@
 import { FakeModelProvider } from "@jehad/adapters";
 import type { ModelRequest, ModelResult } from "@jehad/adapters";
+import { randomUUID } from "node:crypto";
 import {
   CONVERSE_CAPABILITY,
   ModelEgressPolicyRegistry,
+  civilDateOf,
   handleInbound,
   issueGrant,
+  openCalibrationItem,
 } from "@jehad/core";
 import type { ConversationDeps, GatewayPrincipalPolicy } from "@jehad/core";
 import { migrateUp, seedDomains } from "@jehad/db";
@@ -31,6 +34,12 @@ export interface TurnObservation {
   readonly routedTools: readonly string[];
   readonly passes: readonly ("route" | "interpret" | "answer")[];
   readonly interpretation: InterpretationObservation;
+  /** C11: deterministic markers on this turn's `imessage.converse.replied`
+   * audit rows (outputs_ref->deterministic; model replies carry none). */
+  readonly auditMarkers: readonly string[];
+  /** C11: prompts dispatched as the answer pass this turn (prompt-level pins:
+   * persona fragment, self-brief). */
+  readonly answerPrompts: readonly string[];
   readonly scriptIssues: readonly string[];
 }
 
@@ -92,6 +101,7 @@ const CLEANUP_SQL = `
   DELETE FROM action_attempts; DELETE FROM action_intents;
   DELETE FROM model_calls; DELETE FROM runs; DELETE FROM notifications;
   DELETE FROM commitments; DELETE FROM interaction_profiles;
+  DELETE FROM gmail_messages; DELETE FROM outcomes;
   DELETE FROM capability_grants WHERE capability = 'imessage:converse';
 `;
 
@@ -147,12 +157,19 @@ export interface ExpectationContext {
   readonly writeEvidence?: boolean;
 }
 
+/** Marker-count helper for the C11 audit_markers pin: deterministic markers
+ * observed across every turn of the scenario. */
+function markerCount(markers: readonly string[], marker: string): number {
+  return markers.filter((observed) => observed === marker).length;
+}
+
 export function checkExpectations(
   expectations: ScenarioExpectations,
-  lastTurn: TurnObservation | null,
+  turns: readonly TurnObservation[],
   ctx: ExpectationContext = {},
 ): string[] {
   const failures: string[] = [];
+  const lastTurn = turns.at(-1) ?? null;
   if (lastTurn === null) {
     failures.push("scenario produced no turn observations");
     return failures;
@@ -172,6 +189,44 @@ export function checkExpectations(
         failures.push(
           `persistence claim "${claim}" without a durable write (no db write pin passed)`,
         );
+      }
+    }
+  }
+  // C11: machinery/canned-ack needles must be absent from EVERY delivered
+  // reply, not just the final one (hijack scenarios repeat the ack).
+  for (const [index, observation] of turns.entries()) {
+    if (observation.reply === null) continue;
+    for (const needle of expectations.everyTurnNotContains ?? []) {
+      if (observation.reply.includes(needle)) {
+        failures.push(`turn ${index + 1} reply contains "${needle}"`);
+      }
+    }
+  }
+  if (expectations.auditMarkers !== undefined) {
+    const allMarkers = turns.flatMap((observation) => observation.auditMarkers);
+    for (const pin of expectations.auditMarkers) {
+      const count = markerCount(allMarkers, pin.marker);
+      if (pin.expectOne && count !== 1) {
+        failures.push(`audit marker "${pin.marker}" expected exactly once across the scenario, got ${count}`);
+      }
+      if (pin.expectZero && count > 0) {
+        failures.push(`audit marker "${pin.marker}" terminal reply occurred ${count} time(s) — expected none`);
+      }
+    }
+  }
+  if (
+    expectations.answerPromptContains !== undefined ||
+    expectations.answerPromptNotContains !== undefined
+  ) {
+    const prompts = lastTurn.answerPrompts.join("\n");
+    if (prompts.length === 0) {
+      failures.push("answer prompt pins set but the final turn dispatched no answer pass");
+    } else {
+      for (const needle of expectations.answerPromptContains ?? []) {
+        if (!prompts.includes(needle)) failures.push(`answer prompt missing "${needle}"`);
+      }
+      for (const needle of expectations.answerPromptNotContains ?? []) {
+        if (prompts.includes(needle)) failures.push(`answer prompt contains "${needle}"`);
       }
     }
   }
@@ -256,6 +311,87 @@ async function interpretationsSince(
   return { audits: slice.length, payloads: slice.map((row) => row["payload"]) };
 }
 
+/** C11 observation: deterministic markers on `imessage.converse.replied`
+ * rows (outputs_ref->deterministic), sliced to this turn's window. Model
+ * replies audit without the key, so they never appear here. */
+async function replyMarkersSince(
+  pool: ConversationDeps["db"],
+  offset: number,
+): Promise<readonly string[]> {
+  const rows = await pool.query(
+    `SELECT (outputs_ref::jsonb)->>'deterministic' AS marker FROM audit_log WHERE action = 'imessage.converse.replied'`,
+  );
+  return rows.rows
+    .slice(offset)
+    .map((row) => row["marker"])
+    .filter((marker): marker is string => typeof marker === "string");
+}
+
+async function repliedRowCount(pool: ConversationDeps["db"]): Promise<number> {
+  const rows = await pool.query(
+    `SELECT count(*)::int AS n FROM audit_log WHERE action = 'imessage.converse.replied'`,
+  );
+  return Number(rows.rows[0]?.["n"] ?? 0);
+}
+
+/** C11 seed: open the nightly calibration item via the calibration service
+ * (the same call the nightly workflow makes), with prompt_sent_at stamped by
+ * the seed — the miss-eligibility window anchors on it. */
+async function seedCalibration(
+  pool: ConversationDeps["db"],
+  opts: { readonly principalId: string; readonly promptSentAt: string },
+): Promise<void> {
+  const sentAt = new Date(opts.promptSentAt);
+  const periodDate = civilDateOf(sentAt);
+  await openCalibrationItem(pool, {
+    principalId: opts.principalId,
+    periodDate,
+    summary: { kind: "calibration", day: periodDate, entries: [] },
+    surface: "imessage",
+    now: () => sentAt,
+  });
+}
+
+/** C11 seed: gmail_messages rows (ADR-0016 content store) for the C4
+ * content read tools. principal_id carries the principal NAME — the table's
+ * own convention (default 'josctl'). internal_date/ingested_at land
+ * age_hours before the scenario clock so fixtures stay inside retention. */
+async function seedGmail(
+  pool: ConversationDeps["db"],
+  opts: {
+    readonly principalName: string;
+    readonly anchor: Date;
+    readonly messages: readonly {
+      readonly from: string;
+      readonly subject: string;
+      readonly body: string;
+      readonly ageHours: number;
+    }[];
+  },
+): Promise<void> {
+  for (const [index, message] of opts.messages.entries()) {
+    const at = new Date(opts.anchor.getTime() - message.ageHours * 3_600_000).toISOString();
+    await pool.query(
+      `INSERT INTO gmail_messages
+         (id, gmail_message_id, thread_id, principal_id, domain_id, from_addr, to_addrs,
+          subject, snippet, body_text, body_bytes, internal_date, ingested_at)
+       VALUES ($1, $2, $3, $4, 'personal', $5, '[]'::jsonb, $6, $7, $8, $9, $10::timestamptz, $10::timestamptz)`,
+      [
+        randomUUID(),
+        `eval-gmail-${opts.principalName}-${index}`,
+        `eval-gmail-thread-${index}`,
+        opts.principalName,
+        message.from,
+        message.subject,
+        message.body.slice(0, 120),
+        message.body,
+        Buffer.byteLength(message.body, "utf8"),
+        at,
+      ],
+    );
+  }
+}
+
 async function replyContent(pool: ConversationDeps["db"], notificationId: string): Promise<string | null> {
   const rows = await pool.query(
     `SELECT payload->>'content' AS c FROM notifications WHERE id = $1::uuid`,
@@ -301,12 +437,15 @@ async function runScenario(
   ctx: {
     readonly scenario: Scenario;
     readonly principalId: string;
+    readonly principalName: string;
     readonly handle: string;
     readonly domainId: string;
   },
 ): Promise<ScenarioResult> {
-  const { scenario, principalId, handle, domainId } = ctx;
-  const anchor = new Date(ANCHOR_ISO);
+  const { scenario, principalId, principalName, handle, domainId } = ctx;
+  // C11: per-scenario clock override (the 2026-09-21 default anchor stays
+  // for scenarios that do not carry one).
+  const anchor = new Date(scenario.clock ?? ANCHOR_ISO);
   await issueGrant(pool, {
     principalId,
     runId: null,
@@ -315,6 +454,19 @@ async function runScenario(
     domainId,
     expiresAt: new Date(anchor.getTime() + GRANT_WINDOW_MS),
   });
+  if (scenario.seed?.calibrationItem !== undefined) {
+    await seedCalibration(pool, {
+      principalId,
+      promptSentAt: scenario.seed.calibrationItem.promptSentAt,
+    });
+  }
+  if (scenario.seed?.gmailMessages !== undefined && scenario.seed.gmailMessages.length > 0) {
+    await seedGmail(pool, {
+      principalName,
+      anchor,
+      messages: scenario.seed.gmailMessages,
+    });
+  }
 
   const knownPrincipals = new Set([scenario.principal]);
   const observations: TurnObservation[] = [];
@@ -326,6 +478,7 @@ async function runScenario(
         `SELECT count(*)::int AS n FROM audit_log WHERE action = 'imessage.converse.interpret'`,
       )
     ).rows[0];
+    const beforeReplied = await repliedRowCount(pool);
     const script = scriptedDispatch(turn.modelScript);
     const provider = new FakeModelProvider({ respond: script.responder });
     const deps: ConversationDeps = {
@@ -338,8 +491,12 @@ async function runScenario(
     const outcome = await handleInbound(deps, { principalId, handle, text: turn.user });
     const routedTools = await toolsUsedSince(pool, before);
     const interpretation = await interpretationsSince(pool, Number(beforeInterpretations?.["n"] ?? 0));
+    const auditMarkers = await replyMarkersSince(pool, beforeReplied);
     const reply = outcome.notificationId !== undefined ? await replyContent(pool, outcome.notificationId) : null;
     const passes = provider.requests.map((request) => passKindOf(request.prompt));
+    const answerPrompts = provider.requests
+      .filter((request) => passKindOf(request.prompt) === "answer")
+      .map((request) => request.prompt);
     const issues = [...script.mismatches()];
     if (script.consumed() !== turn.modelScript.length) {
       issues.push(`${turn.modelScript.length - script.consumed()} scripted pass(es) never dispatched`);
@@ -352,6 +509,8 @@ async function runScenario(
       routedTools,
       passes,
       interpretation,
+      auditMarkers,
+      answerPrompts,
       scriptIssues: issues,
     });
     scenarioNow = new Date(scenarioNow.getTime() + TURN_STEP_MS);
@@ -369,7 +528,7 @@ async function runScenario(
   );
   failures.push(...pinRun.failures);
   failures.push(
-    ...checkExpectations(scenario.expectations, observations.at(-1) ?? null, {
+    ...checkExpectations(scenario.expectations, observations, {
       writeEvidence: pinRun.writeEvidence,
     }),
   );
@@ -419,7 +578,15 @@ export async function runConversationEval(options: ConversationEvalOptions): Pro
         principals.set(scenario.principal, principal);
       }
       await db.pool.query(CLEANUP_SQL);
-      results.push(await runScenario(db.pool, { scenario, principalId: principal.id, handle: principal.handle, domainId }));
+      results.push(
+        await runScenario(db.pool, {
+          scenario,
+          principalId: principal.id,
+          principalName: scenario.principal,
+          handle: principal.handle,
+          domainId,
+        }),
+      );
     }
   } finally {
     await dropIsolatedTestDb(options.databaseUrl, db);

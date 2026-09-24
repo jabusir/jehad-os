@@ -10,6 +10,11 @@
  *
  * Outputs: docs/evals/answer-quality-2026-09.md (+ .raw.json with every
  * reply, judge score, latency and cost for independent review).
+ *
+ * §5 Track A mode: `tsx evals/answer-quality/run.ts --track-a
+ * [--candidates id,id] [--smoke] [--live] [--judge id]` — the multi-
+ * candidate bake-off (6 plan candidates, $4 smoke-gated split, extended
+ * candidates[] schema). See evals/model-bakeoff/track-a.ts.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -207,6 +212,13 @@ function markdownReport(input: {
 }
 
 async function main(): Promise<number> {
+  // §5 Track A multi-candidate mode — delegates to the model-bakeoff
+  // harness (hermetic dry run by default; live needs --live + key).
+  if (process.argv.includes("--track-a")) {
+    const { runTrackA } = await import("../model-bakeoff/track-a.js");
+    return runTrackA(process.argv.slice(2));
+  }
+
   loadDotEnv();
   const fixtures = loadAnswerFixtures(fixturesPath());
 

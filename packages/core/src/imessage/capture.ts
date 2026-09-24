@@ -20,6 +20,17 @@
 //
 // Audits carry ids/counts only — never content (the candidate row itself
 // carries content per the memory pipeline; that is its job).
+//
+// Provenance contract (C3): the candidate's provenance.sourceEventId is
+// ALWAYS the id of the canonical `capture.recorded` event this module
+// accepts into `events` — provenance must resolve to a real events row or
+// promotion gate 1 (`source_event_not_found`) rejects on approve. A
+// caller-passed sourceEventId (e.g. an imessage_transport_events row id)
+// is transport-level input only: it rides payload.metadata as
+// `transportSourceEventId` for idempotency (a transport id that already
+// produced a candidate never captures again) and is audited as a
+// `imessage.capture.source_event_mismatch` when it does not resolve to a
+// canonical events row — never content, ids only.
 
 import { createHash, randomUUID } from "node:crypto";
 import { recordAudit, type SqlExecutor } from "../actions/audit.js";
@@ -43,12 +54,12 @@ export const CAPTURE_TEXT_LIMIT = 2000;
 
 /** Deterministic ack — contract §5 (honest, free, cannot paraphrase memory). */
 export const CAPTURE_ACK_REPLY =
-  "Noted — captured for review; it becomes memory once you approve.";
+  "Noted. Say 'approve' to keep it as memory, or 'reject' to drop it.";
 /** Dedupe-window noop ack — contract §8 ("already captured"). */
-export const CAPTURE_ALREADY_REPLY = "Already captured — it's in your review queue.";
+export const CAPTURE_ALREADY_REPLY = "Already noted — it's waiting in your review queue.";
 /** Flood-cap ack — contract §8 (honest "capture limit reached"). */
 export const CAPTURE_LIMIT_REPLY =
-  "Capture limit reached for this hour — nothing was saved. Try again later.";
+  "I've hit my capture limit for this hour — try again later.";
 /** ESCALATE-1 honest denial for non-capture-enabled principals (contract §6). */
 export const CAPTURE_DENIED_REPLY =
   "I can't save memories from this chat — memory capture is enabled only for Jehad on this channel.";
@@ -61,12 +72,15 @@ export interface CaptureInput {
   readonly text: string;
   readonly threadId?: string;
   /**
-   * Id of an already-accepted `capture.recorded` event to use as the
-   * candidate's provenance (e.g. accepted upstream keyed on the ingest
-   * guid, externalId `imessage-capture:<guid>`). Absent → this module
-   * accepts the capture.recorded event itself. Synthetic events are never
-   * fabricated: without a sourceEventId the event is the real capture
-   * record of this turn.
+   * Transport-level id the caller associates with this turn (e.g. an
+   * `imessage_transport_events` row id). NEVER becomes the candidate's
+   * provenance — provenance always carries the `capture.recorded` event
+   * this module accepts, so it resolves to a real `events` row (promotion
+   * gate 1). Used only for idempotency (a transport id that already
+   * produced a candidate never captures again; see
+   * payload.metadata.transportSourceEventId) and for the
+   * `imessage.capture.source_event_mismatch` audit when it does not
+   * resolve to a canonical events row.
    */
   readonly sourceEventId?: string | null;
   readonly now: Date;
@@ -189,7 +203,12 @@ const CAPTURE_ACTOR = "system:imessage-gateway";
 /** ids/counts only — NEVER content (contract §8). */
 function audit(
   db: SqlExecutor,
-  action: "imessage.capture.proposed" | "imessage.capture.deduped" | "imessage.capture.denied" | "imessage.capture.capped",
+  action:
+    | "imessage.capture.proposed"
+    | "imessage.capture.deduped"
+    | "imessage.capture.denied"
+    | "imessage.capture.capped"
+    | "imessage.capture.source_event_mismatch",
   outputs: Record<string, unknown>,
 ): Promise<void> {
   return recordAudit(db, {
@@ -207,7 +226,10 @@ async function candidateForSourceEvent(
   sourceEventId: string,
 ): Promise<string | null> {
   const result = await db.query(
-    `SELECT id FROM memory_candidates WHERE provenance->>'sourceEventId' = $1 LIMIT 1`,
+    `SELECT id FROM memory_candidates
+      WHERE payload->'metadata'->>'transportSourceEventId' = $1
+         OR provenance->>'sourceEventId' = $1
+      LIMIT 1`,
     [sourceEventId],
   );
   const row = result.rows[0];
@@ -280,12 +302,14 @@ function forceReviewGateResult(now: Date): string {
  * model. Land order: policy gate → detection → source-event idempotency →
  * 24h content dedupe → flood cap → candidate + memory.proposed + audit.
  *
- * Replay safety (contract §7, triple idempotency): (a) a sourceEventId that
- * already produced a candidate never captures again; (b) identical
- * normalized content within the dedupe window is a noop + ack; (c) guid
- * redelivery is deduped upstream at ingest — the orchestrator passes the
- * guid-keyed capture.recorded event id as sourceEventId, so one guid → at
- * most one candidate, ever.
+ * Replay safety (contract §7, triple idempotency): (a) a caller-passed
+ * transport sourceEventId that already produced a candidate never captures
+ * again (matched on payload.metadata.transportSourceEventId, plus
+ * provenance for previously-minted event ids); (b) identical normalized
+ * content within the dedupe window is a noop + ack; (c) guid redelivery
+ * is deduped upstream at ingest — the orchestrator passes the guid's
+ * transport row id as sourceEventId, so one guid → at most one candidate,
+ * ever.
  */
 export async function considerCapture(
   db: SqlExecutor,
@@ -333,7 +357,9 @@ export async function considerCapture(
   const capturedText = redactContent(content).slice(0, CAPTURE_TEXT_LIMIT);
   const normalizedTextSha256 = sha256Hex(captureNormalize(content));
 
-  // 3a. Source-event idempotency — same sourceEventId never captures twice.
+  // 3a. Transport-id idempotency — a caller-passed sourceEventId that
+  //     already produced a candidate (metadata key or minted provenance)
+  //     never captures twice.
   if (input.sourceEventId != null) {
     const existing = await candidateForSourceEvent(db, input.sourceEventId);
     if (existing !== null) {
@@ -383,32 +409,47 @@ export async function considerCapture(
     return { captured: false, reason: "flood-cap", reply: CAPTURE_LIMIT_REPLY };
   }
 
-  // 4. Source event: the caller's capture.recorded event, or accept it here.
-  let sourceEventId: string = input.sourceEventId ?? "";
-  if (sourceEventId === "") {
-    const accepted = await acceptEvent(
-      db,
-      {
-        type: CAPTURE_EVENT_TYPE,
-        schemaVersion: 1,
-        source: CAPTURE_SOURCE,
-        externalId: `${CAPTURE_EXTERNAL_ID_PREFIX}${randomUUID()}`,
-        occurredAt: now.toISOString(),
-        domainId: CAPTURE_DOMAIN_KEY,
-        sensitivity: "normal",
-        payload: {
-          // NO raw text here — the statement lives in the candidate row
-          // (single content path); events keep refs + content hash only.
-          surface: CAPTURE_SURFACE,
-          threadId: input.threadId ?? null,
-          principalId: input.principalId,
-          normalizedTextSha256,
-        },
-        runId: null,
+  // 4. Provenance: ALWAYS accept the canonical capture.recorded event here
+  //    and use ITS id — provenance must resolve to a real events row
+  //    (promotion gate 1). A caller-passed id that does not resolve to a
+  //    canonical events row is audited (ids only), once per capture.
+  let transportMismatch = false;
+  if (input.sourceEventId != null) {
+    const found = await db.query(`SELECT 1 AS ok FROM events WHERE id = $1::uuid`, [
+      input.sourceEventId,
+    ]);
+    transportMismatch = found.rows.length === 0;
+  }
+  const accepted = await acceptEvent(
+    db,
+    {
+      type: CAPTURE_EVENT_TYPE,
+      schemaVersion: 1,
+      source: CAPTURE_SOURCE,
+      externalId: `${CAPTURE_EXTERNAL_ID_PREFIX}${randomUUID()}`,
+      occurredAt: now.toISOString(),
+      domainId: CAPTURE_DOMAIN_KEY,
+      sensitivity: "normal",
+      payload: {
+        // NO raw text here — the statement lives in the candidate row
+        // (single content path); events keep refs + content hash only.
+        surface: CAPTURE_SURFACE,
+        threadId: input.threadId ?? null,
+        principalId: input.principalId,
+        normalizedTextSha256,
       },
-      { now: () => now },
-    );
-    sourceEventId = accepted.envelope.id;
+      runId: null,
+    },
+    { now: () => now },
+  );
+  const sourceEventId = accepted.envelope.id;
+  if (transportMismatch) {
+    await audit(db, "imessage.capture.source_event_mismatch", {
+      principalId: input.principalId,
+      transportSourceEventId: input.sourceEventId,
+      mintedSourceEventId: sourceEventId,
+      threadId: input.threadId ?? null,
+    });
   }
 
   // 5. Candidate via the existing seam: deterministic id, speaker-attributed
@@ -437,6 +478,9 @@ export async function considerCapture(
         threadId: input.threadId ?? null,
         trigger,
         normalizedTextSha256,
+        ...(input.sourceEventId != null
+          ? { transportSourceEventId: input.sourceEventId }
+          : {}),
       },
     },
     provenance: {

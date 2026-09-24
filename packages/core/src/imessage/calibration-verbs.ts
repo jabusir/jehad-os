@@ -189,6 +189,23 @@ export function renderCorrectionAck(): string {
   return 'Correction logged for today\'s picture — that\'s exactly what keeps my world model honest. (Say "remember …" if you want it kept as a memory.)';
 }
 
+// -------------------------------------- C1 side-effect context (reset §11)
+
+/**
+ * Intelligence-reset C1: the miss/correction intake became a SIDE EFFECT —
+ * the feedback row still lands, but the conversational model answers the
+ * user naturally. These lines ride the answer prompt as a SYSTEM NOTE so the
+ * model can weave in at most a brief acknowledgment without narrating
+ * machinery. Pure constants; zero model calls.
+ */
+export function renderCalibrationMissContext(): string {
+  return "SYSTEM NOTE: the system just recorded the user's reply as daily-calibration missed-feedback (stored silently, nothing was shown). Do not narrate the recording, do not use the words 'miss', 'logged', or 'calibration'. At most acknowledge their point briefly and naturally, then answer what they actually said.";
+}
+
+export function renderCalibrationCorrectionContext(category: CalibrationCorrectionCategory): string {
+  return `SYSTEM NOTE: the system just recorded the user's message as a day-picture correction of kind "${category}" (stored silently, nothing was shown). Do not narrate the recording, do not use the words 'correction', 'logged', or 'calibration'. At most acknowledge their point briefly and naturally, then answer what they actually said.`;
+}
+
 // ------------------------------------------ skipped-occurrence time helpers
 
 /** A local wall-clock reference parsed out of a skip correction ("3pm"). */

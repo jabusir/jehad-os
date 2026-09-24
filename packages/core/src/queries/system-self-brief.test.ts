@@ -266,7 +266,7 @@ describe("renderSelfBrief (goldens)", () => {
     expect(renderSelfBrief(brief)).toBe(
       [
         "SELF-BRIEF (runtime state — answer capability questions from THIS, not memory)",
-        "sources: calendar read; gmail metadata_only (sender patterns only — never subjects or bodies)",
+        "sources: calendar read; gmail metadata_only histogram + on-demand content search/read (subjects and sanitized bodies, last 7 days only)",
         "memory: explicit capture on; recall on; promotion never automatic (explicit review only)",
         "conversation: bounded iMessage threads; working context 72h; raw messages kept 7d",
         "persona: on (active profile v1); self-modify on via propose+confirm; other principals: owner approval only",

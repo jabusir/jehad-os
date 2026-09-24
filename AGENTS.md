@@ -40,10 +40,10 @@ The edge node lives in a separate repo (`/Users/Shared/tito`).
 | `pnpm dev` | Run API + worker locally (builds first) |
 | `pnpm setup:db` | Create local `jehad` Postgres database (brew postgresql@16) |
 | `pnpm migrate` | Apply SQL migrations (lands M1 with packages/db) |
-| `pnpm eval` | Golden-set extraction eval, hermetic fake provider (M5B); writes `evals/.last-hermetic.json` baseline |
-| `pnpm eval:live` | Same golden set through the real OpenRouter path (skips cleanly without `OPENROUTER_API_KEY`; budget + egress gated, spend reported) |
-| `pnpm eval:compare` | Hermetic-vs-live per-field comparison + `evals/.eval-report-<ts>.md`; gates (F1 ≥ 0.80, action-precision ≥ 0.90) enforced against the live numbers |
 | `pnpm eval:models` | Gateway route+answer model comparison on real prompts/parsers (lane R2; fixtures `evals/model-routing.fixtures.json`, results `docs/evals/model-routing-2026-09.*`; live via OPENROUTER_API_KEY, `EVAL_RESCORE=1` re-scores offline) |
+| `pnpm eval:bakeoff:a` | §5 Track A multi-candidate answer bake-off (real answer prompt, blind judge; hermetic dry run by default, `--live` + OPENROUTER_API_KEY for the spend-capped live run; results `evals/model-bakeoff/out/track-a-*.md`) |
+| `pnpm eval:bakeoff:probe` | §5 D-2 capability probe — route+interpret strict-parser validity/agreement per candidate (hermetic default, `--live` gated; results `evals/model-bakeoff/out/probe-*.md`) |
+| `pnpm eval:bakeoff:pairwise` | §5/§16 owner-scored blind pairwise preference sheet (two candidates; no LLM judge) |
 | `pnpm eval:answers` | W3 answer-tier bake-off on the real answer prompt (fixtures `evals/answer-quality/fixtures.json`, results `docs/evals/answer-quality-2026-09.*`; hermetic smoke always, live bake-off with blind independent-family judge via OPENROUTER_API_KEY, spend-capped $3) |
 
 ## Commit style

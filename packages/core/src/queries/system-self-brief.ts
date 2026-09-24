@@ -20,6 +20,7 @@
 import { UUID_RE } from "../events/envelope.js";
 import { countArmedReminders } from "../reminders/queries.js";
 import { ACTIVE_CONTEXT_TTL_MS, RAW_RETENTION_MS } from "../imessage/threads.js";
+import { listActiveOutcomes } from "../outcomes/service.js";
 import { personasPolicyOf, type PolicyV1 } from "../policy/ceiling.js";
 import type { QueryExecutor } from "./executor.js";
 import { sourceFreshness } from "./staleness.js";
@@ -118,6 +119,11 @@ export interface SelfBriefData {
   readonly actions: SelfBriefActions;
   /** Armed reminder check-ins (W6-phase-2); null when not determined. */
   readonly remindersArmed?: number | null;
+  /** Reset C5: delegated work in flight (what the system is doing now). */
+  readonly armedWork?: {
+    readonly activeOutcomes: number | null;
+    readonly runningAssignments: number | null;
+  };
   readonly limits: readonly string[];
 }
 
@@ -205,6 +211,15 @@ export async function collectSelfBrief(
   }
   const view = policyView(input.policy ?? null, input.principalName);
   const armedReminders = await countArmedReminders(db, input.principalId).catch(() => null);
+  const armedOutcomes = await listActiveOutcomes(db, input.principalId)
+    .then((outcomes) => outcomes.length)
+    .catch(() => null);
+  const runningAssignments = await db
+    .query(
+      `SELECT count(*)::int AS n FROM assignments WHERE status IN ('queued','running')`,
+    )
+    .then((result) => Number(result.rows[0]?.n ?? 0))
+    .catch(() => null);
   return {
     principalId: input.principalId,
     now: now.toISOString(),
@@ -233,6 +248,14 @@ export async function collectSelfBrief(
       commitmentTracking: andTri(view.captureOn, view.reviewOn),
     },
     remindersArmed: armedReminders,
+    ...(armedOutcomes !== null || runningAssignments !== null
+      ? {
+          armedWork: {
+            activeOutcomes: armedOutcomes,
+            runningAssignments,
+          },
+        }
+      : {}),
     limits: [...SYSTEM_STATE_LIMITATIONS],
   };
 }
@@ -244,7 +267,7 @@ function tri(value: boolean | null): string {
 
 function gmailPhrase(status: SelfBriefGmailStatus): string {
   return status === "metadata_only"
-    ? "metadata_only (sender patterns only — never subjects or bodies)"
+    ? "metadata_only histogram + on-demand content search/read (subjects and sanitized bodies, last 7 days only)"
     : status;
 }
 
@@ -272,6 +295,12 @@ export function renderSelfBrief(brief: SelfBriefData): string {
     brief.remindersArmed > 0
       ? [
           `check-ins: ${brief.remindersArmed} reminder(s) armed — I text at the promised moment; a reply of yes/done resolves it, a date moves it, "stop" parks it`,
+        ]
+      : []),
+    ...(brief.armedWork !== undefined &&
+    ((brief.armedWork.activeOutcomes ?? 0) > 0 || (brief.armedWork.runningAssignments ?? 0) > 0)
+      ? [
+          `work in flight: ${brief.armedWork.activeOutcomes ?? 0} delegated outcome(s) active, ${brief.armedWork.runningAssignments ?? 0} worker assignment(s) queued/running — progress rides the briefs`,
         ]
       : []),
     `limits: ${brief.limits.join("; ")}`,

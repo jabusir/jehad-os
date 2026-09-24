@@ -419,8 +419,8 @@ describe("policy gateway.passes (Lane R1 model routing)", () => {
     );
     expect(policy.gateway).toBeDefined();
     expect(policy.gateway?.passes).toEqual({
-      route: { model: "openai/gpt-4.1-mini" },
-      answer_fast: { model: "openai/gpt-4o-mini" },
+      route: { model: "openai/gpt-4.1" },
+      answer_fast: { model: "openai/gpt-4.1" },
       answer_standard: { model: "anthropic/claude-sonnet-4.5" },
       answer_fallback: { model: "google/gemini-3.8-flash" },
       route_fallback: { model: "google/gemini-3.8-flash" },
@@ -430,7 +430,7 @@ describe("policy gateway.passes (Lane R1 model routing)", () => {
       "anthropic/claude-sonnet-4.5",
     );
     expect(answerModelForTier(policy.gateway?.passes ?? null, "openai/gpt-4o-mini", "fast")).toBe(
-      "openai/gpt-4o-mini",
+      "openai/gpt-4.1",
     );
   });
 });

@@ -47,16 +47,23 @@ notifications:
 # `openrouter/auto-fast` is not in the repo's allowlisted model ids; the
 # cheapest fast allowlisted model is the evals-pinned openai/gpt-4o-mini.
 gateway:
-  # per-pass model routing — W3 tiers (eval 2026-09: route gpt-4.1-mini
-  # 96.7%/658ms; answer bake-off docs/evals/answer-quality-2026-09.md:
-  # STANDARD sonnet-4.5 4.78 blind-judge vs gpt-4.1 4.69 vs 4o-mini 4.59
-  # baseline; FAST keeps the 4o-mini class for acks/simple lookups;
-  # answer_deep deliberately unset — DEEP falls back to answer_standard's
-  # resolution (sonnet also leads the synthesis group 4.85) and stays under
-  # the derived per-day DEEP cap; fallbacks are multi-vendor gemini-3.8-
-  # flash per the routing eval's 100% answer checklist + best adversarial).
-  # Owner ratifies the STANDARD upgrade at merge (R5 spot-check pending).
-  passes: { route: { model: openai/gpt-4.1-mini }, answer_fast: { model: openai/gpt-4o-mini }, answer_standard: { model: anthropic/claude-sonnet-4.5 }, answer_fallback: { model: google/gemini-3.8-flash }, route_fallback: { model: google/gemini-3.8-flash } }
+  # per-pass model routing — W3 tiers, RESET C7 (2026-09-24 bake-off,
+  # docs/evals + evals/model-bakeoff/out/): route+interpret upgraded from
+  # gpt-4.1-mini to gpt-4.1 — the live probe measured the mini at 88.9%
+  # strict-parse validity (≈1 in 9 turns route-parse-failing into the
+  # fallback retry) while gpt-4.1 hit 97.2% combined at FASTER latency
+  # (~980ms) and best reference agreement (80.6/91.7); answer FAST retired
+  # from 4o-mini to gpt-4.1 (short nuanced turns were exactly the
+  # mini-class blind spot — "call me Sir, not Chief" classified FAST).
+  # STANDARD/DEEP keep sonnet-4.5 (Track A incumbent: 4.79 mean, best
+  # honesty 4.96; no candidate cleared the +0.3 D-1 bar — the answer
+  # layer was never the binding constraint). Track A field:
+  # opus-4.6 4.81 / sonnet 4.79 / 4.1-mini 4.75 / gpt-4.1 4.71 / 4o-mini
+  # 4.67, spread 0.14. Fallbacks unchanged (multi-vendor gemini-3.8-flash).
+  # C8 (single merged cognitive pass) justified-but-deferred per O-15:
+  # gpt-4.1 clears the D-2 bar, but two gpt-4.1 passes ≈ $0.0025/~2s —
+  # revisit after dogfood.
+  passes: { route: { model: openai/gpt-4.1 }, answer_fast: { model: openai/gpt-4.1 }, answer_standard: { model: anthropic/claude-sonnet-4.5 }, answer_fallback: { model: google/gemini-3.8-flash }, route_fallback: { model: google/gemini-3.8-flash } }
   capture: { enabled: true, principals: [josctl], max_per_hour: 5, dedupe_window_hours: 24 }
   # review — Phase G deterministic review/control over iMessage
   # (ig-phase-g-contracts.md §7). Control commands are exact-match, zero

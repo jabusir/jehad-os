@@ -27,6 +27,8 @@ function turn(overrides: Partial<TurnObservation> = {}): TurnObservation {
     routedTools: [],
     passes: ["route", "answer"],
     interpretation: { audits: 0, payloads: [] },
+    auditMarkers: [],
+    answerPrompts: [],
     scriptIssues: [],
     ...overrides,
   };
@@ -87,60 +89,116 @@ describe("scriptedDispatch (interpret scripting)", () => {
 
 describe("checkExpectations (pure)", () => {
   it("passes when every expected tool was routed", () => {
-    const failures = checkExpectations({ routedTools: ["calendar.day"] }, turn({ routedTools: ["calendar.day"] }));
+    const failures = checkExpectations({ routedTools: ["calendar.day"] }, [turn({ routedTools: ["calendar.day"] })]);
     expect(failures).toEqual([]);
   });
 
   it("fails when an expected tool is missing and names what actually routed", () => {
-    const failures = checkExpectations({ routedTools: ["day.state"] }, turn({ routedTools: ["calendar.day"] }));
+    const failures = checkExpectations({ routedTools: ["day.state"] }, [turn({ routedTools: ["calendar.day"] })]);
     expect(failures).toEqual(['expected tool day.state not routed (routed: [calendar.day])']);
   });
 
   it("routed_none fails when a tool executed and passes when none did", () => {
-    expect(checkExpectations({ routedNone: true }, turn({ routedTools: ["calendar.next"] }))).toEqual([
+    expect(checkExpectations({ routedNone: true }, [turn({ routedTools: ["calendar.next"] })])).toEqual([
       "expected no tools routed, got [calendar.next]",
     ]);
-    expect(checkExpectations({ routedNone: true }, turn())).toEqual([]);
+    expect(checkExpectations({ routedNone: true }, [turn()])).toEqual([]);
   });
 
   it("checks reply_contains and reply_not_contains against the final reply", () => {
     const expectations = { replyContains: ["synced"], replyNotContains: ["calendar"] };
-    expect(checkExpectations(expectations, turn({ reply: "last synced 7h ago" }))).toEqual([]);
-    expect(checkExpectations(expectations, turn({ reply: "see your calendar" }))).toEqual([
+    expect(checkExpectations(expectations, [turn({ reply: "last synced 7h ago" })])).toEqual([]);
+    expect(checkExpectations(expectations, [turn({ reply: "see your calendar" })])).toEqual([
       'reply missing "synced"',
       'reply contains "calendar"',
     ]);
   });
 
   it("fails a final turn that produced no reply", () => {
-    const failures = checkExpectations({ routedNone: true }, turn({ replied: false, replyReason: "model-error", reply: null }));
+    const failures = checkExpectations({ routedNone: true }, [turn({ replied: false, replyReason: "model-error", reply: null })]);
     expect(failures).toEqual(["final turn produced no reply (model-error)"]);
   });
 
   it("no_persistence_claim_without_write: a claim fails without write evidence and passes with it", () => {
     const expectations = { noPersistenceClaimWithoutWrite: true };
     const hallucinating = turn({ reply: "Got it — I've noted all 8 tasks." });
-    expect(checkExpectations(expectations, hallucinating)).toEqual([
+    expect(checkExpectations(expectations, [hallucinating])).toEqual([
       'persistence claim "I\'ve noted" without a durable write (no db write pin passed)',
     ]);
-    expect(checkExpectations(expectations, hallucinating, { writeEvidence: true })).toEqual([]);
+    expect(checkExpectations(expectations, [hallucinating], { writeEvidence: true })).toEqual([]);
   });
 
   it("no_persistence_claim_without_write: honest no-write wording passes with no write evidence", () => {
     const expectations = { noPersistenceClaimWithoutWrite: true };
     const honest = turn({ reply: "I see it in our conversation, but I'm not tracking it yet." });
-    expect(checkExpectations(expectations, honest)).toEqual([]);
-    expect(checkExpectations(expectations, honest, { writeEvidence: false })).toEqual([]);
+    expect(checkExpectations(expectations, [honest])).toEqual([]);
+    expect(checkExpectations(expectations, [honest], { writeEvidence: false })).toEqual([]);
   });
 
   it("interpret_audits pins the exact interpret audit row count on the final turn", () => {
     const observed = turn({ interpretation: { audits: 1, payloads: [{ proposals: [] }] } });
-    expect(checkExpectations({ interpretAudits: 1 }, observed)).toEqual([]);
-    expect(checkExpectations({ interpretAudits: 2 }, observed)).toEqual([
+    expect(checkExpectations({ interpretAudits: 1 }, [observed])).toEqual([]);
+    expect(checkExpectations({ interpretAudits: 2 }, [observed])).toEqual([
       "expected 2 interpret audit row(s) on the final turn, got 1",
     ]);
-    expect(checkExpectations({ interpretAudits: 1 }, turn())).toEqual([
+    expect(checkExpectations({ interpretAudits: 1 }, [turn()])).toEqual([
       "expected 1 interpret audit row(s) on the final turn, got 0",
+    ]);
+  });
+
+  it("every_turn_not_contains fails on ANY turn's reply, not just the final one", () => {
+    const turns = [
+      turn({ reply: "Logged as a miss — that helps me see what I'm not observing." }),
+      turn({ reply: "Fair — let's talk it through." }),
+    ];
+    expect(checkExpectations({ everyTurnNotContains: ["Logged as a miss"] }, turns)).toEqual([
+      'turn 1 reply contains "Logged as a miss"',
+    ]);
+    expect(checkExpectations({ everyTurnNotContains: ["canned"] }, turns)).toEqual([]);
+  });
+
+  it("every_turn_not_contains skips unreplied turns (the final-turn check owns those)", () => {
+    const turns = [turn({ replied: false, replyReason: "model-error", reply: null }), turn()];
+    expect(checkExpectations({ everyTurnNotContains: ["x"] }, turns)).toEqual([]);
+  });
+
+  it("audit_markers counts deterministic markers across the whole scenario", () => {
+    const pin = { marker: "calibration-missed", expectOne: false, expectZero: true };
+    const hijacked = [turn({ auditMarkers: [] }), turn({ auditMarkers: ["calibration-missed"] })];
+    expect(checkExpectations({ auditMarkers: [pin] }, hijacked)).toEqual([
+      'audit marker "calibration-missed" terminal reply occurred 1 time(s) — expected none',
+    ]);
+    expect(checkExpectations({ auditMarkers: [pin] }, [turn(), turn()])).toEqual([]);
+    const expectOnce = { marker: "proposal-affirm-applied", expectOne: true, expectZero: false };
+    expect(
+      checkExpectations({ auditMarkers: [expectOnce] }, [
+        turn({ auditMarkers: ["proposal-affirm-applied"] }),
+        turn({ auditMarkers: ["proposal-affirm-applied"] }),
+      ]),
+    ).toEqual([
+      'audit marker "proposal-affirm-applied" expected exactly once across the scenario, got 2',
+    ]);
+  });
+
+  it("answer prompt pins check the final turn's answer-pass prompts", () => {
+    const withPrompt = turn({ answerPrompts: ['PERSONA for jehad.\nAddress: call the principal "Sir".'] });
+    expect(
+      checkExpectations(
+        { answerPromptContains: ['call the principal "Sir"'], answerPromptNotContains: ['call the principal "Chief"'] },
+        [withPrompt],
+      ),
+    ).toEqual([]);
+    expect(
+      checkExpectations(
+        { answerPromptContains: ['call the principal "Sir"'], answerPromptNotContains: ['call the principal "Chief"'] },
+        [turn({ answerPrompts: ['Address: call the principal "Chief".'] })],
+      ),
+    ).toEqual([
+      'answer prompt missing "call the principal "Sir""',
+      'answer prompt contains "call the principal "Chief""',
+    ]);
+    expect(checkExpectations({ answerPromptContains: ["x"] }, [turn({ answerPrompts: [] })])).toEqual([
+      "answer prompt pins set but the final turn dispatched no answer pass",
     ]);
   });
 });

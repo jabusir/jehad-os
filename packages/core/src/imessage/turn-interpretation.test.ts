@@ -227,7 +227,7 @@ describe("parseInterpretationJson (strict, fail-safe)", () => {
 describe("renderProposalOffer (deterministic goldens, behavior-gated)", () => {
   it("GOLDEN: the 8-item transcript batch renders the exact offer", () => {
     expect(renderProposalOffer([GOLDEN_TASK_BATCH])).toBe(
-      "I pulled out 8 tasks, 3 due wednesday: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins … Reply 'track them' and I'll track them (the 3 with deadlines).",
+      "I pulled out 8 tasks, 3 due wednesday: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins … Want me to track them (the 3 with deadlines)?",
     );
   });
 
@@ -240,30 +240,30 @@ describe("renderProposalOffer (deterministic goldens, behavior-gated)", () => {
       ],
     };
     expect(renderProposalOffer([noDue])).toBe(
-      "I pulled out 2 tasks: Alpha, Beta. Reply 'track them' and I'll track them.",
+      "I pulled out 2 tasks: Alpha, Beta. Want me to track them?",
     );
   });
 
   it("GOLDEN: self configuration directive", () => {
     expect(renderProposalOffer([CONFIG_SELF])).toBe(
-      "Profile change staged: tone=warmer, ownerName=Chief. Reply 'approve' to apply.",
+      "Profile change staged: tone=warmer, ownerName=Chief. Want this applied?",
     );
   });
 
   it("GOLDEN: other-principal directive carries the honest policy-activation line", () => {
     const offer = renderProposalOffer([CONFIG_OTHER])!;
     expect(offer).toBe(
-      "Profile change for yusra: language=urdu, mentions=the kids. It only takes effect for yusra once the owner adds them to the personas policy allowlist — I can't switch that on from chat. Reply 'approve' to stage it.",
+      "Profile change for yusra: language=urdu, mentions=the kids. It only takes effect for yusra once the owner adds them to the personas policy allowlist — I can't switch that on from chat. Want it staged?",
     );
     expect(offer).toContain("personas policy");
   });
 
   it("GOLDEN: system feedback and memory candidate offers", () => {
     expect(renderProposalOffer([FEEDBACK])).toBe(
-      'Worth logging about me: "cannot see work email" (capability gap). Reply \'log it\' to record that.',
+      'Worth logging about me: "cannot see work email" (capability gap). Want me to log that?',
     );
     expect(renderProposalOffer([MEMORY])).toBe(
-      'Worth keeping in mind: "prefers venues with parking". Reply \'remember it\' and I\'ll capture it for your review.',
+      'Worth keeping in mind: "prefers venues with parking". Keep this?',
     );
   });
 
@@ -271,7 +271,7 @@ describe("renderProposalOffer (deterministic goldens, behavior-gated)", () => {
     const block = renderProposalOffer([GOLDEN_TASK_BATCH, MEMORY])!;
     expect(block.split("\n")).toHaveLength(2);
     expect(block.startsWith("I pulled out 8 tasks")).toBe(true);
-    expect(block.endsWith("capture it for your review.")).toBe(true);
+    expect(block.endsWith("Keep this?")).toBe(true);
   });
 
   it("null when there is nothing to offer", () => {
@@ -283,7 +283,7 @@ describe("renderProposalOffer (deterministic goldens, behavior-gated)", () => {
     expect(renderProposalOffer([CONFIG_SELF], { behaviors: { convertDirectives: false } })).toBeNull();
     expect(renderProposalOffer([MEMORY], { behaviors: { proposeCapture: false } })).toBeNull();
     expect(renderProposalOffer([GOLDEN_TASK_BATCH], { behaviors: { surfaceDeadlines: false } })).toBe(
-      "I pulled out 8 tasks: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins … Reply 'track them' and I'll track them.",
+      "I pulled out 8 tasks: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins … Want me to track them?",
     );
     expect(renderProposalOffer([GOLDEN_TASK_BATCH], { behaviors: { preferNextAction: false } })).toBe(
       "I pulled out 8 tasks, 3 due wednesday: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins …",
@@ -302,7 +302,7 @@ describe("renderProposalOffer (deterministic goldens, behavior-gated)", () => {
       renderProposalOffer([MEMORY]),
     ];
     for (const offer of offers) {
-      expect(offer).toMatch(/Reply '/); // every offer offers, none asserts a write
+      expect(offer).toMatch(/\?$/); // every offer offers (a question), none asserts a write
       expect(offer).not.toMatch(/\b(tracked|logged|saved|added|updated|remembered)\b/i);
     }
   });
@@ -508,7 +508,7 @@ describe("outcome_spec proposals (DELEGATE intake, D0 finisher)", () => {
       { type: "outcome_spec", ...valid, criteria: ["the review covers all findings", "owner signs off"] },
     ]);
     expect(offer).toBe(
-      'Staged as a delegated outcome: "Plaid security review" (budget $2, due in 7 days) — done means: the review covers all findings (+1 more). Reply \'approve\' to start it.',
+      'Staged as a delegated outcome: "Plaid security review" (budget $2, due in 7 days) — done means: the review covers all findings (+1 more). Want me to start it?',
     );
   });
 
@@ -517,7 +517,7 @@ describe("outcome_spec proposals (DELEGATE intake, D0 finisher)", () => {
       { type: "outcome_spec", ...valid, budget_usd: null, deadline_days: null, criteria: ["done state"] },
     ]);
     expect(offer).toBe(
-      'Staged as a delegated outcome: "Plaid security review" — done means: done state. Reply \'approve\' to start it.',
+      'Staged as a delegated outcome: "Plaid security review" — done means: done state. Want me to start it?',
     );
   });
 });

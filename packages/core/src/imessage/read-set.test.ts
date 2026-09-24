@@ -115,6 +115,8 @@ describe("parseRouteReadSet (strict)", () => {
       "calendar.next",
       "commitments.waiting",
       "gmail.recent",
+      "gmail.search",
+      "gmail.read",
       "day.state",
       "memory.recall",
       "system.state",

@@ -2,7 +2,7 @@
 // kernel-wide initially; plan §17 A13). Caps are read from the environment
 // so tightening is configuration, not a code change. Spend is the
 // `model_calls` cost ledger — the same table the caps police (plan §13:
-// `pnpm eval` spend is recorded against the A13 caps).
+// `pnpm eval:bakeoff:*` spend is recorded against the A13 caps).
 
 import type { SqlExecutor } from "../policy/grants.js";
 

@@ -97,7 +97,7 @@ describe.skipIf(!TEST_DATABASE_URL)("turn interpretation bridges (integration)",
     expect(proposals).not.toBeNull();
     const offer = renderProposalOffer(proposals!);
     expect(offer).toBe(
-      "I pulled out 8 tasks, 3 due wednesday: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins … Reply 'track them' and I'll track them (the 3 with deadlines).",
+      "I pulled out 8 tasks, 3 due wednesday: Clean apartment and bathrooms, Pay the gardener, Take out the recycling bins … Want me to track them (the 3 with deadlines)?",
     );
     // The principal confirmed.
     expect(parseProposalConfirm("track them")).toBe("track");
@@ -252,7 +252,7 @@ describe.skipIf(!TEST_DATABASE_URL)("turn interpretation bridges (integration)",
 
     const active = await activeProfile(db.pool, { principalId: josctlId, surface: "imessage" });
     expect(active?.version).toBe(2);
-    expect(active?.definition.extraDirectives?.at(-1)).toBe("tone: warmer");
+    expect(active?.definition.extraDirectives?.at(-1)).toBe("Voice note: tone: warmer");
 
     const via = await db.pool.query(
       `SELECT created_via FROM interaction_profiles WHERE principal_id = $1::uuid ORDER BY version`,

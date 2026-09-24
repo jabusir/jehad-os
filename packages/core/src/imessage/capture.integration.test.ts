@@ -1,14 +1,17 @@
 // Phase F integration tests (docs/plans/ig-phase-f-contracts.md §9):
 // deterministic-first capture detection, speaker-attributed candidates via
 // the existing pipeline conventions, triple idempotency, flood cap,
-// principal scoping, force-review landing, and the no-content-in-audit
-// privacy scan. Isolated db per the threads.integration.test.ts pattern.
+// principal scoping, force-review landing, the no-content-in-audit
+// privacy scan, and the C3 provenance contract (minted-event provenance,
+// transport-id idempotency, source-event mismatch audit, approvability).
+// Isolated db per the threads.integration.test.ts pattern.
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { migrateUp, seedDomains } from "@jehad/db";
+import { ModelEgressPolicyRegistry } from "../egress/index.js";
 import { acceptEvent } from "../events/store.js";
 import { idempotencyKeyFor } from "../events/envelope.js";
-import { listReviewQueue } from "../review/review-queue.js";
+import { approvePromotion, listReviewQueue } from "../review/review-queue.js";
 import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../../../db/tests/test-db";
 import {
   CAPTURE_ACK_REPLY,
@@ -33,6 +36,17 @@ describe.skipIf(!TEST_DATABASE_URL)("iMessage capture (integration)", () => {
   let josctlId: string;
   let yusraId: string;
   let now: Date;
+
+  const registry = new ModelEgressPolicyRegistry([
+    {
+      id: "personal-normal",
+      domainId: "personal",
+      sensitivity: "normal",
+      allowedProviders: ["openrouter"],
+      allowRemote: false,
+      requireRedaction: false,
+    },
+  ]);
 
   beforeAll(async () => {
     db = await createIsolatedTestDb(TEST_DATABASE_URL!, "igcap");
@@ -250,7 +264,7 @@ describe.skipIf(!TEST_DATABASE_URL)("iMessage capture (integration)", () => {
     expect(denied.rows).toHaveLength(1);
   });
 
-  it("double-capture on the same sourceEventId is blocked; the provided event is used as provenance (no synthetic event)", async () => {
+  it("caller-passed event id is transport-only: provenance carries the minted capture.recorded; redelivery dedupes on the transport id", async () => {
     now = new Date("2026-03-05T10:00:00Z");
     const accepted = await acceptEvent(db.pool, {
       type: "capture.recorded",
@@ -260,7 +274,7 @@ describe.skipIf(!TEST_DATABASE_URL)("iMessage capture (integration)", () => {
       occurredAt: now.toISOString(),
       domainId: "personal",
       sensitivity: "normal",
-      payload: { text: "Remember that the VIN ends in 8841.", surface: "imessage" },
+      payload: { seq: 1 },
       runId: null,
     });
 
@@ -270,20 +284,44 @@ describe.skipIf(!TEST_DATABASE_URL)("iMessage capture (integration)", () => {
     expect(first.captured).toBe(true);
     const rows = await candidates();
     expect(rows).toHaveLength(1);
-    expect((rows[0].provenance as Record<string, unknown>).sourceEventId).toBe(
-      accepted.envelope.id,
-    );
-    // No second capture.recorded was minted by the module, and the caller's
-    // event idempotency key = sha256(source + NUL + "imessage-capture:guid-abc123").
-    const captureEvents = await db.pool.query(
-      `SELECT count(*)::int AS n, max(idempotency_key) AS k FROM events WHERE type = 'capture.recorded'`,
-    );
-    expect(captureEvents.rows[0].n).toBe(1);
-    expect(captureEvents.rows[0].k).toBe(
-      idempotencyKeyFor(CAPTURE_SOURCE, `${CAPTURE_EXTERNAL_ID_PREFIX}guid-abc123`),
-    );
 
-    // Redelivery with the same source event id → noop + ack, still one candidate.
+    // Provenance is the module-minted event, NEVER the caller's id — and
+    // it resolves to a real canonical events row (C3).
+    const provenance = rows[0].provenance as Record<string, unknown>;
+    expect(provenance.sourceEventId).not.toBe(accepted.envelope.id);
+    const minted = await db.pool.query(
+      `SELECT type, source FROM events WHERE id = $1::uuid`,
+      [String(provenance.sourceEventId)],
+    );
+    expect(minted.rows).toHaveLength(1);
+    expect(minted.rows[0].type).toBe("capture.recorded");
+    expect(minted.rows[0].source).toBe(CAPTURE_SOURCE);
+
+    // The transport id rides payload.metadata — the key step 3a matches on.
+    const metadata = (rows[0].payload as Record<string, unknown>).metadata as Record<string, unknown>;
+    expect(metadata.transportSourceEventId).toBe(accepted.envelope.id);
+
+    // Both events exist: the caller's (guid-keyed idempotency preserved)
+    // and the minted one.
+    const captureEvents = await db.pool.query(
+      `SELECT count(*)::int AS n FROM events WHERE type = 'capture.recorded'`,
+    );
+    expect(captureEvents.rows[0].n).toBe(2);
+    const callerEvent = await db.pool.query(
+      `SELECT count(*)::int AS n FROM events WHERE idempotency_key = $1`,
+      [idempotencyKeyFor(CAPTURE_SOURCE, `${CAPTURE_EXTERNAL_ID_PREFIX}guid-abc123`)],
+    );
+    expect(callerEvent.rows[0].n).toBe(1);
+
+    // The caller's id DOES resolve in `events` → no mismatch audit.
+    const mismatch = await db.pool.query(
+      `SELECT count(*)::int AS n FROM audit_log WHERE action = 'imessage.capture.source_event_mismatch'`,
+    );
+    expect(mismatch.rows[0].n).toBe(0);
+
+    // Redelivery with the same transport id → noop + ack (3a via
+    // metadata.transportSourceEventId, not 3b content dedupe), still one
+    // candidate, no third event.
     const second = await consider("Remember that the VIN ends in 8841.", {
       sourceEventId: accepted.envelope.id,
     });
@@ -293,6 +331,63 @@ describe.skipIf(!TEST_DATABASE_URL)("iMessage capture (integration)", () => {
       reply: CAPTURE_ALREADY_REPLY,
     });
     expect(await candidates()).toHaveLength(1);
+    const afterRedelivery = await db.pool.query(
+      `SELECT count(*)::int AS n FROM events WHERE type = 'capture.recorded'`,
+    );
+    expect(afterRedelivery.rows[0].n).toBe(2);
+  });
+
+  it("C3 regression: a phantom caller-passed sourceEventId still lands an approvable candidate — provenance resolves, approve promotes", async () => {
+    now = new Date("2026-03-05T11:00:00Z");
+    // The Phase-0 defect shape: an imessage_transport_events row id that
+    // has no canonical `events` counterpart.
+    const phantom = crypto.randomUUID();
+    const out = await consider("Remember that the workshop key lives under the planter.", {
+      sourceEventId: phantom,
+    });
+    expect(out.captured).toBe(true);
+
+    const rows = await candidates();
+    expect(rows).toHaveLength(1);
+    const provenance = rows[0].provenance as Record<string, unknown>;
+    const sourceEventId = String(provenance.sourceEventId);
+    expect(sourceEventId).not.toBe(phantom);
+    const event = await db.pool.query(
+      `SELECT type FROM events WHERE id = $1::uuid`,
+      [sourceEventId],
+    );
+    expect(event.rows).toHaveLength(1);
+    expect(event.rows[0].type).toBe("capture.recorded");
+    const metadata = (rows[0].payload as Record<string, unknown>).metadata as Record<string, unknown>;
+    expect(metadata.transportSourceEventId).toBe(phantom);
+
+    // The seam is observable: exactly one mismatch audit, ids only.
+    const mismatch = await db.pool.query(
+      `SELECT outputs_ref::text AS t FROM audit_log WHERE action = 'imessage.capture.source_event_mismatch'`,
+    );
+    expect(mismatch.rows).toHaveLength(1);
+    expect(mismatch.rows[0].t.includes(phantom)).toBe(true);
+    expect(mismatch.rows[0].t.includes("workshop key")).toBe(false);
+
+    // Approvable through the existing review path — gate 1 resolves.
+    const queue = await listReviewQueue(db.pool);
+    expect(queue.promotions.map((p) => p.id)).toContain(String(rows[0].id));
+    const approved = await approvePromotion(db.pool, String(rows[0].id), {
+      egressRegistry: registry,
+      approvedBy: "jehad",
+    });
+    expect(approved.action).toBe("promoted");
+    expect(approved.reason).not.toBe("source_event_not_found");
+  });
+
+  it("mismatch audit: zero rows when the caller passes no transport id", async () => {
+    now = new Date("2026-03-05T12:00:00Z");
+    const out = await consider("Remember that the spare fob is in the kitchen drawer.");
+    expect(out.captured).toBe(true);
+    const mismatch = await db.pool.query(
+      `SELECT count(*)::int AS n FROM audit_log WHERE action = 'imessage.capture.source_event_mismatch'`,
+    );
+    expect(mismatch.rows[0].n).toBe(0);
   });
 
   it("PRIVACY: audit rows carry ids/counts only — never inbound content (needle scan)", async () => {

@@ -32,6 +32,7 @@ interface FixtureCase {
     readonly openQuestions?: number;
     readonly maxAssignmentsCreated?: number;
     readonly criteriaUnchanged?: boolean;
+    readonly grantCountUnchangedAfterCompletion?: boolean;
     readonly reasonContains?: string;
   };
 }
