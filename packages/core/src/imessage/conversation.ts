@@ -37,7 +37,6 @@ import {
   loadPolicyFile,
   outcomesPolicyOf,
   DEFAULT_OUTCOMES_POLICY,
-  parsePolicyV1,
   type GatewayPrincipalPolicy,
   type PolicyV1,
 } from "../policy/ceiling.js";
@@ -195,9 +194,7 @@ import {
 } from "./calendar-actions.js";
 import { buildActionRoutingInstructions, parseActionRouteJson } from "./action-route.js";
 import { resolveProposedSchedule } from "./propose-schedule.js";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { readFile } from "node:fs/promises";
+import { loadRepoPolicy } from "../policy/repo-policy.js";
 
 /** The conversational capability (owner-issued grant; TTL like send_channel). */
 export const CONVERSE_CAPABILITY = "imessage:converse";
@@ -217,6 +214,7 @@ const CONVERSE_DOMAIN_KEY = "personal";
 export type ConverseDenialReason =
   | "no-converse-grant"
   | "principal-not-configured"
+  | "policy-unavailable"
   | "over-requests-hour"
   | "over-cost-day"
   | "model-error";
@@ -2723,16 +2721,9 @@ async function resolveGatewayServicePrincipal(db: SqlExecutor): Promise<string> 
 }
 
 // ------------------------------------------------------------- policy loader
-
-/** Repo-root policy.yaml — same depth from src/ and dist/. */
-function defaultPolicyYamlPath(): string {
-  // POLICY_YAML_PATH: the same override seam the workflow loaders
-  // honor (calibration-workflows) — tests and staged rollouts use it.
-  return (
-    process.env.POLICY_YAML_PATH ??
-    path.resolve(fileURLToPath(new URL("../../../../policy.yaml", import.meta.url)))
-  );
-}
+// Reliability wave goal 1: path resolution + caching + loud failure live in
+// the ONE canonical loader (../policy/repo-policy.js). This file keeps only
+// the projections onto conversation-specific shapes.
 
 function principalPolicyFromPolicy(policy: PolicyV1 | null | undefined) {
   return (principalName: string): GatewayPrincipalPolicy | null =>
@@ -2754,7 +2745,6 @@ export function gatewayPrincipalsFromPolicyV1(
  */
 const POLICY_TTL_MS = 60_000;
 let policyCache: { at: number; fn: (principalName: string) => GatewayPrincipalPolicy | null } | null = null;
-let policyRead: Promise<(principalName: string) => GatewayPrincipalPolicy | null> | null = null;
 
 /**
  * The conversation budget source: repo-root policy.yaml
@@ -2779,21 +2769,10 @@ function reviewPolicyFromGateway(
   };
 }
 
-/** TTL-cached full policy (gateway.actions projection; same 60s
- *  discipline as the principal cache below). */
-let gatewayFileCache: { at: number; policy: PolicyV1 | null } | null = null;
+/** TTL-cached full policy — delegates to the canonical repo-policy loader
+ *  (same 60s discipline, last-good retention, loud failure logging). */
 async function loadConversationPolicyFile(): Promise<PolicyV1 | null> {
-  if (gatewayFileCache !== null && Date.now() - gatewayFileCache.at < POLICY_TTL_MS) {
-    return gatewayFileCache.policy;
-  }
-  try {
-    const policy = parsePolicyV1(await readFile(defaultPolicyYamlPath(), "utf8"));
-    gatewayFileCache = { at: Date.now(), policy };
-    return policy;
-  } catch {
-    if (gatewayFileCache !== null) return gatewayFileCache.policy;
-    return null;
-  }
+  return (await loadRepoPolicy()).policy;
 }
 
 export async function loadConversationPrincipalPolicy(
@@ -2805,22 +2784,22 @@ export async function loadConversationPrincipalPolicy(
   if (policyCache !== null && Date.now() - policyCache.at < POLICY_TTL_MS) {
     return policyCache.fn;
   }
-  policyRead ??= (async () => {
-    try {
-      const fn = principalPolicyFromPolicy(parsePolicyV1(await readFile(defaultPolicyYamlPath(), "utf8")));
+  const state = await loadRepoPolicy();
+  if (state.policy === null) {
+    // The canonical loader already logged loudly. Preserve the historical
+    // contract: missing file (ENOENT) caches an honest null closure (every
+    // principal denies as not-configured); a malformed file throws so the
+    // startup surface (the api route's first-load) surfaces it hard.
+    if (state.lastError !== null && state.lastError.startsWith("ENOENT")) {
+      const fn = principalPolicyFromPolicy(null);
       policyCache = { at: Date.now(), fn };
       return fn;
-    } catch (err) {
-      if (policyCache !== null) return policyCache.fn; // last good holds
-      if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
-        const fn = principalPolicyFromPolicy(null);
-        policyCache = { at: Date.now(), fn };
-        return fn;
-      }
-      throw err; // loud at first load — startup must surface bad policy
-    } finally {
-      policyRead = null;
     }
-  })();
-  return policyRead;
+    throw new Error(
+      `loadConversationPrincipalPolicy: policy load failed (${state.lastError ?? "unknown"})`,
+    );
+  }
+  const fn = principalPolicyFromPolicy(state.policy);
+  policyCache = { at: Date.now(), fn };
+  return fn;
 }

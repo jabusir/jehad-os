@@ -51,6 +51,12 @@ import {
   renegotiateReminder,
 } from "../reminders/queries.js";
 import { computeFirstTouch, resolveWhenWords, REMINDER_POLICY } from "../reminders/lifecycle.js";
+import {
+  resolveArmedReminder,
+  resolveCalendarOccurrenceByText,
+  resolveOpenCommitmentByText,
+  SELECTOR_TEXT_MAX_CHARS,
+} from "./target-selector.js";
 import { proposeCalendarAction, type CalendarActionPolicy } from "./calendar-actions.js";
 import { resolveProposedSchedule } from "./propose-schedule.js";
 import type { CalibrationCorrectionCategory } from "./calibration-verbs.js";
@@ -191,27 +197,63 @@ export interface ReminderCreateOperation {
 
 export type ReminderReplyKind = "done" | "stop" | "not_done" | "renegotiate";
 
-export interface ReminderReplyOperation {
-  readonly type: "reminder_reply";
-  readonly reminderId: string;
-  readonly kind: ReminderReplyKind;
-  readonly whenText: string | null;
+/**
+ * Reliability wave goal 3 — the typed user-referent selector. Cognition
+ * echoes the USER'S round-0 words; the executor resolves them against the
+ * authenticated principal's canonical state (target-selector.ts). Never a
+ * UUID the user doesn't have; never authority from retrieved data.
+ */
+export interface CognitiveTargetSelector {
+  /** The user's referent words ("seating chart", "the florist one"). */
+  readonly text: string;
 }
+
+/** Reminder target: the single live check-in, or armed-title words. */
+export type ReminderTargetSelector =
+  | { readonly text: string }
+  | { readonly checkIn: "live" };
+
+export type ReminderReplyOperation =
+  | {
+      readonly type: "reminder_reply";
+      readonly reminderId: string;
+      readonly kind: ReminderReplyKind;
+      readonly whenText: string | null;
+    }
+  | {
+      readonly type: "reminder_reply";
+      readonly target: ReminderTargetSelector;
+      readonly kind: ReminderReplyKind;
+      readonly whenText: string | null;
+    };
 
 export type CommitmentTransitionVerb = "done" | "missed" | "renegotiated";
 
-export interface CommitmentTransitionOperation {
-  readonly type: "commitment_transition";
-  readonly commitmentId: string;
-  readonly verb: CommitmentTransitionVerb;
-  readonly note: string | null;
-}
+export type CommitmentTransitionOperation =
+  | {
+      readonly type: "commitment_transition";
+      readonly commitmentId: string;
+      readonly verb: CommitmentTransitionVerb;
+      readonly note: string | null;
+    }
+  | {
+      readonly type: "commitment_transition";
+      readonly target: CognitiveTargetSelector;
+      readonly verb: CommitmentTransitionVerb;
+      readonly note: string | null;
+    };
 
-export interface OccurrenceUpdateOperation {
-  readonly type: "occurrence_update";
-  readonly calendarEventId: string;
-  readonly happened: boolean;
-}
+export type OccurrenceUpdateOperation =
+  | {
+      readonly type: "occurrence_update";
+      readonly calendarEventId: string;
+      readonly happened: boolean;
+    }
+  | {
+      readonly type: "occurrence_update";
+      readonly target: CognitiveTargetSelector;
+      readonly happened: boolean;
+    };
 
 export type CalibrationFeedbackKind = "rating" | "miss" | "correction";
 
@@ -352,6 +394,20 @@ function coerceDueTime(value: unknown): ReminderCreateTime | null {
 }
 
 const REMINDER_REPLY_KINDS: ReadonlySet<string> = new Set(["done", "stop", "not_done", "renegotiate"]);
+
+/** Reminder target selector — exactly one of {text} | {checkIn:"live"}. */
+function parseReminderTargetSelector(value: unknown): ReminderTargetSelector | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const obj = value as Record<string, unknown>;
+  if (exactKeys(obj, ["text"])) {
+    const text = coerceBoundedText(obj.text, SELECTOR_TEXT_MAX_CHARS);
+    return text === null ? null : { text };
+  }
+  if (exactKeys(obj, ["checkIn"])) {
+    return obj.checkIn === "live" ? { checkIn: "live" } : null;
+  }
+  return null;
+}
 const COMMITMENT_VERBS: ReadonlySet<string> = new Set(["done", "missed", "renegotiated"]);
 const SYSTEM_FEEDBACK_CATEGORIES: ReadonlySet<string> = new Set(["capability_gap", "bug", "request"]);
 const CALIBRATION_FEEDBACK_KINDS: ReadonlySet<string> = new Set(["rating", "miss", "correction"]);
@@ -483,38 +539,62 @@ export function parseCognitiveOperation(value: unknown): CognitiveOperation | nu
   }
 
   if (obj.type === "reminder_reply") {
-    if (!exactKeys(obj, ["type", "reminderId", "kind", "whenText"])) return null;
-    if (typeof obj.reminderId !== "string" || !UUID_RE.test(obj.reminderId)) return null;
+    if (!exactKeys(obj, ["type", "reminderId", "kind", "whenText"]) && !exactKeys(obj, ["type", "target", "kind", "whenText"])) {
+      return null;
+    }
     if (typeof obj.kind !== "string" || !REMINDER_REPLY_KINDS.has(obj.kind)) return null;
     const whenText =
       obj.whenText === null || obj.whenText === undefined
         ? null
         : coerceBoundedText(obj.whenText, REMINDER_WHEN_MAX_CHARS);
     if (whenText === null && obj.whenText !== null && obj.whenText !== undefined) return null;
-    return { type: "reminder_reply", reminderId: obj.reminderId, kind: obj.kind as ReminderReplyKind, whenText };
+    const kind = obj.kind as ReminderReplyKind;
+    if (obj.target !== undefined) {
+      const target = parseReminderTargetSelector(obj.target);
+      if (target === null) return null;
+      return { type: "reminder_reply", target, kind, whenText };
+    }
+    if (typeof obj.reminderId !== "string" || !UUID_RE.test(obj.reminderId)) return null;
+    return { type: "reminder_reply", reminderId: obj.reminderId, kind, whenText };
   }
 
   if (obj.type === "commitment_transition") {
-    if (!exactKeys(obj, ["type", "commitmentId", "verb", "note"])) return null;
-    if (typeof obj.commitmentId !== "string" || !UUID_RE.test(obj.commitmentId)) return null;
+    if (!exactKeys(obj, ["type", "commitmentId", "verb", "note"]) && !exactKeys(obj, ["type", "target", "verb", "note"])) {
+      return null;
+    }
     if (typeof obj.verb !== "string" || !COMMITMENT_VERBS.has(obj.verb)) return null;
+    const verb = obj.verb as CommitmentTransitionVerb;
     const note =
       obj.note === null || obj.note === undefined
         ? null
         : coerceBoundedText(obj.note, REMINDER_NOTE_MAX_CHARS);
     if (note === null && obj.note !== null && obj.note !== undefined) return null;
-    return {
-      type: "commitment_transition",
-      commitmentId: obj.commitmentId,
-      verb: obj.verb as CommitmentTransitionVerb,
-      note,
-    };
+    if (obj.target !== undefined) {
+      if (typeof obj.target !== "object" || obj.target === null || Array.isArray(obj.target)) return null;
+      const target = obj.target as Record<string, unknown>;
+      if (!exactKeys(target, ["text"])) return null;
+      const text = coerceBoundedText(target.text, SELECTOR_TEXT_MAX_CHARS);
+      if (text === null) return null;
+      return { type: "commitment_transition", target: { text }, verb, note };
+    }
+    if (typeof obj.commitmentId !== "string" || !UUID_RE.test(obj.commitmentId)) return null;
+    return { type: "commitment_transition", commitmentId: obj.commitmentId, verb, note };
   }
 
   if (obj.type === "occurrence_update") {
-    if (!exactKeys(obj, ["type", "calendarEventId", "happened"])) return null;
-    if (typeof obj.calendarEventId !== "string" || !UUID_RE.test(obj.calendarEventId)) return null;
+    if (!exactKeys(obj, ["type", "calendarEventId", "happened"]) && !exactKeys(obj, ["type", "target", "happened"])) {
+      return null;
+    }
     if (typeof obj.happened !== "boolean") return null;
+    if (obj.target !== undefined) {
+      if (typeof obj.target !== "object" || obj.target === null || Array.isArray(obj.target)) return null;
+      const target = obj.target as Record<string, unknown>;
+      if (!exactKeys(target, ["text"])) return null;
+      const text = coerceBoundedText(target.text, SELECTOR_TEXT_MAX_CHARS);
+      if (text === null) return null;
+      return { type: "occurrence_update", target: { text }, happened: obj.happened };
+    }
+    if (typeof obj.calendarEventId !== "string" || !UUID_RE.test(obj.calendarEventId)) return null;
     return { type: "occurrence_update", calendarEventId: obj.calendarEventId, happened: obj.happened };
   }
 
@@ -1129,7 +1209,7 @@ async function executeReminderCreate(
  *  commitment transitions; not_done is an honest defer (no write). */
 async function executeReminderReply(
   db: OperationsDb,
-  op: ReminderReplyOperation,
+  op: Extract<ReminderReplyOperation, { reminderId: string }>,
   ctx: OperationContext,
 ): Promise<OperationResult> {
   const row = await getReminder(db, op.reminderId);
@@ -1185,6 +1265,58 @@ async function executeReminderReply(
     at: ctx.now.toISOString(),
   });
   return { status: "applied", id: row.id, detail: op.kind };
+}
+
+// ------------------------------------------------------ commitment_transition
+
+/** Id-form executor (selector resolution happens in dispatch). */
+async function executeCommitmentTransition(
+  db: OperationsDb,
+  op: Extract<CommitmentTransitionOperation, { commitmentId: string }>,
+  ctx: OperationContext,
+): Promise<OperationResult> {
+  const result = await applyCommitmentTransition(db, {
+    commitmentId: op.commitmentId,
+    verb: op.verb,
+    note: op.note ?? undefined,
+    principalId: ctx.principalId,
+    now: () => ctx.now,
+  });
+  if (!result.applied) {
+    if (result.reason === "not_found") {
+      return { status: "failed", detail: "unknown-commitment" };
+    }
+    // not_open: already resolved — no new side effect (idempotent replay).
+    return { status: "applied", id: op.commitmentId, detail: "already-resolved" };
+  }
+  return { status: "applied", id: op.commitmentId, detail: result.toStatus };
+}
+
+// ------------------------------------------------------------ occurrence
+
+/** Id-form executor (selector resolution happens in dispatch). */
+async function executeOccurrenceUpdate(
+  db: OperationsDb,
+  op: Extract<OccurrenceUpdateOperation, { calendarEventId: string }>,
+  ctx: OperationContext,
+): Promise<OperationResult> {
+  try {
+    const confirmed = await confirmOccurrence(db, {
+      calendarEventId: op.calendarEventId,
+      happened: op.happened,
+      principalId: ctx.principalId,
+      now: ctx.now,
+    });
+    return { status: "applied", id: op.calendarEventId, detail: confirmed.occurrence };
+  } catch (err) {
+    if (err instanceof CalendarEventNotFoundError) {
+      return { status: "failed", detail: "unknown-calendar-event" };
+    }
+    if (err instanceof OccurrenceAlreadyGraduatedError) {
+      return { status: "failed", detail: "already-graduated" };
+    }
+    throw err;
+  }
 }
 
 // ------------------------------------------------------ calibration_feedback
@@ -1302,6 +1434,40 @@ async function executeCrossPrincipalProfile(
   };
 }
 
+// ---------------------------------------------------- selector → id (goal 3)
+
+/** Map a deterministic selector resolution onto an OperationResult.
+ *  resolved → the canonical id (caller proceeds); not_found is an honest
+ *  failure (attempted, nothing landed); ambiguous is a refusal to guess. */
+function selectorDetail(prefix: string, searched: string): string {
+  return `${prefix}: ${searched.slice(0, 60)}`;
+}
+
+/** Deterministic round-0 referent resolution over CANONICAL state only. */
+async function resolveReminderTarget(
+  db: OperationsDb,
+  op: ReminderReplyOperation,
+  ctx: OperationContext,
+): Promise<OperationResult | { readonly reminderId: string }> {
+  if (!("target" in op)) return { reminderId: op.reminderId };
+  const checkIn = "checkIn" in op.target;
+  const text = "text" in op.target ? op.target.text : null;
+  const resolution = await resolveArmedReminder(db, {
+    principalName: ctx.principalName,
+    text,
+    checkIn,
+    now: ctx.now,
+  });
+  if (resolution.status === "resolved") return { reminderId: resolution.value.reminderId };
+  if (resolution.status === "not_found") {
+    return { status: "failed", detail: selectorDetail("selector-no-match", resolution.searched) };
+  }
+  return {
+    status: "rejected",
+    detail: `${selectorDetail("selector-ambiguous", resolution.searched)} → ${resolution.candidates.join(" | ").slice(0, 120)}`,
+  };
+}
+
 // ------------------------------------------------------------------ dispatch
 
 /**
@@ -1348,43 +1514,60 @@ export async function executeOperation(
       }
       case "reminder_create":
         return await executeReminderCreate(db, op, ctx);
-      case "reminder_reply":
-        return await executeReminderReply(db, op, ctx);
-      case "commitment_transition": {
-        const result = await applyCommitmentTransition(db, {
-          commitmentId: op.commitmentId,
-          verb: op.verb,
-          note: op.note ?? undefined,
-          principalId: ctx.principalId,
-          now: () => ctx.now,
-        });
-        if (!result.applied) {
-          if (result.reason === "not_found") {
-            return { status: "failed", detail: "unknown-commitment" };
-          }
-          // not_open: already resolved — no new side effect (idempotent replay).
-          return { status: "applied", id: op.commitmentId, detail: "already-resolved" };
-        }
-        return { status: "applied", id: op.commitmentId, detail: result.toStatus };
+      case "reminder_reply": {
+        const resolved = await resolveReminderTarget(db, op, ctx);
+        if ("status" in resolved) return resolved;
+        return await executeReminderReply(
+          db,
+          { type: "reminder_reply", reminderId: resolved.reminderId, kind: op.kind, whenText: op.whenText },
+          ctx,
+        );
       }
-      case "occurrence_update": {
-        try {
-          const confirmed = await confirmOccurrence(db, {
-            calendarEventId: op.calendarEventId,
-            happened: op.happened,
-            principalId: ctx.principalId,
+      case "commitment_transition": {
+        if ("target" in op) {
+          const resolution = await resolveOpenCommitmentByText(db, {
+            text: op.target.text,
             now: ctx.now,
           });
-          return { status: "applied", id: op.calendarEventId, detail: confirmed.occurrence };
-        } catch (err) {
-          if (err instanceof CalendarEventNotFoundError) {
-            return { status: "failed", detail: "unknown-calendar-event" };
+          if (resolution.status === "not_found") {
+            return { status: "failed", detail: selectorDetail("selector-no-match", resolution.searched) };
           }
-          if (err instanceof OccurrenceAlreadyGraduatedError) {
-            return { status: "failed", detail: "already-graduated" };
+          if (resolution.status === "ambiguous") {
+            return {
+              status: "rejected",
+              detail: `${selectorDetail("selector-ambiguous", resolution.searched)} → ${resolution.candidates.join(" | ").slice(0, 120)}`,
+            };
           }
-          throw err;
+          return await executeCommitmentTransition(
+            db,
+            { type: "commitment_transition", commitmentId: resolution.value.commitmentId, verb: op.verb, note: op.note },
+            ctx,
+          );
         }
+        return await executeCommitmentTransition(db, op, ctx);
+      }
+      case "occurrence_update": {
+        if ("target" in op) {
+          const resolution = await resolveCalendarOccurrenceByText(db, {
+            text: op.target.text,
+            now: ctx.now,
+          });
+          if (resolution.status === "not_found") {
+            return { status: "failed", detail: selectorDetail("selector-no-match", resolution.searched) };
+          }
+          if (resolution.status === "ambiguous") {
+            return {
+              status: "rejected",
+              detail: `${selectorDetail("selector-ambiguous", resolution.searched)} → ${resolution.candidates.join(" | ").slice(0, 120)}`,
+            };
+          }
+          return await executeOccurrenceUpdate(
+            db,
+            { type: "occurrence_update", calendarEventId: resolution.value.calendarEventId, happened: op.happened },
+            ctx,
+          );
+        }
+        return await executeOccurrenceUpdate(db, op, ctx);
       }
       case "calibration_feedback":
         return await executeCalibrationFeedback(db, op, ctx);

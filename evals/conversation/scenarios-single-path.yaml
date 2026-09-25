@@ -41,6 +41,8 @@ scenarios:
           - pass: cognitive
             output: >-
               {"reads_requested":[],"operations_requested":[],"proposal_resolutions":[],"interpretation":"answer with the seven items","intent":"question","reply":"7 open items, Chief: pick up suit, get white shirt, build sign, seating chart, entertainment waiver, music playlist, call the florist."}
+          - pass: verify
+            output: '{"verdict":"consistent"}'
     expectations:
       rounds_at_least: 2
       intent_is: question
@@ -88,6 +90,8 @@ scenarios:
           - pass: cognitive
             output: >-
               {"reads_requested":[],"operations_requested":[],"proposal_resolutions":[],"interpretation":"now answer with items","intent":"question","reply":"Your 7: pick up suit, get white shirt, build sign, seating chart, entertainment waiver, music playlist, call the florist."}
+          - pass: verify
+            output: '{"verdict":"consistent"}'
     expectations:
       rounds_at_least: 3
       reply_contains:
@@ -213,6 +217,8 @@ scenarios:
           - pass: cognitive
             output: >-
               {"reads_requested":[],"operations_requested":[],"proposal_resolutions":[],"interpretation":"asking which model powers me","intent":"capability","reply":"GPT-4.1 for quick turns, Claude Sonnet 4.5 when I need to dig — via OpenRouter."}
+          - pass: verify
+            output: '{"verdict":"consistent"}'
     expectations:
       reply_contains:
         - Sonnet
@@ -281,6 +287,8 @@ scenarios:
           - pass: cognitive
             output: >-
               {"reads_requested":[{"tool":"calendar.next"}],"operations_requested":[],"proposal_resolutions":[],"interpretation":"final","intent":"question","reply":"Next up: the dentist at 3 PM. That's what I can see right now."}
+          - pass: verify
+            output: '{"verdict":"consistent"}'
     expectations:
       rounds_at_most: 3
       reply_contains:

@@ -404,6 +404,17 @@ const WHEN_COMBINED = new RegExp(
 );
 const WHEN_BARE = /^(today|tonight|tomorrow|this afternoon)$/;
 const WHEN_WEEKDAY = new RegExp(`^(${WEEKDAY_WORDS.join("|")})$`);
+/** Wave fix (goal 5 corpus): part-of-day qualifiers — "tomorrow morning". */
+const WHEN_COMBINED_PART = new RegExp(
+  `^(today|tonight|tomorrow|${WEEKDAY_WORDS.join("|")}) (morning|afternoon|evening|night)$`,
+);
+/** Wave fix (goal 5 corpus): reversed order — "9am tomorrow" / "at 3pm friday". */
+const WHEN_REVERSED = new RegExp(
+  `^at ${WHEN_TIME} (today|tonight|tomorrow|${WEEKDAY_WORDS.join("|")})$`,
+);
+const WHEN_REVERSED_BARE = new RegExp(
+  `^${WHEN_TIME} (today|tonight|tomorrow|${WEEKDAY_WORDS.join("|")})$`,
+);
 
 /** "3pm" / "3:15pm" / "15:00" → {hour, minute}; out-of-range → null. */
 function parseWhenTime(h: string, m: string | undefined, meridiem: string | undefined): {
@@ -417,6 +428,17 @@ function parseWhenTime(h: string, m: string | undefined, meridiem: string | unde
   if (meridiem === undefined) return hour >= 0 && hour <= 23 ? { hour, minute } : null;
   if (hour < 1 || hour > 12) return null;
   return { hour: (hour % 12) + (meridiem === "pm" ? 12 : 0), minute };
+}
+
+/** Part-of-day → fixed clock time (the module's own conventions). */
+function partOfDayTime(
+  part: string,
+  probeTime: { hour: number; minute: number },
+): { hour: number; minute: number } {
+  if (part === "morning") return { hour: 9, minute: 0 };
+  if (part === "afternoon") return { hour: probeTime.hour, minute: probeTime.minute };
+  if (part === "evening") return { hour: 18, minute: 0 };
+  return { hour: 20, minute: 0 }; // night — the tonight convention
 }
 
 /**
@@ -482,6 +504,24 @@ export function resolveWhenWords(
       };
     }
     return { dueDate: whenDateOf(norm, today), dueTime: null, matched: norm };
+  }
+
+  // "tomorrow morning" / "friday evening" — part-of-day qualifiers map to
+  // the module's fixed conventions (morning 9:00, afternoon probeTime,
+  // evening 18:00, night 20:00); deterministic, never a guess otherwise.
+  const dayPart = WHEN_COMBINED_PART.exec(norm);
+  if (dayPart !== null) {
+    const time = partOfDayTime(dayPart[2]!, policy.probeTime);
+    return { dueDate: whenDateOf(dayPart[1]!, today), dueTime: time, matched: norm };
+  }
+
+  // "9am tomorrow" / "at 3pm friday" — reversed day+time order (the
+  // natural phrasing the combined form misses).
+  const reversed = WHEN_REVERSED.exec(norm) ?? WHEN_REVERSED_BARE.exec(norm);
+  if (reversed !== null) {
+    const time = parseWhenTime(reversed[1]!, reversed[2], reversed[3]);
+    if (time === null) return null;
+    return { dueDate: whenDateOf(reversed[4]!, today), dueTime: time, matched: norm };
   }
 
   const weekday = WHEN_WEEKDAY.exec(norm);

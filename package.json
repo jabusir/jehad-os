@@ -18,6 +18,8 @@
     "eval:bakeoff:a": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/answer-quality/run.ts --track-a",
     "eval:bakeoff:probe": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/model-bakeoff/probe.ts",
     "eval:bakeoff:pairwise": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/model-bakeoff/pairwise.ts",
+    "eval:semantic": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/conversation/semantic-live.ts",
+    "eval:semantic:holdout": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/conversation/semantic-live.ts --holdout",
     "renew:ingest": "pnpm --filter @jehad/api exec tsx src/renew-ingest.ts",
     "setup:db": "bash infra/dev/setup-db.sh",
     "backup": "bash infra/dev/backup.sh",

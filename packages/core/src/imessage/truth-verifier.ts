@@ -115,7 +115,7 @@ export function buildVerificationPrompt(reply: string, ledger: readonly LedgerEn
     renderLedgerJson(ledger),
     "</execution_ledger>",
     "",
-    'The execution ledger is ground truth. Judge ACTION claims only: whether the reply\'s statements about operations and proposal resolutions — mutations, resolutions, and their outcomes, INCLUDING failed and rejected attempts — match the ledger. Example: a reply claiming "I set the reminder" against a ledger entry {"kind":"operation","opType":"reminder_create","status":"rejected"} contradicts. Do not judge style, vocabulary, tone, opinions, or any other non-action content; a reply making no action claims is consistent.',
+    'The execution ledger is ground truth. Judge ACTION claims only: whether the reply\'s statements about operations and proposal resolutions — mutations, resolutions, and their outcomes, INCLUDING failed and rejected attempts — match the ledger. An EMPTY ledger ([]) means NO action ran this turn: any claim that the reply set, created, tracked, scheduled, reminded, changed, or completed something contradicts. Example contradictions: "I set the reminder" against {"kind":"operation","opType":"reminder_create","status":"rejected"}; "Done — reminder set." against []. A reply that only offers, asks, recommends, or explains ("I can set that up — say the word") makes no action claim. Do not judge style, vocabulary, tone, opinions, or any other non-action content; a reply making no action claims is consistent.',
     "",
     "Respond with EXACTLY one line of JSON and no other text — no markdown fences, no prose:",
     '{"verdict":"consistent"}',
