@@ -1676,6 +1676,109 @@ tree behind the flag.
 
 ---
 
+## 24. Night-1 dogfood post-mortem — 2026-09-24 20:06 → 09-25 09:53
+
+Window: single-path live (cutover §23) through the 21:30 night-fix deploy
+(a9bb1e3) and the following morning. 14 conversational turns + the 06:00
+morning brief. One root defect produced most of the damage; three renderer/
+teaching gaps produced the rest.
+
+**What held (calibration for the list below):** zero conversation hijacks,
+zero machinery vocabulary, no raw JSON after the 21:30 fix, ~2s replies at
+~$0.0003/turn, budgets/grants/threads correct, whole-transcript
+comprehension good (an 11-item synthesis at 20:45 correctly merged two
+messages). The architecture held; the wiring fed it the wrong brain.
+
+### F1 — Wrong model in production (policy path off-by-one) [PROVEN; fix staged]
+
+`cognitive-turn.ts`'s hand-rolled `resolveRepoPath()` pops one path segment
+too few: in the built api it resolves to `packages/policy.yaml` (ENOENT),
+and the policy loader's fail-safe catch returns null SILENTLY. With policy
+null: both model tiers fall back to the principal's legacy pin
+(`openai/gpt-4o-mini` — the exact model the §5 probe measured at 88.9%
+envelope validity), the persona fragment never loads, the self-brief
+renders unknown states. Every cognitive call 20:06→09:38 ran on 4o-mini
+[model_calls ledger]. Example — 09:38:24 "what do i need to do today" →
+"I currently don't have information about your open commitments…" while
+seven commitments sat in the DB and the read catalog was in the prompt.
+Fix: the conversation.ts URL convention + a loud startup audit when the
+policy file fails to resolve (silent-null must never recur).
+
+### F2 — Raw JSON shipped to the user [FIXED 21:30, a9bb1e3]
+
+20:15:01 and 20:15:39 the user received `{"reply":"I've noted to send you a
+reminder…"}` verbatim ("whoops you forgot to parse that json response").
+Root: models emit reply-only partial envelopes; strict parse failed twice;
+the degrade path's last resort shipped the malformed text raw. Fix:
+lenientEnvelope accepts reply-only JSON (executes nothing), JSON-shaped
+text is never shipped raw, RECOVERY demands plain text. Held after deploy
+(09:38 degrade shipped clean prose).
+
+### F3 — Zero operations fired → no persistence [root = F1; teaching fix staged]
+
+Every night turn's ledger is empty [cognitive.turn audits]. 20:14 "can you
+remind me… send me a text tomorrow at like 2PM" + 20:14:58 "yes please" →
+NO reminder_create (reminders table: zero rows). Thread `/new` at 21:25
+then erased the conversational trace. Net: the wedding-day to-do list
+existed nowhere durable.
+
+### F4 — No-op fabrication [live instance of §22.9's accepted residual]
+
+20:45:03 the reply asserted "(reminder set for tomorrow at 2 PM)" — the
+reminder does not exist. Zero-ledger turns are not verified (by design),
+so the fabrication shipped. Mitigation staged: the contract's TRUTH RULE
+(never claim set/created/tracked without an OPERATION RESULT in context).
+
+### F5 — Completion-report conflation + phantom commitments [root = F1/F3; repair staged]
+
+09:02 six to-dos tracked as open commitments (correct then). 20:42 the
+user reported them DONE ("picked up suit… seating chart finalized…").
+No `commitment_transition` ops fired → nothing closed → 20:45 presented
+done-items and to-dos in one flat undifferentiated list (items 1–5 to-dos,
+6–11 accomplishments) → 21:10 user: "you marked already complete items as
+commitments." The DB now holds 7 phantom open commitments, including the
+absurd artifact `Mark seating chart as done` (a commitment whose content is
+the act of closing another commitment, minted by the legacy path on
+09-24 11:40). Stale state then propagated into every downstream view (F6).
+
+### F6 — The brief hid the wedding list [renderer gap; fix staged]
+
+06:00 morning brief: "Today — 6–8 AM gym, 8–4 work, 4:30 Quran, 5:45
+interview prep… Waiting on you — 7 more open commitments without near due
+dates." The seven wedding items were IN the DB but the waiting-section
+renders titles only for overdue/due-soon; undated items collapse to a
+count. The titles would have shown the wedding list bug-or-no-bug.
+
+### F7 — The system's "today" does not know the wedding [ontology gap]
+
+The brief's Today section is the Google Calendar — which does not contain
+the wedding. "Tomorrow is my wedding day" (20:12) had no durable home: no
+memory op fired (F3), thread cleared (/new), calendar silent. The single
+most important fact of the owner's year was invisible to every morning
+surface. Staged: contract teaching (life-facts → memory_candidate) +
+brief undated-title rendering; the deeper fix (day.state carrying recalled
+memories / a day-event concept) is post-honeymoon work.
+
+### Single point of failure observed
+
+Op-emission reliability is the system's continuity bottleneck: persistence,
+completion-tracking, and fact-retention all ride on the model emitting
+typed operations on round 0. On the wrong brain that rate was 0%. The
+doctrine (interpretation lives in the model) stands; its dependency is a
+dependable brain and a contract that teaches by example — both staged.
+
+### Fix batch (staged, awaiting owner go)
+
+1. F1 one-liner + loud policy-resolution audit.
+2. F6 brief renderer: undated open commitments list titles (bounded).
+3. F3/F4/F5 contract teaching: reminder/task/profile examples (landed in
+   a9bb1e3, unproven on the right brain), life-facts → memory_candidate,
+   completion reports → commitment_transition.
+4. F5 data repair: close the six completed commitments, void the
+   "Mark seating chart as done" artifact.
+
+---
+
 *The shortest path from today's system to an assistant Jehad wants to talk to
 every day is: stop the lanes from interrupting him (C1/C2/C6), show him what the
 system already knows (C4/C5/C9), and put a strong model behind the one
