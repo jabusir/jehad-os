@@ -55,9 +55,14 @@ export interface ClaimAuditResult {
   } | null;
 }
 
+// Write-claim verbs are anchored to a FIRST-PERSON SUBJECT — bare
+// participles describing state ("7 open tracked commitments", "events
+// created last week") are reads, not write claims, and must never strike
+// a true grounded line (the 2026-09-24 dogfood misfires).
 const DONE_WRITE_RE =
-  /\b(?:i\s+)?(?:just\s+|already\s+)?(?:have\s+|'ve\s+)?(?:tracked|captured|saved|logged|recorded|noted|completed|marked|updated|added)\b/i;
-const SCHEDULED_WRITE_RE = /\b(?:i\s+)?(?:just\s+|already\s+)?(?:have\s+|'ve\s+)?(?:scheduled|booked|created|wrote)\b/i;
+  /\b(?:[iI](?:'ve\s+|'d\s+|\s+(?:just\s+|already\s+)?(?:have\s+)?)|[wW]e(?:'ve\s+|\s+(?:just\s+|already\s+)?(?:have\s+)?))(?:tracked|captured|saved|logged|recorded|noted|completed|marked|updated|added)\b/;
+const SCHEDULED_WRITE_RE =
+  /\b(?:[iI](?:'ve\s+|'d\s+|\s+(?:just\s+|already\s+)?(?:have\s+)?)|[wW]e(?:'ve\s+|\s+(?:just\s+|already\s+)?(?:have\s+)?))(?:scheduled|booked|created|wrote)\b/;
 const AM_TRACKING_RE = /\b(?:i'?m|i am)\s+(?:now\s+)?(?:tracking|logging|recording)\b/i;
 const FUTURE_WRITE_RE =
   /\b(?:i'?ll|i will|i'?m going to|going to|let me)\s+(?:track|capture|save|log|add|schedule|create|remember|note|record|bookmark)\b/i;
@@ -185,13 +190,13 @@ export function auditReplyClaims(replyText: string, facts: ClaimAuditFacts): Cla
 }
 
 /** The action-oriented truthful line — the DB says what IS, the copy says
- *  what to do next. */
+ *  what to do next. Reset C6: no protocol vocabulary, no invented verbs —
+ *  the appended offer (if any) already carries the confirm instruction. */
 export function truthfulReplacement(facts: ClaimAuditFacts): string {
   if (facts.pendingProposal) {
-    const label = facts.pendingProposalLabel ?? "proposal";
-    return `Correction — that isn't done yet. Your ${label} is awaiting your yes: reply "track them" to apply it.`;
+    return "To be clear — that's not done yet; nothing changes until you say yes.";
   }
-  return "Correction — nothing has been written yet. I won't claim work that didn't happen; tell me to go ahead and I'll do it for real.";
+  return "Correction — I haven't changed anything yet. Say the word and I will.";
 }
 
 /** Deterministic safe rendering when the revise pass fails its own re-audit. */

@@ -419,6 +419,9 @@ export interface GatewayPolicyV1 {
   readonly interpret?: GatewayInterpretPolicy;
   /** Lane R1 pass-model overrides (gateway.passes); absent → null (no overrides). */
   readonly passes: GatewayPassesPolicy | null;
+  /** §22 turn orchestration flag (gateway.routing); absent → "legacy".
+   * "single" = the single-author cognitive loop. */
+  readonly routing?: "single" | "legacy";
 }
 
 /**
@@ -841,6 +844,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const gatewayContext: { value: GatewayContextPolicy | null } = { value: null };
   const gatewayInterpret: { value: GatewayInterpretPolicy | null } = { value: null };
   const gatewayPasses: { value: GatewayPassesPolicy | null } = { value: null };
+  let gatewayRouting: "single" | "legacy" | null = null;
   const sensorsGmail: { value: GmailSensorPolicy | null } = { value: null };
   const calibrationDaily: { value: CalibrationPolicy | null } = { value: null };
   const outcomesPolicy: { value: OutcomesPolicy | null } = { value: null };
@@ -981,6 +985,14 @@ export function parsePolicyV1(text: string): PolicyV1 {
         gatewayPasses.value = parseGatewayPassesEntry(value);
         continue;
       }
+      if (key === "routing") {
+        if (value !== "single" && value !== "legacy") {
+          throw new Error(`policy: gateway.routing must be 'single' or 'legacy', got '${value}'`);
+        }
+        if (gatewayRouting !== null) throw new Error("policy: duplicate gateway.routing key");
+        gatewayRouting = value;
+        continue;
+      }
       throw new Error(`policy: unknown gateway key '${key}'`);
     }
     if (!isActionType(key)) throw new Error(`policy: unknown action type '${key}'`);
@@ -1010,6 +1022,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
       ...(gatewayActions.value !== null ? { actions: gatewayActions.value } : {}),
       ...(gatewayContext.value !== null ? { context: gatewayContext.value } : {}),
       ...(gatewayInterpret.value !== null ? { interpret: gatewayInterpret.value } : {}),
+      ...(gatewayRouting !== null ? { routing: gatewayRouting } : {}),
       passes: gatewayPasses.value,
     };
   }

@@ -94,7 +94,7 @@ const CAP_DAY_STATE_TEXT = 4000;
 const CALENDAR_COVERAGE =
   "calendar events only; email, chat, and notes are not connected";
 const COMMITMENTS_COVERAGE =
-  "manually captured commitments in the world model only";
+  "all open commitments in the world model — overdue, due soon, and undated, each with its title (a plain to-do list ask gets the list, not a count)";
 // Coverage honesty (Phase GMAIL §8.4): Gmail = the owner's ONE connected
 // account, metadata only — never "email" in general, never message content.
 const GMAIL_COVERAGE =
@@ -537,12 +537,12 @@ export async function executeReadTool(
       });
       const overdue = waiting.filter((c) => c.overdue);
       const dueSoon = waiting.filter((c) => !c.overdue && c.dueSoon);
+      const otherOpen = waiting.filter((c) => !c.overdue && !c.dueSoon);
       const item = (c: (typeof waiting)[number]) => ({
         description: truncate(c.description, CAP_DESCRIPTION),
         counterparty: truncate(c.counterpartyText, CAP_LOCATION),
         due: dueDay(c.dueAt),
       });
-      const otherOpen = waiting.length - overdue.length - dueSoon.length;
       return {
         tool: call.tool,
         source: "commitments",
@@ -552,7 +552,11 @@ export async function executeReadTool(
           overdue: overdue.slice(0, CAP_WAITING_ROWS).map(item),
           dueSoonCount: dueSoon.length,
           dueSoon: dueSoon.slice(0, CAP_WAITING_ROWS).map(item),
-          otherOpenCount: otherOpen,
+          otherOpenCount: otherOpen.length,
+          // Reset dogfood fix: the undated open list itself — a count alone
+          // made "what's on my to-do list?" unanswerable after a /new.
+          open: otherOpen.slice(0, CAP_WAITING_ROWS).map(item),
+          openTruncated: otherOpen.length > CAP_WAITING_ROWS,
         },
       };
     }

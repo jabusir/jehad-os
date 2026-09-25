@@ -28,6 +28,10 @@ import {
 import { parseRouteJson, resolveDayBounds } from "./read-tools.js";
 import { syncCalendar } from "../calendar/sync.js";
 
+// §22 dual-window: this suite pins the LEGACY orchestration path (the
+// rollback path) — pin the fixture policy (routing: legacy) file-wide.
+process.env.POLICY_YAML_PATH ??= new URL("./legacy-routing.fixture.yaml", import.meta.url).pathname;
+
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
 // Wall-relative (was a fixed date that detonated once real time passed it).
@@ -706,7 +710,7 @@ describe.skipIf(!TEST_DATABASE_URL)("imessage conversation phase E (integration)
     const answerPrompt = provider.requests.at(-1)!.prompt;
     expect(answerPrompt).toContain("Pay internet bill");
     expect(answerPrompt).toContain("Book squash court");
-    expect(answerPrompt).toContain("manually captured commitments in the world model only");
+    expect(answerPrompt).toContain("all open commitments in the world model");
   });
 
   it("attachment-only flood is rate-capped by the same hourly limit (adversary 4b)", async () => {

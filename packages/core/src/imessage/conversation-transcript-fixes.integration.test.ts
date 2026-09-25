@@ -17,6 +17,10 @@ import {
 } from "./conversation.js";
 import { setThreadPendingProposal, type ThreadPendingProposal } from "./threads.js";
 
+// §22 dual-window: this suite pins the LEGACY orchestration path (the
+// rollback path) — pin the fixture policy (routing: legacy) file-wide.
+process.env.POLICY_YAML_PATH ??= new URL("./legacy-routing.fixture.yaml", import.meta.url).pathname;
+
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const T0 = new Date("2026-09-21T20:56:00Z");
 
@@ -292,7 +296,7 @@ describe.skipIf(!TEST_DATABASE_URL)("transcript autopsy fixes (integration)", ()
     expect(outcome.replied).toBe(true);
     const reply = (await replyOf(outcome)) ?? "";
     expect(reply).not.toContain("tracked all 8");
-    expect(reply).toContain("nothing has been written yet");
+    expect(reply).toContain("I haven't changed anything yet");
     const ledger = await db.pool.query(
       `SELECT outputs_ref FROM audit_log WHERE action = 'converse.claim_audit'
          ORDER BY created_at DESC LIMIT 1`,

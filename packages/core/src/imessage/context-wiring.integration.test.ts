@@ -12,6 +12,10 @@ import { ModelEgressPolicyRegistry } from "../egress/index.js";
 import { issueGrant } from "../policy/grants.js";
 import { CONVERSE_CAPABILITY, handleInbound, type ConversationDeps } from "./conversation.js";
 
+// §22 dual-window: this suite pins the LEGACY orchestration path (the
+// rollback path) — pin the fixture policy (routing: legacy) file-wide.
+process.env.POLICY_YAML_PATH ??= new URL("./legacy-routing.fixture.yaml", import.meta.url).pathname;
+
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const T0 = new Date();
 const HANDLE = "+15550003333";

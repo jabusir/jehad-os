@@ -49,11 +49,14 @@ export const TRUTHFUL_UX_RULES: readonly string[] = Object.freeze([
 const MACHINERY_LINE_RE =
   /\b(?:reply|respond|answer|text|message)\s+(?:me\s+)?(?:back\s+)?(?:with\s+)?["'""''][^'""'']{1,40}["'""'']/i;
 const MACHINERY_SAY_RE = /\bsay\s+["'""''][a-z][^'""'']{0,40}["'""'']\s*(?:to|if|when|and)\b/i;
+/** Reset dogfood fix: protocol-state narration the system owns, not the model. */
+const MACHINERY_AWAIT_RE =
+  /\bawaiting your (?:yes|confirmation|approval)\b|\bconfirm (?:code|token)\b|\bthe system (?:should|will) prompt\b/i;
 
 export function isMachinerySentence(sentence: string): boolean {
   const s = sentence.trim();
   if (s.length === 0) return false;
-  return MACHINERY_LINE_RE.test(s) || MACHINERY_SAY_RE.test(s);
+  return MACHINERY_LINE_RE.test(s) || MACHINERY_SAY_RE.test(s) || MACHINERY_AWAIT_RE.test(s);
 }
 
 export function stripMachineryLines(text: string): string {

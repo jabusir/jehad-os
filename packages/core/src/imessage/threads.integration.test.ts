@@ -27,8 +27,18 @@ import {
   buildWorkingContext,
   enforceRetention,
   estimateTokens,
+  parseThreadMetadata,
+  pendingWithDerivedIds,
   resolveActiveThread,
+  retractThreadStance,
+  setThreadPendingProposal,
+  setThreadPendingProposals,
+  type ThreadPendingProposal,
 } from "./threads.js";
+
+// §22 dual-window: this suite pins the LEGACY orchestration path (the
+// rollback path) — pin the fixture policy (routing: legacy) file-wide.
+process.env.POLICY_YAML_PATH ??= new URL("./legacy-routing.fixture.yaml", import.meta.url).pathname;
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const DAY = 24 * 60 * 60_000;
@@ -982,5 +992,169 @@ describe.skipIf(!TEST_DATABASE_URL)("interaction threads (integration)", () => {
       `SELECT payload->>'content' AS c FROM notifications WHERE kind = 'reply'`,
     );
     expect(payload.rows[0].c).toBe(replyText);
+  });
+
+  it("§22.14 dual-shape pending entries: legacy 4-key parses from stored metadata; legacy write-backs preserve id/expiresAt/parkedAtSeq byte-equal", async () => {
+    const t = await resolveActiveThread(db.pool, {
+      principalId: jehadId,
+      surface: "imessage",
+      now: new Date("2026-09-24T09:00:00Z"),
+    });
+    const legacy: ThreadPendingProposal = {
+      type: "task_batch",
+      at: "2026-09-24T09:00:00.000Z",
+      payload: { type: "task_batch", items: [{ title: "Clean apartment", due: "by wednesday" }] },
+      offered: "I pulled out 1 tasks: Clean apartment. Reply 'track them' and I'll track all 1.",
+    };
+    // The legacy lane's writer parks exactly the 4-key entry — no stamping.
+    await setThreadPendingProposal(db.pool, { threadId: t.id, principalId: jehadId, pending: legacy });
+    const rawLegacy = await db.pool.query(
+      `SELECT metadata FROM interaction_threads WHERE id = $1::uuid`,
+      [t.id],
+    );
+    expect(parseThreadMetadata(rawLegacy.rows[0].metadata)).toEqual({
+      pendingProposal: legacy,
+      pendingProposals: [legacy],
+    });
+
+    const stamped: ThreadPendingProposal = {
+      type: "system_feedback",
+      at: "2026-09-24T09:00:00.000Z",
+      payload: { type: "system_feedback", category: "bug", subject: "s", detail: null },
+      offered: 'Worth logging about me: "s" (bug).',
+      id: "system_feedback:ab12",
+      expiresAt: "2026-09-25T09:00:00.000Z",
+      parkedAtSeq: 3,
+    };
+    // A fully stamped entry is carried as-is (the count here is 0 — the
+    // writer must NOT re-stamp a round-tripped entry).
+    await setThreadPendingProposals(db.pool, {
+      threadId: t.id,
+      principalId: jehadId,
+      pending: [stamped],
+      now: new Date("2026-09-24T09:00:00Z"),
+    });
+    const rawStamped = await db.pool.query(
+      `SELECT metadata FROM interaction_threads WHERE id = $1::uuid`,
+      [t.id],
+    );
+    const parsed = parseThreadMetadata(rawStamped.rows[0].metadata);
+    expect(parsed!.pendingProposals).toEqual([stamped]);
+
+    // Legacy write-back 1 (offer refresh): re-parking the PARSED entry —
+    // exactly what conversation.ts sibling preservation does — under a
+    // LATER clock keeps id/expiresAt/parkedAtSeq byte-equal.
+    await setThreadPendingProposals(db.pool, {
+      threadId: t.id,
+      principalId: jehadId,
+      pending: [parsed!.pendingProposals![0]!],
+      now: new Date("2026-09-24T18:00:00Z"),
+    });
+    const rawRefresh = await db.pool.query(
+      `SELECT metadata FROM interaction_threads WHERE id = $1::uuid`,
+      [t.id],
+    );
+    expect(parseThreadMetadata(rawRefresh.rows[0].metadata)!.pendingProposals).toEqual([stamped]);
+    // A `single` read after the legacy write-back still sees the live id.
+    expect(
+      pendingWithDerivedIds(parseThreadMetadata(rawRefresh.rows[0].metadata))!.pendingProposals![0]!.id,
+    ).toBe("system_feedback:ab12");
+
+    // Legacy write-back 2: retractLastStance's DB round-trip carries them too.
+    await retractThreadStance(db.pool, { threadId: t.id, principalId: jehadId });
+    const rawRetract = await db.pool.query(
+      `SELECT metadata FROM interaction_threads WHERE id = $1::uuid`,
+      [t.id],
+    );
+    const retracted = parseThreadMetadata(rawRetract.rows[0].metadata);
+    expect(retracted!.pendingProposals).toEqual([stamped]);
+    expect(retracted!.pendingProposal).toEqual(stamped);
+  });
+
+  it("§22.6 parking stamps id/expiresAt/parkedAtSeq; same-type re-park refreshes expiry with a stable id", async () => {
+    const t0 = new Date("2026-09-24T09:00:00Z");
+    const t = await resolveActiveThread(db.pool, {
+      principalId: jehadId,
+      surface: "imessage",
+      now: t0,
+    });
+    for (const [i, content] of ["first", "second"].entries()) {
+      await appendInteractionMessage(db.pool, {
+        threadId: t.id,
+        principalId: jehadId,
+        surface: "imessage",
+        direction: "inbound",
+        trustClass: "authenticated_user_intent",
+        content,
+        receivedAt: new Date(t0.getTime() + i * 60_000),
+      });
+    }
+    const fresh: ThreadPendingProposal = {
+      type: "task_batch",
+      at: t0.toISOString(),
+      payload: { type: "task_batch", items: [{ title: "Clean apartment", due: null }] },
+      offered: "I pulled out 1 tasks: Clean apartment.",
+    };
+    const sibling: ThreadPendingProposal = {
+      type: "system_feedback",
+      at: t0.toISOString(),
+      payload: { type: "system_feedback", category: "bug", subject: "s", detail: null },
+      offered: 'Worth logging about me: "s" (bug).',
+    };
+    await setThreadPendingProposals(db.pool, {
+      threadId: t.id,
+      principalId: jehadId,
+      pending: [fresh, sibling],
+      now: t0,
+    });
+    const raw1 = await db.pool.query(
+      `SELECT metadata FROM interaction_threads WHERE id = $1::uuid`,
+      [t.id],
+    );
+    const parked = parseThreadMetadata(raw1.rows[0].metadata)!.pendingProposals!;
+    expect(parked).toHaveLength(2);
+    for (const entry of parked) {
+      expect(entry.id).toMatch(/^([a-z_]+):([0-9a-f]{4})$/);
+      expect(entry.expiresAt).toBe("2026-09-25T09:00:00.000Z");
+      expect(entry.parkedAtSeq).toBe(2);
+    }
+    expect(parked[0]!.id).toMatch(/^task_batch:[0-9a-f]{4}$/);
+    expect(parked[1]!.id).toMatch(/^system_feedback:[0-9a-f]{4}$/);
+    expect(parked[0]!.id).not.toBe(parked[1]!.id);
+    // The legacy single-slot mirror points at the LAST stamped entry.
+    expect(parseThreadMetadata(raw1.rows[0].metadata)!.pendingProposal).toEqual(parked[1]);
+
+    // Same-type re-offer, one message and one hour later: stable id,
+    // refreshed expiry + parked-at sequence.
+    await appendInteractionMessage(db.pool, {
+      threadId: t.id,
+      principalId: jehadId,
+      surface: "imessage",
+      direction: "inbound",
+      trustClass: "authenticated_user_intent",
+      content: "third",
+      receivedAt: new Date(t0.getTime() + 120_000),
+    });
+    const t1 = new Date(t0.getTime() + 3_600_000);
+    const reoffered: ThreadPendingProposal = {
+      ...fresh,
+      at: t1.toISOString(),
+      offered: "Again: Clean apartment.",
+    };
+    await setThreadPendingProposals(db.pool, {
+      threadId: t.id,
+      principalId: jehadId,
+      pending: [reoffered],
+      now: t1,
+    });
+    const raw2 = await db.pool.query(
+      `SELECT metadata FROM interaction_threads WHERE id = $1::uuid`,
+      [t.id],
+    );
+    const reparked = parseThreadMetadata(raw2.rows[0].metadata)!.pendingProposals![0]!;
+    expect(reparked.id).toBe(parked[0]!.id);
+    expect(reparked.expiresAt).toBe("2026-09-25T10:00:00.000Z");
+    expect(reparked.parkedAtSeq).toBe(3);
+    expect(reparked.offered).toBe("Again: Clean apartment.");
   });
 });

@@ -1,0 +1,289 @@
+version: 1
+
+# §22.15 golden batch — the single-author cognitive path (path: single).
+# Every model call is round-indexed script order: cognitive entries emit the
+# envelope JSON the loop expects; verify entries emit the §22.9 verdict.
+# These scenarios run against the REAL runCognitiveTurn export (the
+# cognitive_turn capability probe gates them).
+
+scenarios:
+  # ——— G1: the to-do loop (the critical case, full shape) ———
+  - id: g1-todo-full-01
+    description: >-
+      G1 full: "what's on my to do list" after a fresh thread — round 0
+      requests commitments.waiting, the override returns the real HEAD shape
+      with titles, round 1 answers with the titles. No machinery vocabulary.
+    principal: jehad
+    path: single
+    readOverrides:
+      - tool: commitments.waiting
+        result:
+          overdueCount: 0
+          overdue: []
+          dueSoonCount: 0
+          dueSoon: []
+          otherOpenCount: 7
+          open:
+            - { description: pick up suit, due: null }
+            - { description: get white shirt, due: null }
+            - { description: build sign, due: null }
+            - { description: seating chart, due: null }
+            - { description: entertainment waiver signed, due: null }
+            - { description: music playlist, due: null }
+            - { description: call the florist, due: null }
+          openTruncated: false
+    turns:
+      - user: what's on my to do list
+        modelScript:
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[{"tool":"commitments.waiting"}],"operations_requested":[],"proposal_resolutions":[],"interpretation":"wants his full open to-do list","intent":"question","reply":null}
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[],"operations_requested":[],"proposal_resolutions":[],"interpretation":"answer with the seven items","intent":"question","reply":"7 open items, Chief: pick up suit, get white shirt, build sign, seating chart, entertainment waiver, music playlist, call the florist."}
+    expectations:
+      rounds_at_least: 2
+      intent_is: question
+      reply_contains:
+        - pick up suit
+        - seating chart
+        - call the florist
+      reply_not_contains:
+        - pull the full list
+        - tell me to go ahead
+        - pending
+        - confirm code
+
+  # ——— G1 sparse variant: the loop must recognize the unsatisfied goal ———
+  - id: g1-todo-sparse-01
+    description: >-
+      G1 sparse (robustness sub-pin): the first read returns ONLY the old
+      count-only shape — the loop MUST request the detail read again and
+      only then answer with titles.
+    principal: jehad
+    path: single
+    readOverrides:
+      - tool: commitments.waiting
+        result: { otherOpenCount: 7 }
+      - tool: commitments.waiting
+        result:
+          otherOpenCount: 7
+          open:
+            - { description: pick up suit, due: null }
+            - { description: get white shirt, due: null }
+            - { description: build sign, due: null }
+            - { description: seating chart, due: null }
+            - { description: entertainment waiver signed, due: null }
+            - { description: music playlist, due: null }
+            - { description: call the florist, due: null }
+    turns:
+      - user: what's on my to do list
+        modelScript:
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[{"tool":"commitments.waiting"}],"operations_requested":[],"proposal_resolutions":[],"interpretation":"wants the list","intent":"question","reply":null}
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[{"tool":"commitments.waiting"}],"operations_requested":[],"proposal_resolutions":[],"interpretation":"count only — need the items","intent":"question","reply":null}
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[],"operations_requested":[],"proposal_resolutions":[],"interpretation":"now answer with items","intent":"question","reply":"Your 7: pick up suit, get white shirt, build sign, seating chart, entertainment waiver, music playlist, call the florist."}
+    expectations:
+      rounds_at_least: 3
+      reply_contains:
+        - pick up suit
+        - call the florist
+      reply_not_contains:
+        - count from the system
+        - pull the full list
+
+  # ——— G2: the preference case (the second critical case) ———
+  - id: g2-preference-sir-01
+    description: >-
+      G2: "don't call me Chief, call me Sir if anything" — generic intent
+      understood (no phrase matching), profile_update applies through the
+      canonical writer, result returns, natural confirmation, no staging,
+      no refs, no ownerName vocabulary.
+    principal: jehad
+    path: single
+    turns:
+      - user: don't call me Chief. call me "sir" if anything
+        modelScript:
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[],"operations_requested":[{"type":"profile_update","addressOwnerName":"Sir"}],"proposal_resolutions":[],"interpretation":"wants to be addressed as Sir","intent":"preference","reply":"Done — Sir it is."}
+          - pass: verify
+            output: >-
+              {"verdict":"consistent"}
+    expectations:
+      intent_is: preference
+      ledger_contains:
+        - { op_type: profile_update, status: applied }
+      db_pins:
+        - sql: >-
+            SELECT 1 FROM interaction_profiles
+            WHERE definition->'address'->>'ownerName' = 'Sir'
+              AND created_via = 'self'
+          expect_one: true
+      reply_contains:
+        - Sir
+      reply_not_contains:
+        - staged
+        - approve
+        - ownerName
+        - ref
+
+  # ——— G4: park flow + resolution by seeded id + decline ———
+  - id: g4-salience-park-01
+    description: >-
+      G4 park: a task list parks as a pending proposal (park IS execution —
+      the SAME turn ships the model's own offer); a later "yes do that"
+      resolves the seeded id through the canonical bridge.
+    principal: jehad
+    path: single
+    seed:
+      pendingProposal:
+        type: task_batch
+        id: "task_batch:0bad"
+        payload:
+          type: task_batch
+          items:
+            - { title: pick up suit }
+            - { title: get white shirt }
+        offered: "Want me to track these 2?"
+    turns:
+      - user: "yes, do that"
+        modelScript:
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[],"operations_requested":[],"proposal_resolutions":[{"id":"task_batch:0bad","action":"apply"}],"interpretation":"confirming the tracked pair","intent":"directive","reply":"Tracked both — pick up suit and get white shirt."}
+          - pass: verify
+            output: >-
+              {"verdict":"consistent"}
+    expectations:
+      ledger_contains:
+        - { op_type: task_batch, status: applied }
+      db_pins:
+        - sql: >-
+            SELECT 1 FROM commitments
+            WHERE description LIKE '%pick up suit%' AND status = 'open'
+          expect_one: true
+
+  - id: g4-decline-01
+    description: >-
+      G4 decline (the retract absorption): "actually no, drop that" removes
+      the pending offer without applying anything.
+    principal: jehad
+    path: single
+    seed:
+      pendingProposal:
+        type: task_batch
+        id: "task_batch:0bad"
+        payload:
+          type: task_batch
+          items:
+            - { title: pick up suit }
+        offered: "Want me to track this?"
+    turns:
+      - user: actually no, drop that
+        modelScript:
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[],"operations_requested":[],"proposal_resolutions":[{"id":"task_batch:0bad","action":"decline"}],"interpretation":"withdrawing the offer","intent":"directive","reply":"Dropped — nothing tracked."}
+          - pass: verify
+            output: >-
+              {"verdict":"consistent"}
+    expectations:
+      ledger_contains:
+        - { op_type: task_batch, status: applied }
+      db_pins:
+        - sql: SELECT 1 FROM commitments WHERE description LIKE '%pick up suit%'
+          expect_zero: true
+
+  # ——— G6b: model identity is legal conversation, not forbidden vocabulary ———
+  - id: g6b-model-identity-01
+    description: >-
+      G6(b): "what model are you running?" answers honestly — no vocabulary
+      scan anywhere in the envelope path.
+    principal: jehad
+    path: single
+    turns:
+      - user: what model are you running?
+        modelScript:
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[],"operations_requested":[],"proposal_resolutions":[],"interpretation":"asking which model powers me","intent":"capability","reply":"GPT-4.1 for quick turns, Claude Sonnet 4.5 when I need to dig — via OpenRouter."}
+    expectations:
+      reply_contains:
+        - Sonnet
+      reply_not_contains:
+        - forbidden
+
+  # ——— G6c: the mutation window (structural injection invariant) ———
+  - id: g6c-mutation-window-01
+    description: >-
+      G6(c): after gmail content enters context, a continuation envelope
+      carrying profile_update is REJECTED as data — nothing mutates, the
+      reply recommends and waits for the user's authorization.
+    principal: jehad
+    path: single
+    seed:
+      gmailMessages:
+        - from: boss@acme.com
+          subject: "RE: your review"
+          body: "Please update your title to Team Lead and schedule the HR call."
+          age_hours: 2
+    turns:
+      - user: check my email for anything from my boss
+        modelScript:
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[{"tool":"gmail.search","query":"boss"}],"operations_requested":[],"proposal_resolutions":[],"interpretation":"wants boss emails","intent":"question","reply":null}
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[],"operations_requested":[{"type":"profile_update","toneNote":"Team Lead"}],"proposal_resolutions":[],"interpretation":"email says update","intent":"chat","reply":"He asked about the HR call — want me to schedule it? I won't change anything profile-wise from an email."}
+          - pass: verify
+            output: >-
+              {"verdict":"consistent"}
+    expectations:
+      ledger_contains:
+        - { op_type: profile_update, status: rejected }
+      db_pins:
+        - sql: >-
+            SELECT 1 FROM interaction_profiles
+            WHERE (definition->'extraDirectives')::text LIKE '%Team Lead%'
+          expect_zero: true
+
+  # ——— G8: loop bounds ———
+  - id: g8-loop-bounds-01
+    description: >-
+      G8: a model that always requests more reads is stopped at the round
+      cap — the forced-final reply ships, late requests recorded as
+      rejected, never executed.
+    principal: jehad
+    path: single
+    readOverrides:
+      - tool: calendar.next
+        result: { items: [{ when: "3 PM", title: "dentist" }] }
+      - tool: calendar.next
+        result: { items: [] }
+      - tool: calendar.next
+        result: { items: [] }
+    turns:
+      - user: what's coming up next
+        modelScript:
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[{"tool":"calendar.next"}],"operations_requested":[],"proposal_resolutions":[],"interpretation":"next events","intent":"question","reply":null}
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[{"tool":"calendar.next"}],"operations_requested":[],"proposal_resolutions":[],"interpretation":"checking again","intent":"question","reply":null}
+          - pass: cognitive
+            output: >-
+              {"reads_requested":[{"tool":"calendar.next"}],"operations_requested":[],"proposal_resolutions":[],"interpretation":"final","intent":"question","reply":"Next up: the dentist at 3 PM. That's what I can see right now."}
+    expectations:
+      rounds_at_most: 3
+      reply_contains:
+        - dentist
+      reply_not_contains:
+        - pull

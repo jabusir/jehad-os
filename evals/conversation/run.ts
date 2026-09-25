@@ -2,8 +2,14 @@ import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadScenarioFile } from "./scenarios.js";
-import { runConversationEval } from "./runner.js";
-import type { ConversationEvalRun, ScenarioResult } from "./runner.js";
+import { requiredCapabilities, runConversationEval } from "./runner.js";
+import type { CognitiveTurnFn, ConversationEvalRun, ScenarioResult } from "./runner.js";
+
+// §22 dual-window: legacy scenarios in this suite run through handleInbound,
+// which reads the repo-root policy (now routing: single for dogfood) — pin
+// the legacy fixture so legacy scripting stays valid; single-path scenarios
+// are invoked directly (runCognitiveTurn) and never consult this flag.
+process.env.POLICY_YAML_PATH ??= new URL("../../packages/core/src/imessage/legacy-routing.fixture.yaml", import.meta.url).pathname;
 
 const CAPABILITY_EXPORT_PATTERNS: Readonly<Record<string, RegExp>> = {
   "day.state": /day[\s_.-]?state/i,
@@ -36,6 +42,17 @@ const CAPABILITY_EXPORT_PATTERNS: Readonly<Record<string, RegExp>> = {
   // convention). searchGmailContent (GC0 store query) deliberately does
   // NOT match.
   gmail_content_tools: /gmail[\s_.-]?(search|read)[\s_.-]?(tool|routing)|renderGmail(Search|Read)/i,
+  // §22 (intelligence-reset §22.15 runner extension): the single-author
+  // cognitive loop. Matches once core exports the loop entry (e.g.
+  // runCognitiveTurn / COGNITIVE_TURN_LOOP) — verified NOT to match any
+  // export at HEAD (the §22.11 deletion list is still in flight). The
+  // loop builder satisfies the full harness contract documented on
+  // CognitiveTurnFn in runner.ts: (deps, input) => ConverseOutcome &
+  // {rounds?, intent?, ledger?}, model dispatch through deps.provider in
+  // round order, reads consulting deps.readOverrides?.take(tool) before
+  // the DB-backed tool, and the wall guard reading deps.now at each round
+  // boundary. Until it lands, path: "single" scenarios skip cleanly.
+  cognitive_turn: /cognitive[\s_.-]?turn/i,
 };
 
 export async function probeCoreCapabilities(capabilities: readonly string[]): Promise<Record<string, boolean>> {
@@ -49,12 +66,27 @@ export async function probeCoreCapabilities(capabilities: readonly string[]): Pr
   return probes;
 }
 
+/** §22: resolve the single-path turn entry — the (single) function export
+ * whose name matches the cognitive_turn pattern. Returns null until the
+ * loop builder lands the export; single-path scenarios then skip. */
+export async function resolveCognitiveTurn(): Promise<CognitiveTurnFn | null> {
+  const core = (await import("@jehad/core")) as unknown as Record<string, unknown>;
+  const pattern = CAPABILITY_EXPORT_PATTERNS["cognitive_turn"]!;
+  for (const name of Object.keys(core)) {
+    if (pattern.test(name) && typeof core[name] === "function") {
+      return core[name] as CognitiveTurnFn;
+    }
+  }
+  return null;
+}
+
 function scenarioSummary(result: ScenarioResult): string {
   if (result.status === "skip") return result.reason ?? "skipped";
   const last = result.turns.at(-1);
   if (last === undefined) return "no turns";
   const reply = last.reply === null ? "(no reply)" : `reply="${last.reply.slice(0, 60)}"`;
-  return `final tools=[${last.routedTools.join(", ")}] ${reply}`;
+  const single = last.rounds > 0 || last.intent !== null ? ` rounds=${last.rounds} intent=${last.intent ?? "-"}` : "";
+  return `final tools=[${last.routedTools.join(", ")}] ${reply}${single}`;
 }
 
 function print(run: ConversationEvalRun): void {
@@ -90,12 +122,15 @@ async function main(): Promise<number> {
   const scenarios = scenarioFiles.flatMap((name) =>
     loadScenarioFile(path.join(scenariosDir, name)).scenarios,
   );
-  const requires = [...new Set(scenarios.flatMap((scenario) => [...scenario.requires]))];
+  // §22: requiredCapabilities folds in the implicit cognitive_turn
+  // requirement of path: "single" scenarios, so the probe set covers it.
+  const requires = [...new Set(scenarios.flatMap((scenario) => [...requiredCapabilities(scenario)]))];
   const probes = await probeCoreCapabilities(requires);
   const run = await runConversationEval({
     databaseUrl,
     scenarios,
     capabilityProbes: probes,
+    cognitiveTurn: (await resolveCognitiveTurn()) ?? undefined,
     dbTag: "conv_eval_cli",
   });
   print(run);

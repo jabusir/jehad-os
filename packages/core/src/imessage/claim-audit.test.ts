@@ -28,7 +28,7 @@ describe("SV1 protocol claims (deterministic verify → replace, no retry)", () 
   it("the 00:09 lie: 'I'll capture all 9 items' with zero writes → replaced", () => {
     const r = auditReplyClaims("Understood.\n\nI'll capture all 9 items right away.", NO_WRITES);
     expect(r.text).not.toContain("capture all 9");
-    expect(r.text).toContain("nothing has been written yet");
+    expect(r.text).toContain("I haven't changed anything yet");
     expect(r.protocolFindings[0]?.claim_type).toBe("future_write");
     expect(r.protocolFindings[0]?.remediation).toBe("deterministic_replace");
   });
@@ -36,7 +36,7 @@ describe("SV1 protocol claims (deterministic verify → replace, no retry)", () 
   it("past-tense persistence lie ('I tracked those') → replaced", () => {
     const r = auditReplyClaims("I tracked those for you.", NO_WRITES);
     expect(r.protocolFindings[0]?.claim_type).toBe("persistence_write");
-    expect(r.text).toContain("nothing has been written yet");
+    expect(r.text).toContain("I haven't changed anything yet");
   });
 
   it("the 00:10 lie: 'nothing is waiting' with a pending batch → action-oriented pending line", () => {
@@ -46,7 +46,7 @@ describe("SV1 protocol claims (deterministic verify → replace, no retry)", () 
       pendingProposalLabel: "task batch",
     };
     const r = auditReplyClaims("Nothing is waiting for confirmation right now.", facts);
-    expect(r.text).toContain('reply "track them" to apply it');
+    expect(r.text).toContain("nothing changes until you say yes");
     expect(r.protocolFindings[0]?.claim_type).toBe("negative_pending");
   });
 
@@ -79,7 +79,7 @@ describe("SV1 protocol claims (deterministic verify → replace, no retry)", () 
 
   it("truthfulReplacement prefers the pending offer (action-oriented)", () => {
     const line = truthfulReplacement({ ...NO_WRITES, pendingProposal: true, pendingProposalLabel: "task batch" });
-    expect(line).toContain("awaiting your yes");
+    expect(line).toContain("not done yet");
   });
 });
 

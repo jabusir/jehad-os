@@ -104,6 +104,7 @@ import {
 } from "../reminders/queries.js";
 import { setThreadPendingProposals, setThreadPendingProbe } from "./threads.js";
 import { pendingProposalsByType, type ThreadPendingProposal, type ThreadPendingProposalType } from "./threads.js";
+import { runCognitiveTurn } from "./cognitive-turn.js";
 import { redactContent } from "./redact.js";
 import { collectRatifiedLessons, renderLessonsBlock } from "../queries/lessons.js";
 import { resolveProfileBehaviors } from "./profiles.js";
@@ -871,6 +872,10 @@ async function converseTurn(
   // Reset C1: side-effect notes from the calibration lanes (miss/correction)
   // ride the answer prompt instead of terminating the turn.
   let calibrationNote: string | null = null;
+  // §22 turn orchestration flag: "single" routes the turn to the cognitive
+  // loop after the shared §22.10 lanes; "legacy" (default) runs the lanes
+  // and two-pass machinery below.
+  const routing = (await loadConversationPolicyFile())?.gateway?.routing ?? "legacy";
   if (isTextOnlyAttachment(input.text)) {
     return deterministicReply(deps, input, ctx, {
       content: ATTACHMENT_ONLY_REPLY,
@@ -951,7 +956,7 @@ async function converseTurn(
     // proposal (00:09 transcript).
     const confirm = parseProposalConfirm(input.text);
     const affirmation = confirm === null ? parseProposalAffirmation(input.text) : null;
-    if (confirm !== null || affirmation !== null) {
+    if (routing !== "single" && (confirm !== null || affirmation !== null)) {
       const threadNow = await resolveActiveThread(db, {
         principalId: input.principalId,
         surface: CONVERSATION_SURFACE,
@@ -1116,6 +1121,7 @@ async function converseTurn(
 
   const hVerb = /^(confirm|cancel)(?:\s+([A-Za-z0-9]+))?\s*[.!?]*$/i.exec(input.text.trim());
   if (hVerb !== null) {
+    // §22.10.4 shared token lane — runs on BOTH routing paths.
     const rawToken = (hVerb[2] ?? "").trim();
     const token = rawToken === "" ? null : normalizeConfirmToken(rawToken);
     const actionPolicy =
@@ -1187,7 +1193,7 @@ async function converseTurn(
   // the SOLE open calibration item; ambiguity clarifies; no open item →
   // normal chat (a bare "4" is only calibration when we asked).
   const calRating = parseCalibrationRating(input.text);
-  if (calRating !== null) {
+  if (routing !== "single" && calRating !== null) {
     const eligible = await eligibleCalibrationItem(db, { principalId: input.principalId, now });
     if (eligible.kind === "sole") {
       await storeCalibrationRating(db, {
@@ -1215,7 +1221,7 @@ async function converseTurn(
   // W1 (plan invariant 13): "changed my mind" is thread-LOCAL — it
   // retracts the thread's last stance and never touches canonical
   // state (canonical changes ride proposal/confirm or review flows).
-  if (RETRACT_RE.test(input.text)) {
+  if (routing !== "single" && RETRACT_RE.test(input.text)) {
     const retractThread = await resolveActiveThread(db, {
       principalId: input.principalId,
       surface: CONVERSATION_SURFACE,
@@ -1247,7 +1253,7 @@ async function converseTurn(
     personasPolicy !== null &&
     personasPolicy.enabled &&
     personasPolicy.principals.includes(String(principalName));
-  if (personasEnabled) {
+  if (routing !== "single" && personasEnabled) {
     const directive = parseProfileDirective(input.text);
     if (directive !== null && directive.persist !== true) {
       const threadNow = await resolveActiveThread(db, {
@@ -1331,6 +1337,7 @@ async function converseTurn(
   // that graduates occurrence state (owner-ratified). Sole eligible
   // recent event applies; multiple clarify; zero falls through.
   if (
+    routing !== "single" &&
     policy.reads.includes("calendar") &&
     /\b(?:it|that) (?:happened|didn'?t happen|did not happen)\b/i.test(input.text)
   ) {
@@ -1385,6 +1392,7 @@ async function converseTurn(
   // a conversational side write. Time reference disambiguates; no time
   // falls back to the sole-recent-event rule; ambiguity clarifies.
   if (
+    routing !== "single" &&
     policy.reads.includes("calendar") &&
     /\bI skipped\b|\bI (?:didn'?t|did not) (?:go to|attend|make it to)\b/i.test(input.text)
   ) {
@@ -1442,7 +1450,7 @@ async function converseTurn(
   // write. Requires a sole open item; otherwise ordinary chat must not
   // ride this lane (§17).
   const correction = parseCalibrationCorrection(input.text);
-  if (correction !== null) {
+  if (routing !== "single" && correction !== null) {
     const eligible = await eligibleCalibrationItem(db, { principalId: input.principalId, now });
     const withinWindow =
       eligible.kind === "sole" &&
@@ -1470,7 +1478,7 @@ async function converseTurn(
   // opened that conversation, so bare "yep" closes IT, not ambient chat.
   // Exact grammar only (parseProbeReply); everything else flows through.
   const probeReply = parseProbeReply(input.text);
-  if (probeReply !== null) {
+  if (routing !== "single" && probeReply !== null) {
     const probeThread = await resolveActiveThread(db, {
       principalId: input.principalId,
       surface: CONVERSATION_SURFACE,
@@ -1569,6 +1577,7 @@ async function converseTurn(
   const remindGatewayFile = await loadConversationPolicyFile();
   const fileCapture = remindGatewayFile?.gateway?.capture;
   if (
+    routing !== "single" &&
     remindMatch !== null &&
     fileCapture !== undefined &&
     fileCapture.enabled &&
@@ -1646,7 +1655,7 @@ async function converseTurn(
   // W5: commitment verbs — the resolver rule (owner-ratified): bare
   // verbs mutate only with a sole eligible item or an explicit [ref];
   // zero → honest none; multiple → clarify. Never guess.
-  if (policy.reads.includes("commitments")) {
+  if (routing !== "single" && policy.reads.includes("commitments")) {
     const verb = parseCommitmentVerb(input.text);
     if (verb !== null) {
       const threadNow = await resolveActiveThread(db, {
@@ -1688,6 +1697,12 @@ async function converseTurn(
       marker: "thread-reset",
       forceReset: true,
     });
+  }
+  // §22 single-author path: the §22.10 shared lanes above have run; from
+  // here the turn belongs to the cognitive loop (which performs its own
+  // typing presence, budget checks, run/thread bookkeeping, and shipping).
+  if (routing === "single") {
+    return runCognitiveTurn(deps, input);
   }
   // Phase F: capture is deterministic-first — the imperative pattern
   // short-circuits the model entirely (no route pass, no budget spend).
@@ -2496,7 +2511,7 @@ function nextHourBoundary(now: Date): Date {
  * against anything. Also persists the inbound so thread history stays
  * complete (deterministicReply appends it).
  */
-async function sendBudgetDenialNotice(
+export async function sendBudgetDenialNotice(
   deps: ConversationDeps,
   input: InboundConversationMessage,
   ctx: { handle: string; actor: string; policy: GatewayPrincipalPolicy; now: Date },
@@ -2556,7 +2571,7 @@ async function sendBudgetDenialNotice(
   );
 }
 
-async function replyNotificationsLastHour(
+export async function replyNotificationsLastHour(
   db: ConversationDeps["db"],
   principalId: string,
   now: Date,

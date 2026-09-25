@@ -11,7 +11,7 @@
 // partial unique index; a storage trigger rejects cross-principal message
 // inserts; every query is principal-scoped at the repository layer.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { QueryExecutor } from "../queries/executor.js";
 import { parseDateInput } from "../queries/executor.js";
 import { redactContent } from "./redact.js";
@@ -349,6 +349,17 @@ export interface ThreadPendingProposal {
   readonly at: string;
   readonly payload: unknown;
   readonly offered: string;
+  /** §22.6 slot id `<type>:<4-hex>`. Absent on entries parked by the
+   *  legacy path — derive at read time via pendingWithDerivedIds (§22.14);
+   *  stamped by setThreadPendingProposals, stable across same-type
+   *  re-parks. */
+  readonly id?: string;
+  /** §22.6 24h TTL (ISO). Absent on legacy-parked entries — treated as
+   *  unknown-but-unexpired (§22.14), never as expired. */
+  readonly expiresAt?: string;
+  /** §22.6 inbound-sequence of the parking turn (the thread's
+   *  interaction_messages count at park time; refreshed on re-park). */
+  readonly parkedAtSeq?: number;
 }
 
 export interface ThreadMetadata {
@@ -380,6 +391,39 @@ export function pendingProposalsByType(
     map.set(metadata.pendingProposal.type, metadata.pendingProposal);
   }
   return map;
+}
+
+/**
+ * §22.14 dual-window provenance: entries parked by the legacy path carry
+ * no id — the single path derives one deterministically at read time
+ * (`type + ":" + first 4 hex of sha256(type + at)`; unique because slots
+ * are per-type) and leaves expiresAt/parkedAtSeq absent
+ * (unknown-but-unexpired), so legacy-parked offers stay resolvable after
+ * a flag flip. Id-bearing entries pass through untouched.
+ */
+export function pendingWithDerivedIds(metadata: ThreadMetadata | null): ThreadMetadata | null {
+  if (metadata === null) return null;
+  const derive = (entry: ThreadPendingProposal): ThreadPendingProposal => {
+    if (entry.id !== undefined) return entry;
+    const digest = createHash("sha256").update(entry.type + entry.at).digest("hex");
+    return { ...entry, id: `${entry.type}:${digest.slice(0, 4)}` };
+  };
+  let derived: ThreadMetadata | null = null;
+  if (metadata.pendingProposals !== undefined && metadata.pendingProposals.some((e) => e.id === undefined)) {
+    derived = { ...metadata, pendingProposals: metadata.pendingProposals.map(derive) };
+  }
+  const single = metadata.pendingProposal;
+  if (single !== undefined && single.id === undefined) {
+    derived = { ...(derived ?? metadata), pendingProposal: derive(single) };
+  }
+  return derived ?? metadata;
+}
+
+/** §22.6 expiry: a stamped entry is expired at/after its expiresAt;
+ *  legacy-parked entries (no expiresAt) are unknown-but-unexpired (§22.14). */
+export function isPendingExpired(entry: ThreadPendingProposal, now: Date): boolean {
+  if (entry.expiresAt === undefined) return false;
+  return now.getTime() >= Date.parse(entry.expiresAt);
 }
 
 /**
@@ -418,6 +462,9 @@ const STANCE_SUMMARY_MAX_CHARS = 400;
 /** W6(a): serialized pendingProposal.payload bound (bounded thread state). */
 export const PENDING_PROPOSAL_PAYLOAD_MAX_CHARS = 1000;
 export const PENDING_PROPOSAL_OFFERED_MAX_CHARS = 400;
+/** §22.6: a parked proposal stays resolvable for 24h, then is expired. */
+export const PENDING_PROPOSAL_TTL_MS = 24 * 60 * 60_000;
+const PENDING_PROPOSAL_ID_RE = /^[a-z_]+:[0-9a-f]{4}$/;
 
 const PENDING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
   "task_batch",
@@ -639,12 +686,26 @@ function parsePendingProbe(value: unknown): ThreadPendingProbe | null {
   };
 }
 
-/** W6(a): strict fail-closed parse of the pendingProposal metadata value. */
+/** W6(a): strict fail-closed parse of the pendingProposal metadata value.
+ *  §22.14 dual-shape: the §22.6 id/expiresAt/parkedAtSeq keys are optional
+ *  (legacy 4-key entries keep parsing) but are CARRIED, not merely
+ *  tolerated — the reconstructed object preserves them so legacy
+ *  write-backs never strip the single path's fields. */
 function parsePendingProposal(value: unknown): ThreadPendingProposal | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const obj = value as Record<string, unknown>;
   for (const key of Object.keys(obj)) {
-    if (key !== "type" && key !== "at" && key !== "payload" && key !== "offered") return null;
+    if (
+      key !== "type" &&
+      key !== "at" &&
+      key !== "payload" &&
+      key !== "offered" &&
+      key !== "id" &&
+      key !== "expiresAt" &&
+      key !== "parkedAtSeq"
+    ) {
+      return null;
+    }
   }
   if (typeof obj.type !== "string" || !PENDING_PROPOSAL_TYPES.has(obj.type)) return null;
   if (typeof obj.at !== "string" || Number.isNaN(Date.parse(obj.at))) return null;
@@ -663,11 +724,26 @@ function parsePendingProposal(value: unknown): ThreadPendingProposal | null {
     return null;
   }
   if (obj.offered.includes("\n")) return null;
+  if (obj.id !== undefined) {
+    if (typeof obj.id !== "string" || !PENDING_PROPOSAL_ID_RE.test(obj.id)) return null;
+    if (!obj.id.startsWith(`${obj.type}:`)) return null;
+  }
+  if (obj.expiresAt !== undefined) {
+    if (typeof obj.expiresAt !== "string" || obj.expiresAt.length > 40) return null;
+    if (Number.isNaN(Date.parse(obj.expiresAt))) return null;
+  }
+  if (obj.parkedAtSeq !== undefined) {
+    if (typeof obj.parkedAtSeq !== "number" || !Number.isInteger(obj.parkedAtSeq)) return null;
+    if (obj.parkedAtSeq < 0) return null;
+  }
   return {
     type: obj.type as ThreadPendingProposalType,
     at: obj.at,
     payload: obj.payload,
     offered: obj.offered,
+    ...(obj.id !== undefined ? { id: obj.id } : {}),
+    ...(obj.expiresAt !== undefined ? { expiresAt: obj.expiresAt } : {}),
+    ...(obj.parkedAtSeq !== undefined ? { parkedAtSeq: obj.parkedAtSeq } : {}),
   };
 }
 
@@ -805,6 +881,12 @@ export async function setThreadPendingProposal(
  * at most one per type). Keeps the legacy single `pendingProposal` slot
  * pointing at the LAST entry so every existing reader (pending-state line,
  * bare-approve deferral, claim audit) stays coherent. `null` clears both.
+ *
+ * §22.6/§22.14: entries lacking id/expiresAt/parkedAtSeq are STAMPED here
+ * (id `<type>:<4-hex>` — a same-type re-park keeps the prior slot's id
+ * stable while refreshing expiresAt + parkedAtSeq; fully stamped entries
+ * round-trip byte-equal so legacy write-backs preserve the single path's
+ * fields, never strip them).
  */
 export async function setThreadPendingProposals(
   db: QueryExecutor,
@@ -812,6 +894,8 @@ export async function setThreadPendingProposals(
     readonly threadId: string;
     readonly principalId: string;
     readonly pending: readonly ThreadPendingProposal[] | null;
+    /** Stamping clock (defaults to wall now). */
+    readonly now?: Date;
   },
 ): Promise<void> {
   if (opts.pending !== null) {
@@ -839,7 +923,9 @@ export async function setThreadPendingProposals(
     throw new Error("setThreadPendingProposals: thread does not belong to the requesting principal");
   }
   const existing = parseThreadMetadata(thread.metadata) ?? {};
-  const last = opts.pending === null ? undefined : opts.pending[opts.pending.length - 1]!;
+  const pending =
+    opts.pending === null ? null : await stampPendingProposals(db, opts.threadId, opts.pending, existing, opts.now);
+  const last = pending === null ? undefined : pending[pending.length - 1]!;
   const merged: Record<string, unknown> = {
     ...(existing.topic !== undefined ? { topic: existing.topic } : {}),
     ...(existing.referents !== undefined ? { referents: existing.referents } : {}),
@@ -849,12 +935,59 @@ export async function setThreadPendingProposals(
       : {}),
     ...(existing.pendingProbe !== undefined ? { pendingProbe: existing.pendingProbe } : {}),
     ...(last !== undefined ? { pendingProposal: last } : {}),
-    ...(opts.pending !== null ? { pendingProposals: [...opts.pending] } : {}),
+    ...(pending !== null ? { pendingProposals: [...pending] } : {}),
   };
   await db.query(
     `UPDATE interaction_threads SET metadata = $2::jsonb WHERE id = $1::uuid`,
     [opts.threadId, JSON.stringify(merged)],
   );
+}
+
+/** §22.6 stamping pass (setThreadPendingProposals only): fill the id/
+ *  expiresAt/parkedAtSeq the entry lacks; carry entries that have all
+ *  three untouched so parsed round-trips stay byte-equal. */
+async function stampPendingProposals(
+  db: QueryExecutor,
+  threadId: string,
+  pending: readonly ThreadPendingProposal[],
+  existing: ThreadMetadata,
+  now: Date | undefined,
+): Promise<ThreadPendingProposal[]> {
+  const priorByType = new Map(
+    (existing.pendingProposals ?? []).map((entry) => [entry.type, entry] as const),
+  );
+  const counted = await db.query(
+    `SELECT count(*)::int AS n FROM interaction_messages WHERE thread_id = $1::uuid`,
+    [threadId],
+  );
+  const parkedAtSeq = Number(counted.rows[0]?.n ?? 0);
+  const stampNow = now ?? new Date();
+  const expiresAt = new Date(stampNow.getTime() + PENDING_PROPOSAL_TTL_MS).toISOString();
+  const taken = new Set<string>();
+  for (const entry of pending) {
+    if (entry.id !== undefined) taken.add(entry.id);
+  }
+  const stamped: ThreadPendingProposal[] = [];
+  for (const entry of pending) {
+    if (entry.id !== undefined && entry.expiresAt !== undefined && entry.parkedAtSeq !== undefined) {
+      stamped.push(entry);
+      continue;
+    }
+    let id = entry.id ?? priorByType.get(entry.type)?.id;
+    if (id === undefined) {
+      do {
+        id = `${entry.type}:${randomBytes(2).toString("hex")}`;
+      } while (taken.has(id));
+    }
+    taken.add(id);
+    stamped.push({
+      ...entry,
+      id,
+      ...(entry.expiresAt === undefined ? { expiresAt } : {}),
+      ...(entry.parkedAtSeq === undefined ? { parkedAtSeq } : {}),
+    });
+  }
+  return stamped;
 }
 
 /**

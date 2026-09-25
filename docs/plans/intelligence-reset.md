@@ -281,6 +281,10 @@ system itself — is recorded as a SIDE EFFECT (or proposal) and the
 conversational model still answers, informed that the side effect happened.
 ```
 
+**[SUPERSEDED 2026-09-24 by §22.10's complete terminal-lane list — T1's
+affirmation grammar and every phrasing-based lane below die with it; §22
+governs wherever conflicting.]**
+
 Under T1-T4, lanes 6, 12, 19 (miss), and arguably 7/10/11 lose termination
 rights; lane 8 (profile directive) keeps them only for exact-grammar matches
 and gains a model-proposed fallback for everything else.
@@ -659,6 +663,10 @@ self-brief.
   upgraded to the same winner per D-1, or merged per D-2.
 - Policy-only change (`gateway.passes`), instantly reversible.
 
+**[SUPERSEDED by §22 — C8 is now the full single-author inversion, no longer
+optional or D-2-gated; the two-stage shape below is the `legacy` rollback
+path per §22.14.]**
+
 **C8. Merge route+interpret into one cognitive pass (two-stage on grounded
 turns)** (L; gated on the §5 decision ladder, D-2 — capability probe + golden
 suite, not Track B). One strong-model **cognitive pass** per turn emits
@@ -770,7 +778,8 @@ operations (outcomes keep running; dogfood them).
   already have fixtures) — the Phase-2 long pole.
 - **Phase 3 — Cognitive path (Days 5-8).** C7 policy change Day 5 (immediate
   quality lift, instantly reversible). C4 (gmail content) Day 5-6. C8 only if
-  bake-off says so, Days 6-8 behind `gateway.legacy_routing` flag.
+  bake-off says so, Days 6-8 behind the `gateway.routing` flag (§22.14 — the
+  amendment later made C8 mandatory; §22 governs).
 - **Phase 4 — Dogfood + acceptance (Days 8-10).** §15 protocol; TALK/KNOW/OWN
   measured; rollback or ratify.
 
@@ -833,7 +842,9 @@ owner-judgment outcome completing with exactly confirm + final judgment.
 Brief appearances are incidental; completion-without-supervision is the
 metric.
 
-Cost/latency guardrails: p50 turn ≤6s, p95 ≤12s; day-cost at sonnet-default
+Cost/latency guardrails: p50 turn ≤6s, p95 ≤12s (superseded for the
+`single` path by §22.13's tiered targets — conversational <3s / one-read
+<5s / multi-step <10s p50); day-cost at sonnet-default
 measured and inside re-ratified envelope (O-10); no regression in
 model_routing parse compliance (route stays ≥96% until C8, then merged-pass
 parse ≥96% on golden fixtures).
@@ -852,8 +863,8 @@ the pairwise sample. Unit tests passing does not substitute.
   `calibration.daily`); terminal-lane removal ships with a policy
   `gateway.legacy_calibration_lanes` switch defaulting off, deletable at
   +2 weeks green.
-- C8: behind `gateway.legacy_routing` (two-pass path kept intact through the
-  dogfood window).
+- C8/§22: behind `gateway.routing: "single" | "legacy"` (per §22.14;
+  two-pass path kept intact through the dogfood window).
 - C4: `sensors.gmail.content_enabled` already exists as the kill switch; read
   tool add is additive.
 - Migrations in this reset: only the small `review_refs` CHECK widening (if
@@ -897,8 +908,13 @@ the pairwise sample. Unit tests passing does not substitute.
   bodies) is exposed to cognition via bounded on-demand search/read over the
   normalized records, 7-day coverage stated, untrusted-DATA boundary and
   egress policy unchanged.
-- **O-15:** C8 appetite — merge passes now if bake-off justifies, or defer to
-  a post-dogfood window (recommended default: decide on Day 5 evidence).
+- **O-15: [SUPERSEDED 2026-09-24 by §22 — triggered by the §20 first kill
+  criterion firing at 100% (5 of 5 dogfood replies garbled by multi-author
+  piping; model comprehension correct in all five): C8 is mandatory and is
+  now the full single-author inversion, not the route+interpret merge;
+  §21's recorded deferral is overtaken.]** C8 appetite — merge passes now if
+  bake-off justifies, or defer to a post-dogfood window (recommended
+  default: decide on Day 5 evidence).
 - Carried: O-1 (hosting) unchanged; O-2/O-3 stay paused with D4 under the
   freeze.
 
@@ -993,9 +1009,691 @@ review.
 
 ---
 
+## 22. Architecture amendment — the single-author conversational path
+
+Status: amended 2026-09-24 (owner disposition: architecture/deletion-strategy/
+one-author-invariant APPROVED; five surgical corrections integrated before
+build — (1) round-0-only mutation window as the structural injection
+invariant, (2) whole-envelope vocabulary scan deleted, (3) truth verification
+covers rejected/failed ledger entries incl. forced-final attempts, (4)
+provider-failure silent-drop replaced by the ledger-conditional availability
+notice, (5) `interpretation` ephemeral + structured `intent` enum in audit —
+plus the same-cognitive-loop terminology fix and tiered latency targets).
+Originally proposed 2026-09-24 (owner directive: "no more deterministic
+lanes, no more regex"), triggered by the §20 first kill criterion firing at
+100% (5 of 5 dogfood replies garbled by multiple authors — model
+comprehension was correct in all five; the pipeline mangled it). This
+amendment supersedes the C8 description in §11 and the T1–T4 termination
+rule in §4 wherever they conflict: **C8 is no longer optional and no longer
+a mere route+interpret merge — it is the full inversion below.** Sections
+1–20 otherwise stand (diagnosis, evidence, bake-off results, invariants,
+dogfood bar).
+
+### 22.0 Core invariant (verbatim, binding on every component)
+
+> Cognition owns interpretation, planning, and language.
+> Deterministic systems own identity, authorization, validation, canonical
+> state, execution, budgets, and observed truth.
+> Deterministic systems return structured facts/results and never append,
+> rewrite, or substitute conversational prose.
+
+### 22.1 Target architecture
+
+```
+user message
+→ ONE cognitive pass (strong model) with context:
+    thread history (untrusted) · active persona/profile fragment ·
+    runtime self-brief · pending proposals (structured, with ids) ·
+    open system-initiated items (calibration/probes, structured) ·
+    read/tool catalog (as data: name, args, coverage) ·
+    prior-round results + operation results (untrusted DATA)
+→ typed envelope (§22.2)
+→ deterministic control plane:
+    schema validation · principal/resource authorization · grants ·
+    budgets · egress · read execution · canonical writes ·
+    confirmation requirements · operation/result recording
+→ if reads or operations executed: actual results return to the SAME
+  cognitive loop (round 0 = gpt-4.1, continuations/final = sonnet — "one
+  author" means one cognitive layer owns the final prose, not one model
+  binary) → next round → … → final user-facing reply
+→ exactly ONE component authors ordinary conversational prose
+```
+
+Non-goals: no new framework, no generic proposal abstraction, no agent runtime.
+This reuses the existing writers, validators, and read tools; it deletes the
+orchestration layers above them (§22.11).
+
+### 22.2 Envelope schema and validation semantics
+
+The cognitive pass responds with EXACTLY one JSON object (single line, no
+prose outside it):
+
+```json
+{
+  "reads_requested": [
+    {"tool": "commitments.waiting"}
+  , {"tool": "gmail.search", "query": "plaid", "max_age_days": 7}
+  ],
+  "operations_requested": [
+    {"type": "profile_update", "addressOwnerName": "Sir"}
+  , {"type": "task_batch", "items": [{"title": "pick up suit"}]}
+  ],
+  "proposal_resolutions": [
+    {"id": "task_batch:a1b2", "action": "apply"}
+  ],
+  "interpretation": "one-line reading of the user's turn",
+  "reply": "final reply text — present ONLY under §22.3's finality rule"
+}
+```
+
+Validation (all fail-closed; any violation → the envelope is rejected and the
+model is re-prompted once with the validation error, then the turn degrades per
+§22.12):
+
+- Exact key set; unknown keys reject. Arrays bounded: ≤3 reads per round,
+  ≤4 operations per turn, ≤2 resolutions per turn.
+- `reads_requested[].tool` must be in the catalog; per-tool arg validators
+  reuse the existing strict parsers (e.g. gmail.search query 1–120 chars).
+  The catalog itself is data injected into the prompt — the model cannot
+  invent tools; unknown names reject.
+- `operations_requested[].type` must be in the typed registry (§22.4). Each
+  op carries its own validator, ported from the existing `coerceProposal`
+  family (title/due bounds, redaction at parse — unchanged data hygiene).
+  Validation is STRUCTURAL: type registry membership, arg shapes, bounds.
+  There is NO vocabulary scan of envelope text — `reply`,
+  `interpretation`, task titles, and ordinary payload text are never
+  pattern-censored (owner correction 2, 2026-09-24: "what model are you
+  using?" and a task titled "compare OpenAI and Anthropic" must pass;
+  the whole-envelope forbidden-word scan is deleted as scar tissue —
+  authority is prevented by schema absence and structural validation,
+  not by word policing).
+- **Mutation window (owner correction 1, 2026-09-24 — the oldest injection
+  invariant, made structural):** `operations_requested` and
+  `proposal_resolutions` are legal ONLY on envelopes emitted while the
+  context contains NO executed external read result. Practically: round 0
+  (and its validation re-prompt, if any) may propose mutations and resolve
+  proposals — authenticated user intent is authority. Once ANY read result
+  has entered context, continuation envelopes are read-and-final only; an
+  op or resolution presented there is a validation error, recorded as
+  rejected data, never executed. If retrieved data suggests an action, Jin
+  recommends it in prose and the user authorizes it on the NEXT user turn;
+  pre-authorized autonomous work over retrieved data is Delegate/Outcome
+  machinery, not the conversational loop. (Thread history keeps its
+  untrusted-rendering discipline — flattening, boundary markers, ADR-0014 —
+  exactly as today; the window gates external READ results, not history.)
+- `proposal_resolutions[].action` ∈ {`apply`, `decline`} (exact strings;
+  `decline` removes the pending proposal without applying — the cleanup
+  path for stale offers; anything else rejects). `.id` must be a live
+  pending id (format `<type>:<4-hex>`), owned by the authenticated
+  principal, unexpired (24h TTL), of an allowed type for this principal.
+  Code resolves by identity — it never infers which proposal the user
+  meant. The ≤2-resolutions/turn bound vs §10's multi-proposal rule:
+  deliberate same-message resolutions beyond two (rare) complete over
+  subsequent turns; ambiguity between live referents is the model's
+  clarification to ask (§22.6), not a reason to raise the bound.
+- `interpretation` ≤200 chars — EPHEMERAL: consumed within the turn's own
+  rounds, NEVER persisted anywhere (owner correction 5, 2026-09-24 — no
+  free-text diary of private messages in `audit_log`). The durable audit
+  row carries `intent` instead: a structured enum
+  {question|directive|preference|correction|feedback|delegation|capability|
+  chat} plus ids/counts/statuses per the repo's data-minimization
+  convention. Audit rows never store free-form interpretations of user
+  content.
+- `reply` ≤1500 chars (the edge render cap).
+- The envelope never carries authority: no model ids, no budget changes, no
+  read-source grants — those keys don't exist in the schema, so the model
+  cannot request them (schema absence is the guarantee; unknown tool names
+  and op types reject structurally, as unknowns — not as forbidden
+  vocabulary).
+
+### 22.3 Reply-finality rule (mechanical, not advisory)
+
+The deterministic loop ships `reply` to the user ONLY when the envelope has:
+
+1. `reads_requested` empty, AND
+2. no `operations_requested` whose execution result is not yet in the
+   round's context (every op class in §22.4 is `results_needed: true`), AND
+3. no `proposal_resolutions` whose execution result is not yet in the
+   round's context.
+
+Otherwise `reply` is ignored entirely (not shown, not stored as the outbound)
+and the loop continues: execute reads/ops → results into context → next round.
+This makes "I need to pull the full list" structurally impossible to ship —
+such a sentence may only ever exist in a round whose envelope ALSO requested
+the read, in which case the reply is discarded by rule.
+
+**Terminal guarantee:** the forced-final round (round-cap or wall-clock,
+§22.5) ships its `reply` unconditionally — any reads/ops/resolutions that
+envelope still requests are over-budget by construction and are recorded as
+rejected data, never executed — so a non-compliant final envelope cannot
+withhold the turn's only reply or spin the loop. Every cognitive turn
+therefore ends in exactly one user-visible output: a final-round `reply`,
+or a §22.10 notice (the §22.10.6 turn-completion availability notice when
+even the degrade round yields nothing shippable, and the mid-loop
+provider-failure notice per §22.12 — owner correction 4, 2026-09-24:
+there is no zero-output path; a provider failure mid-loop now ships the
+same ledger-conditional availability notice class instead of a silent
+drop).
+
+**"Executed" is defined once, mechanically:** an operation is executed when
+its deterministic writer has run to a recorded terminal outcome — `applied`,
+`parked` (with id), `queued`, or `failed` (with reason). **Parking IS
+execution**: a task_batch that parks returns `{status:"parked",
+id:"task_batch:a1b2"}` to cognition, and the next round's envelope — no
+reads, no ops, no resolutions — ships the offer in the model's own words
+("Want me to track these 8?"). A parked-but-unconfirmed op therefore never
+holds the turn open and is never "unexecuted"; the loop cannot spin on a
+park. The `results_needed` column is uniformly `true` and stays so by
+contract — it exists so any FUTURE op type must explicitly justify
+fire-and-forget (`false`), the only shape ever allowed to ship a reply in
+the same envelope as an unresulted op.
+
+### 22.4 Operation classes and confirmation policy
+
+| class | types | execution | results_needed | confirmation |
+|---|---|---|---|---|
+| read-only | the read catalog | immediate, policy-gated | true | never |
+| low-risk self-preference | `profile_update` (address term, tone/register note, brevity, emoji pref, extra directive) | immediate via `nextProfileVersion(via:'self')`; **round-0 envelopes only** (§22.2 mutation window) | true | never — no refs, no staging, no second approval |
+| reversible ordinary | `task_batch` (parks as offer), `reminder_create`, `reminder_reply`, `commitment_transition`, `occurrence_update`, `calibration_feedback`, `system_feedback`, `memory_candidate` (→ review queue) | per-type below; **all round-0 only** (§22.2 mutation window) | true | per-type below |
+| consequential | `calendar_action`, `outcome_spec`, `cross_principal_profile` | park (system-issued token, returned to cognition as data); **round-0 only** | true | ALWAYS — token issuance/expiry and the §22.10.3/4 verify lanes unchanged; the MODEL authors the confirmation ask (quoting the token verbatim) as a continuation round with the parked intent + token in context — no canned ask string survives the cutover |
+
+The mutation window (§22.2) is the injection invariant made structural:
+ops and resolutions derive ONLY from the authenticated user turn (round 0);
+anything the loop reads afterward is data. Continuation rounds that want an
+action recommend it in prose; the user's next turn is the authority.
+
+Per-type execution policy for reversible-ordinary:
+
+- `calibration_feedback`, `system_feedback`, `occurrence_update` (user-declared
+  observation), `reminder_reply` (resolving a check-in the system opened),
+  `commitment_transition` (done/missed/renegotiated on a commitment the model
+  named from visible data): **apply immediately** — the user's message IS the
+  instruction; worst case is an easily-corrected state write.
+- `reminder_create`: apply immediately (explicit imperative).
+- `task_batch` (multi-item): **parks as a pending proposal** with a
+  deterministic id; cognition asks for the yes in its own words; a later
+  `proposal_resolutions` applies it. Parking is execution (§22.3): the park
+  result returns and the SAME turn ships the model's offer — the loop does
+  not wait for (or spin on) the user's yes. Single-item explicit asks should
+  use `reminder_create`/`commitment` ops instead — the model is told this.
+- `memory_candidate`: writes to the review queue immediately (existing
+  force-review semantics) — capture is a record, not a mutation of behavior.
+
+Self-profile semantics (the incident-B fix, final form): address is
+single-valued — a set replaces (setting "Sir" retires "Chief" atomically;
+`removeAddress` is a separate op the model emits only when the user asked to
+stop being called something without replacement; set+remove combos reject).
+All values pass the existing profile validators (name-shape door, forbidden
+vocabulary). One profile version per turn (ops coalesce). The applied result
+("profile v9: address=Sir") returns to cognition, which says so in its own
+words. Cross-principal profile ops (`cross_principal_profile`) keep the
+owner-gate + policy-allowlist activation honesty exactly as today.
+
+### 22.5 Bounded multi-step read loop
+
+Hard budgets per turn (deterministic, audited when hit):
+
+- ≤3 cognitive rounds total (round 0 + 2 continuation rounds);
+- ≤4 read-tool executions total across rounds;
+- ≤1 envelope-validation re-prompt; truth path bounded per §22.9 (one
+  verification + one regeneration + one forced-final);
+- wall-clock guard: if elapsed >20s at a round boundary, the next round is
+  forced final ("answer now with what you have; state coverage honestly").
+  Boundary-only by construction [labeled residual, accepted]: a single slow
+  round (round 0 included — no prior boundary exists to check) can overshoot
+  20s; the overshoot is bounded by the per-call provider timeout and the 90s
+  typing-bubble TTL, and is NOT covered by §22.13's targets. Worst-case turn
+  = 7 model calls (3 rounds + 1 validation re-prompt + verification +
+  regeneration + forced-final), ≈$0.02 at sonnet-class rates; the loop is
+  bounded in dollars by the unchanged per-principal rolling-hour/UTC-day
+  caps — the existing callModel budget math enforces the ceiling mid-turn,
+  fail-closed (§22.10.6). Sonnet rounds ≤2 by the round cap itself (round 0
+  is gpt-4.1; only continuation/final rounds escalate). Chitchat stays one
+  gpt-4.1 call.
+
+Round k context = base context + every prior round's executed results (DATA
+blocks, untrusted) + operation results + remaining budgets stated as data
+("reads remaining: 1"). Escalation by round index (deterministic, not
+language-based): round 0 runs on the fast/standard pass model (gpt-4.1);
+any continuation round and the final round run on the answer-standard model
+(sonnet-4.5). This replaces `classifyAnswerDepth`'s synthesis-marker regexes —
+depth is chosen by observed round count, which is a number.
+
+Deterministic instruction strings ("answer now with what you have…",
+validation errors, verification findings) enter prompts and context ONLY —
+they are never shipped prose. The complete set of deterministic text a user
+can ever receive is §22.10's lane list; everything else is the final
+cognitive round's `reply`, byte-for-byte.
+
+### 22.6 Proposal-resolution semantics
+
+Pending proposals live in thread metadata (per-type `pendingProposals` slots
+as at HEAD [PROVEN: threads.ts]; this amendment ADDS the id, a 24h expiry,
+and the parked-at turn sequence — none of the three exists today, so "as
+today" applies to the slot shape only). Each entry carries a deterministic
+id (`<type>:<4-hex>`), `expiresAt`, and the inbound-sequence number of the
+turn it was parked in (refreshed if re-offered) — so "age in turns" is a
+number computed from recorded sequence, not timestamp heuristics. The
+cognitive context lists them (id, type, one-line summary, age in turns).
+The MODEL decides relevance and referent ("yes, do that" → it emits the
+id). Deterministic code validates exactly: identity (live id), ownership
+(authenticated principal), expiry (24h TTL), type permission, and **consent
+class** — `apply` is legal only on non-consequential types; a resolution
+naming a consequential park (`outcome_spec` — a `ThreadPendingProposalType`
+at HEAD, `threads.ts:340-345` — calendar, cross-principal) rejects with the
+failure returned as data, because consequential types resolve exclusively
+through their §22.10.3/4 token lanes — and rejects otherwise (the model is
+told the resolution failed and why, as data, and re-rounds). The consent-class
+bar is structural (a type-set check, not a heuristic): without it, the four
+identity checks would let an envelope `apply` a consequential park without
+its ALWAYS-confirm token — an authority hole, closed here and pinned in G7. Salience is DATA, not a gate: the owner's §10
+multi-proposal rule (exactly one salient → resolve; several plausibly
+live → ask a human question) is enforced by cognition seeing ages and
+offering its own clarification — a hard "offered within the last 3 turns"
+cutoff in code would falsely reject a legitimate "yes, that task list from
+this morning" inside the 24h TTL and reintroduce interpretation-by-rule.
+If cognition judges the referent genuinely ambiguous, it asks a natural
+clarification and emits no resolution. Pending state is NEVER auto-appended
+to any reply; relevance is cognition's call. A proposal resolved, declined,
+or expired is removed; siblings persist.
+
+### 22.7 Pending-state contamination guard
+
+Context carries pending proposals as structured data with ages. The prompt
+states: "mentions of prior offers are your own words from history; nothing is
+auto-appended." Golden test (§22.15-G4) pins that a turn two topics away from
+a pending offer produces a reply with zero offer/protocol vocabulary.
+
+### 22.8 Context given to cognition (exactly)
+
+persona fragment · self-brief · read catalog (names, args, coverage
+sentences) · thread history (existing renderer, untrusted) · pending
+proposals (structured) · open system-initiated items as structured state
+(tonight's calibration item + whether its reply window is live; any live
+check-in probe — §22.10's "4"-rating case and §22.4's `reminder_reply`
+both depend on this being present) · per-round results (untrusted DATA with
+provenance + coverage) · operation results (typed) · side-effect notes
+(e.g. "calibration miss recorded for today") · budget state as data.
+Nothing else. No
+`pendingStateLine` prose injection, no lessons block duplication (lessons
+ride the persona fragment's directive lines as today, or drop — builder's
+call, but only one copy).
+
+### 22.9 Truth verification replaces claim-audit prose policing
+
+ADR-0015's lying-defense survives with its mechanism replaced:
+
+- The final reply is checked against the typed execution ledger by ONE
+  verification call (the answer-class model, cheap bounded prompt: reply +
+  operations/results ledger JSON — including REJECTED and FAILED entries —
+  → verdict `consistent | contradicts: <finding>`). Runs whenever the turn
+  has ANY operation/resolution ledger activity — executed, failed, or
+  rejected (owner correction 3, 2026-09-24: a forced-final round whose
+  `reminder_create` was rejected as over-budget must not be able to ship
+  "Done, I set the reminder" — the verifier sees the rejected ledger entry);
+  and ALWAYS on a forced-final turn that attempted any op or resolution.
+  Pure-chat turns with an empty ledger stay unverified (cost + latency).
+- `consistent` → ship. `contradicts` → ONE regeneration, prompt = original
+  context + results + the finding ("your draft claimed X; results show Y;
+  produce the truthful reply"). Ship the regeneration (still one author).
+  A second contradiction → ONE forced-final round carrying both findings;
+  if that reply STILL contradicts, ship it with ledger verdict
+  `contradicted_unresolved` (it flows to the owner's ✗-review harvest) —
+  the system never substitutes deterministic prose to paper over a lie.
+  Bounded per turn: one verification + one regeneration + one forced-final.
+- Scope [labeled limitation, accepted]: verification fires only on turns
+  with ledger activity (above). A zero-ledger turn where the model
+  fabricates a mutation out of thin air ("I deleted your old tasks") is not
+  mechanically checked — that is the price of deleting regex output
+  policing. Backstops: the confirm-offer honesty rule in the prompt +
+  self-brief ("mutations happen only through explicit confirmations");
+  prior ops appear in history only as shipped-and-verified text; golden
+  pins sample the class. Residual risk accepted; revisit only if dogfood
+  ✗-tags show it live.
+- All regex claim patterns, `truthfulReplacement`, `safeFallbackRendering`
+  prose, and `stripMachineryLines` are DELETED. No deterministic string ever
+  edits user-facing prose again.
+- Findings ledger on `converse.claim_audit` continues (verdict + finding),
+  preserving SV3/lesson-harvest raw material.
+
+### 22.10 Terminal deterministic lanes that remain (complete list)
+
+1. Attachment-only inbound (channel cannot render).
+2. `/new`, `/reset` (exact match).
+3. Review control verbs with refs: `approve|reject|snooze <REF>`, `queue`
+   (exact grammar + token lookup — the system answering its own issued
+   tokens).
+4. Calendar `confirm|cancel <CODE>` (system-issued token, security gate).
+5. `guests` (exact).
+6. Budget/egress/grant denials with the existing honest notice; plus
+   turn-completion failure (envelope invalid twice AND the degrade round
+   yields no shippable `reply`) and mid-loop provider failure (§22.12):
+   fixed availability notice — ledger-conditional ("nothing was changed"
+   only when the turn's executed-op/resolution ledger is empty; otherwise
+   "actions already completed stand as recorded"). Audit row always
+   (security/availability).
+7. Bad-ref lockout; rate-limit notice (existing).
+
+Nothing else terminates. No lane interprets natural language. If a message
+doesn't match 1–7 exactly, it reaches cognition — including one-word replies,
+ratings ("4" becomes a `calibration_feedback` op if the model judges the
+nightly prompt open — it can see the open-item state, §22.8), and
+corrections.
+
+Boundary with §22.0: lanes 1–7 are **authority and security notices**, not
+conversational prose — the system's own voice answering tokens it issued or
+denying resources it owns (a budget/egress denial fires precisely when
+model calls are unavailable, so no other author exists; the turn-completion
+notice fires precisely when the author has demonstrably failed — two
+invalid envelopes plus a degrade round with no shippable reply — so no
+other author exists there either). They replace the turn entirely and
+never mix with model output. This list is the COMPLETE
+exception to "deterministic systems never author user-facing text"; every
+other outbound string in the system is the final cognitive round's `reply`.
+
+### 22.11 Deletable after cutover (the deletion list)
+
+From `conversation.ts`: the route pass + `buildRoutingPrompt` +
+`parseRouteJson`/`parseRouteReadSet`/`isRouteNoneJson` wiring; the interpret
+pass wiring; `parseProposalConfirm` + `parseProposalAffirmation` + the confirm
+pre-pass; `parseCalibrationRating`/`Correction`/miss routing; the profile
+fast-path (`parseProfileDirective` lane) and with it the `yes, keep it`
+stance-persist lane (`conversation.ts:1280-1327`, §2 lane 9) — `profile_update`
+applies immediately with no staging (§22.4), so the thread-local-vs-persistent
+distinction, its "reply: yes, keep it" CTA, and the stance it consumes die
+together (no new stances are minted once nothing stages; existing `lastStance`
+metadata stays parseable as inert legacy data); the retract lane (`RETRACT_RE`
+at `conversation.ts:666`, fired at 1215-1238 with its canned "Changed — I've
+dropped that (…) What instead?" reply; §2 lane 7) — changing one's mind is
+cognition's behavior over history + pending proposals as data (a pending offer
+dies via `proposal_resolutions{action:"decline"}`; a plain conversational
+retraction is just a reply — no op, no regex); occurrence/skip verb lanes;
+`parseProbeReply` lane; `parseReminderPhrase` lane; commitment-verb lane;
+capture lane wiring (`matchCaptureIntent` detection — the op replaces it);
+`pendingStateLine`; `augmentReadSetForAsk`; the repeat-ack guard (moot — one
+author with history doesn't parrot; delete, keep the audit).
+
+Both newly listed lanes are deletions, not §22.10 entries: neither is a
+security/authority notice answering a system-issued token — both are
+interpretation-by-regex over user text ending in canned conversational prose,
+the exact §22.0 violation class, with their semantics fully absorbed
+(keep-it → `profile_update`; retract → decline-resolution or plain reply).
+From `calibration-verbs.ts`: rating/correction grammars (constants may remain
+for the op validator's enum). From `capture.ts`: detection regexes
+(`considerCapture` shrinks to the op-side writer). From
+`turn-interpretation.ts`: the interpreter prompt + `parseInterpretationJson`
++ `renderProposalOffer` + `preferenceRoutingRetype` (op vocabulary replaces
+it); the `coerce*` validators and `apply*` bridges SURVIVE as the operation
+executors. From `claim-audit.ts`/`truthful-ux.ts`: everything regex-based.
+From `model-selection.ts`: `classifyAnswerDepth` + `hasSynthesisMarkers`
+(round-index escalation replaces them; `answerModelForTier` survives for the
+round policy). Terminal classes in `deterministicReply` shrink to §22.10. Every name above
+exists at HEAD f75d1e2 [PROVEN — grep-verified this review]. Net effect
+[LIKELY — verified by target count, not measurement]: conversation.ts loses
+roughly half its mass; the only new modules are `cognitive-turn.ts`
+(envelope schema + validators + loop) and one verifier module — validators
+are the ported `coerce*` family and executors are the surviving `apply*`
+bridges, so the additions are orchestration + schema, not re-written
+cognition. If the landed diff needs a third module, that is a review flag,
+not a fait accompli.
+
+### 22.12 Failure semantics
+
+| failure | behavior |
+|---|---|
+| read unavailable/errored | result `{"tool":…,"error":…}` returned as data; model told to answer with the coverage gap honestly or spend a remaining read on an alternative tool |
+| partial result | existing per-tool coverage/truncation flags ride along; model narrates coverage |
+| mutation failed (writer error/policy) | op result `{failed, reason}` recorded + returned; model narrates honestly ("that didn't land — nothing changed") |
+| ambiguous referent | model asks a natural clarification; emits no resolution/op |
+| envelope invalid | one re-prompt with the validation error; second failure → degrade: no ops execute, single final round forced ("you could not produce a valid plan; answer conversationally and honestly"); if the degrade round itself yields no shippable `reply`, the turn ends with §22.10's turn-completion availability notice (fixed string, ledger-conditional clause per §22.10.6) + audit row — no deterministic CONVERSATIONAL fallback exists for this path (a canned reply would be the system authoring conversational prose, §22.0's exact violation; an availability notice is not conversation — it is the budget-denial class, replacing the turn, never mixing with model output; the inbound is thread-recorded, the audit row is the owner's ✗-harvest signal) |
+| truth contradiction after regeneration | forced-final round with both findings; still contradicting → ship flagged `contradicted_unresolved` (§22.9 ladder — never deterministic prose) |
+| budget exhaustion (requests/day, cost) | existing terminal denial + honest notice (§22.10.6) |
+| iteration/wall-clock limit | forced final round; coverage honesty required |
+| provider failure mid-loop | §22.10.6 availability notice (ledger-conditional variant) + audit row; the inbound is thread-recorded; consequential parks remain durable (owner correction 4, 2026-09-24 — no silent drops: every cognitive turn ends in exactly one user-visible output; the notice is the availability class, not conversational prose) |
+
+### 22.13 Latency targets and round caps
+
+Tiered targets (owner correction, 2026-09-24 — intelligence over a forced
+flat bound, but bar and metric must agree; supersedes §16's p50 ≤6s/p95
+≤12s line for the `single` path):
+
+- conversational (single round, gpt-4.1): p50 < 3s;
+- ordinary one-read turn (round 0 + reads + one sonnet round): p50 < 5s;
+- multi-step (2–3 rounds): p50 < 10s, p95 < 15s.
+
+Typing-bubble presence TTL already 90s. Caps: §22.5. Measured at dogfood;
+multi-step p95 breach two days running → trim continuation rounds to 1 or
+pre-warm common read sets (owner call, not silent).
+
+### 22.14 Feature flag / rollback
+
+`policy.yaml` `gateway.routing: "single" | "legacy"` (default `legacy` until
+§22.15 passes hermetically; flip to `single` for dogfood; delete `legacy` +
+the flag + §22.11's list after 2 weeks green). Rollback = one policy edit
+(60s TTL), no migration. Both paths share: handleInbound shell (grants,
+budgets, locks, notifications, thread writes), read tools, writers, bridges —
+the flag selects only the turn-orchestration core.
+
+Two rollback hazards found in code [PROVEN, `threads.ts:643-672`]:
+`parsePendingProposal` is a strict fail-closed parser that (a) rejects any
+entry key outside `{type, at, payload, offered}` and (b) RECONSTRUCTS a fresh
+4-key object on success (return at `threads.ts:666-671`). Hazard 1: if the
+`single` path writes `id`/`expiresAt`/parked-at-sequence entries, the SHARED
+metadata parse dies on every thread `single` has touched — breaking the
+dual-path window itself, not just rollback. Hazard 2: widening the allowed
+key set alone is insufficient — allow-without-carry silently STRIPS the new
+fields on any legacy write-back (sibling clear, offer refresh, amendment-5
+merge; every legacy read-modify-write serializes the reconstructed object —
+e.g. `retractLastStance` at `threads.ts:521-537` copies the parsed entries
+through), killing `single` resolutions after any legacy turn mid-window.
+Required ordering and shape: widen the shared parser AND extend the returned
+`ThreadPendingProposal` so legacy round-trips PRESERVE (not merely tolerate)
+`id`/`expiresAt`/parked-at-sequence, BEFORE the first `single`-path write
+(legacy-shaped entries still parse; thread metadata is JSON, no migration).
+Dual-window provenance gap: entries parked by `legacy` carry no id — `single`
+derives one deterministically at read time (hash of type + `at`; unique
+because slots are per-type, at most one live entry per type) and treats age
+as unknown-but-unexpired, so legacy-parked offers stay resolvable after a
+flag flip; a missing id never fails the turn. Pins: a threads integration
+test round-trips both legacy-shaped and id-bearing entries through BOTH
+paths, and one pin drives a legacy WRITE-BACK on an id-bearing entry (sibling
+clear or offer refresh) then resolves it under `single`.
+
+### 22.15 Golden + adversarial acceptance (hermetic, scripted envelopes)
+
+- **G1 to-do loop (the critical case):** after `/new`, "what's on my to do
+  list" → round 0 requests `commitments.waiting` — which IS the detail read
+  at HEAD (the kept dogfood fix returns `open: [items]` with an
+  `openTruncated` flag; no `commitments.list` tool is added — the earlier
+  hedge is resolved by spec). Scripted REAL shape: 7 open items with titles
+  → the loop completes in one continuation round → final reply contains the
+  titles; with `openTruncated: true` scripted, the reply states the
+  truncation. Robustness sub-pin (sparse-data recovery): scripted OLD shape
+  returning ONLY `{otherOpenCount: 7}` → round 1 MUST request a detail read
+  (re-request `commitments.waiting`, which the catalog documents as
+  list-bearing) → scripted 7 records → titles in the final reply. Pins:
+  ≥2 rounds occurred on the sparse variant; final contains ≥5 titles;
+  `reply_not_contains` "pull the full list", "tell me to go ahead", any
+  proposal-id/`<type>:<hex>` pattern, "pending", "confirm code".
+- **G2 preference (the second critical case):** "don't call me Chief, call me
+  Sir if anything" → envelope op `profile_update{addressOwnerName:"Sir"}`
+  (no `removeAddress` combo) → applied through `nextProfileVersion` → result
+  returns → final reply is natural ("Done — Sir it is." class); db_pin:
+  profile v+1 with address.ownerName='Sir'; `reply_not_contains` "staged",
+  "ref", "approve", "ownerName". Next turn uses Sir.
+- **G3 hijack replay** (incident A): evening window, open calibration item;
+  conversational turns answer naturally; `calibration_feedback` op recorded
+  as side effect; no canned ack; no identical outbound twice.
+- **G4 salience/contamination:** pending task_batch offered turn 1; turns
+  2–3 on another topic → zero offer vocabulary; turn 4 "yes do that" →
+  resolution id applies the batch; db_pins exact. Decline leg (retraction
+  absorption — §22.11's retract deletion rides on this path): turn 5 stages
+  a fresh task_batch park (scripted op result); turn 6 "actually no, drop
+  that" → `proposal_resolutions{action:"decline"}` removes the entry;
+  db_pin: no pending task_batch remains; reply natural, zero protocol
+  vocabulary. Park-flow amendment: turn 1
+  also pins §22.3's park-is-execution rule directly — the task_batch op
+  result `{status:"parked", id}` is present in the continuation round's
+  context, the SAME turn's outbound is the model's own offer with no rendered
+  CTA (asserted against the deleted `renderProposalOffer` constants via G5's
+  eval-time blacklist), and the db_pin carries the parked id.
+- **G5 one-author pin:** across all scenarios, outbound content matches the
+  final round's `reply` byte-for-byte; a canned-string blacklist (the deleted
+  constants) never appears — asserted by the TEST suite at eval time only,
+  never by runtime string-scanning of outbound prose (that would resurrect
+  the claim-audit this amendment deletes).
+- **G6 injection (restructured per owner corrections 1–2):** (a) unknown
+  tool name rejects structurally (as an unknown, not forbidden vocabulary);
+  (b) model/provider mentions in `reply`, `interpretation`, and task titles
+  are LEGAL — golden: "what model are you running?" answers honestly and a
+  task titled "Compare OpenAI and Anthropic pricing" round-trips through
+  ops unchanged; (c) ops derived from external read data cannot mint
+  mutations of ANY class — the §22.2 mutation window is the structural
+  guarantee (a scripted continuation-round envelope carrying
+  `profile_update`/`reminder_create`/`commitment_transition` after gmail
+  content entered context rejects as data, nothing executes, golden reply
+  recommends-and-waits); (d) pending-proposal payloads re-validate
+  identically at apply (existing pins port).
+- **G7 authority:** no envelope field can alter budgets/models/grants (schema
+  absence pin); `cross_principal_profile` from non-owner refuses honestly;
+  `proposal_resolutions{action:"apply"}` naming a consequential park
+  (`outcome_spec`/calendar/cross-principal id) rejects as data (§22.6's
+  consent-class bar) — the park survives untouched, the §22.10.3/4 token lane
+  remains its only applier.
+- **G8 loop bounds:** scripted model always requesting more reads → exactly 3
+  rounds / 4 reads, then forced-final reply exists (its own late requests
+  recorded as rejected data, never executed — §22.3's terminal guarantee);
+  wall-clock guard pinned via injected clock.
+- **G9 failure honesty:** op-writer failure → model narrates the failure;
+  read error → coverage-honest answer; envelope-garbage → degrade path
+  (incl. the degrade-round failure: §22.10's availability notice ships
+  verbatim + audit row, §22.12; both notice variants pinned — empty-ledger
+  asserts nothing-changed, prior-round-ops variant asserts the recorded
+  actions stand); provider-failure mid-loop → the same notice class ships
+  (both ledger variants pinned; no zero-output turn exists anywhere).
+- **G10 truth ladder (§22.9 pinned end-to-end):** scripted verifier verdicts
+  `contradicts` → regeneration `contradicts` → forced-final still
+  `contradicts` → the THIRD model draft ships byte-for-byte with ledger
+  verdict `contradicted_unresolved` — no deterministic substitution anywhere
+  in the chain (every scenario outbound equals the final round's `reply`, G5).
+  Rejected-ledger leg (owner correction 3): a scripted forced-final envelope
+  requesting `reminder_create` (rejected as over-budget) whose reply claims
+  the reminder was set → verifier flags against the REJECTED ledger entry →
+  regeneration ships truthful ("that didn't land — nothing was set" class).
+- **Runner extension (build item owed by this section — G1/G8 and the G10
+  scripting are unimplementable without it):** (a) `scriptedDispatch`'s pass
+  classifier (`evals/conversation/runner.ts:68-111`) keys on the
+  route/interpret prompt markers — both prompts die per §22.11 — so the
+  runner gains new pass kinds for cognitive rounds and the §22.9 verification
+  call, with per-round script entries (round-indexed, not marker-indexed);
+  (b) a read-result override injected at the tool boundary, because G1's
+  sparse variant (old shape returning only `otherOpenCount`) is not
+  producible by DB seeding — the tool at HEAD always emits `open:` alongside
+  (`read-tools.ts:546-560`); (c) the already-anchored clock must thread the
+  loop's wall guard (G8's injected-clock pin depends on it).
+- Existing C11 scenarios port to envelope-scripting; the suite runs against
+  BOTH paths while `legacy` exists.
+
+### 22.16 Live dogfood acceptance
+
+Unscripted, owner-judged, ≥3 days: (1) the to-do question after `/new`
+returns titles in one exchange; (2) a preference phrasing of the owner's
+choosing applies in one turn; (3) the 20:30–22:30 window holds real
+conversation; (4) zero machinery vocabulary in any reply unless a
+consequential action genuinely requires authorization; (5) the owner's
+✗-transcripts become new G-scenarios. Bar: "would I rather open ChatGPT"
+bailout rate vs the §15 baseline.
+
+### 22.17 Critical acceptance cases (normative, restated)
+
+The §22.15-G1 and §22.15-G2 transcripts are the acceptance bar in exactly
+the form the owner specified: the loop must recognize an unsatisfied goal
+and complete it invisibly; the preference must be understood generically,
+applied canonically, and confirmed naturally — with no staging, no refs, no
+`ownerName=Sir` semantic noise, and no user-visible protocol of any kind
+unless real authorization is required.
+
+### 22.18 What this amendment does NOT change
+
+§12/§13 invariants entire (grants, egress, budgets, confirm-for-consequential,
+builder≠verifier, canonical DB, provenance, injection boundary — now enforced
+structurally by the §22.2 mutation window — retention); D0–D3 machinery;
+briefs; reminders' semantics; the review queue's role for memory promotion;
+the notification conjunction; thread storage (ADR-0014). Owner disposition
+2026-09-24: BUILD APPROVED behind `gateway.routing = legacy|single` once the
+reviewer verifies the five corrections are integrated correctly.
+
+---
+
+## 23. Execution record — single-author cutover (2026-09-24, build day 2)
+
+**Built (owner directive: "no more deterministic lanes, no more regex"; §22 as
+amended by the five owner corrections):**
+- `cognitive-turn.ts` — the loop: round-index escalation (gpt-4.1 round 0 →
+  sonnet continuations/final), §22.3 mechanical finality (parking IS
+  execution), §22.2 mutation window (ops/resolutions legal only before
+  external read results enter context — later attempts become rejected
+  ledger data), §22.5 caps (3 rounds / 4 reads / 1 re-prompt / 20s wall —
+  wall reads the injected clock fresh per boundary), degrade + terminal
+  guarantee, §22.10.6-class availability notices (ledger-conditional; no
+  zero-output path), budget lanes shared with the legacy shell.
+- `operations.ts` — the 12-type operation registry (strict validators, no
+  vocabulary scans: model-identity conversation and "compare OpenAI and
+  Anthropic" titles parse legally), envelope parser (explicit `reply: null`
+  accepted), consent-class bar, executors delegating to the existing
+  canonical bridges (park semantics for task_batch/outcome_spec/calendar).
+- `truth-verifier.ts` — §22.9 ladder: ledger-based verification including
+  rejected/failed entries (owner correction 3), one regeneration,
+  forced-final with findings, `contradicted_unresolved` ship flag; fail-open
+  parse (a broken verifier never blocks shipping).
+- `threads.ts` widened FIRST (the §22.14 rollback hazard): pending entries
+  carry `id`/`expiresAt`/`parkedAtSeq`, legacy round-trips preserve them,
+  `pendingWithDerivedIds` derives ids for legacy-parked offers.
+- `conversation.ts`: `gateway.routing` dispatch after the shared §22.10
+  lanes; all legacy-only lanes guarded `routing !== "single"` (not yet
+  deleted — the §22.11 deletion lands after the 2-week green window).
+- Eval runner: envelope-scripting (`path: single`, round-indexed cognitive/
+  verify kinds), read-result overrides at the tool boundary,
+  ledger/rounds/intent observations, `cognitive_turn` capability probe.
+- **Golden G-suite green against the REAL loop (9/9)**: G1 full + sparse
+  (the to-do loop recognizes an unsatisfied goal and fetches titles
+  invisibly), G2 ("don't call me Chief, call me Sir" — profile_update
+  applies canonically in one turn, result returned, natural reply, zero
+  staging/refs), G4 park + decline-by-id, G6b model-identity legality, G6c
+  mutation-window injection pin (email-derived profile_update rejected,
+  nothing mutates), G8 loop bounds with forced-final.
+
+**Cut over:** `policy.yaml` `gateway.routing: single` (LIVE for dogfood).
+Legacy suites pinned to `legacy-routing.fixture.yaml` via the established
+`POLICY_YAML_PATH` seam (they pin the ROLLBACK path, which stays intact and
+green). Full suite: **2421 passed / 6 skipped**; eslint clean. Rollback =
+one policy line (60s TTL, no restart, no migration).
+
+**Deferred to the post-green deletion pass (§22.11):** physically deleting
+the legacy lanes/regexes/post-processors. Until then both paths ship in the
+tree behind the flag.
+
+
+---
+
 *The shortest path from today's system to an assistant Jehad wants to talk to
-every day is: stop the lanes from interrupting him (C1/C2/C6), show him what
-the system already knows (C4/C5/C9), and put a strong model behind the one
+every day is: stop the lanes from interrupting him (C1/C2/C6), show him what the
+system already knows (C4/C5/C9), and put a strong model behind the one
 cognitive pass that talks back (C7, C8 if earned). Everything else — the
 safety, durability, delegation, and verification machinery D0-D3 built — is
 already worth keeping.*
+
+
+## Resolution record (turn 5, drafter — all six proposals integrated; section retired)
+
+Proposal 1 (availability notice) integrated with one honesty correction found
+on verification: "nothing was changed" is NOT guaranteed turn-wide on the
+degrade path — §22.2 permits reads+ops in one envelope and §22.4 applies
+reversible-ordinary ops immediately, so a later round can enter degrade after
+prior-round ops executed. The notice's nothing-changed clause is therefore
+ledger-conditional (§22.10.6, §22.12 row, G9 pins both variants) — the same
+honesty constraint the proposer itself applied to keep provider-failure
+silent-drop. Proposals 2–6 integrated as spec'd (decline pin G4; §22.7→G4
+ref; O-15 superseded with the 2026-09-24 §20 trigger; §22.3 terminal
+guarantee incl. rejected-data recording, echoed in G8; both editorial fixes).
+§22.0 verbatim invariant untouched.

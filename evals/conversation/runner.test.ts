@@ -5,12 +5,22 @@ import {
   checkExpectations,
   evaluatePins,
   passKindOf,
+  requiredCapabilities,
   runConversationEval,
+  ReadOverrideQueue,
   scriptedDispatch,
+  singlePathDispatch,
 } from "./runner.js";
-import type { TurnObservation } from "./runner.js";
+import type { CognitiveTurnFn, CognitiveTurnOutcome, SinglePathConversationDeps, TurnObservation } from "./runner.js";
 import type { ModelRequest } from "@jehad/adapters";
-import { probeCoreCapabilities } from "./run.js";
+import { createNotification } from "@jehad/core";
+import { probeCoreCapabilities, resolveCognitiveTurn } from "./run.js";
+
+// §22 dual-window: legacy scenarios in this suite run through handleInbound,
+// which reads the repo-root policy (now routing: single for dogfood) — pin
+// the legacy fixture so legacy scripting stays valid; single-path scenarios
+// are invoked directly (runCognitiveTurn) and never consult this flag.
+process.env.POLICY_YAML_PATH ??= new URL("../../packages/core/src/imessage/legacy-routing.fixture.yaml", import.meta.url).pathname;
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
@@ -29,6 +39,9 @@ function turn(overrides: Partial<TurnObservation> = {}): TurnObservation {
     interpretation: { audits: 0, payloads: [] },
     auditMarkers: [],
     answerPrompts: [],
+    ledger: [],
+    rounds: 0,
+    intent: null,
     scriptIssues: [],
     ...overrides,
   };
@@ -86,6 +99,105 @@ describe("scriptedDispatch (interpret scripting)", () => {
     expect(dispatch.mismatches()).toEqual(["pass mismatch — scripted route, dispatched answer"]);
   });
 });
+
+describe("singlePathDispatch (§22 round-indexed scripting)", () => {
+  it("answers every dispatch from script order regardless of prompt content — even prompts carrying legacy markers", () => {
+    const dispatch = singlePathDispatch([
+      { pass: "cognitive", output: '{"reads_requested":[]}' },
+      { pass: "cognitive", output: '{"reads_requested":[],"reply":"done"}' },
+      { pass: "verify", output: '{"verdict":"consistent"}' },
+    ]);
+    // Round-index matching: the marker-bearing ROUTE_PROMPT still gets the
+    // FIRST script entry — no classification happens on the single path.
+    expect(dispatch.responder(req(ROUTE_PROMPT))).toEqual({ text: '{"reads_requested":[]}' });
+    expect(dispatch.responder(req("round 1 context with DATA blocks"))).toEqual({
+      text: '{"reads_requested":[],"reply":"done"}',
+    });
+    expect(dispatch.responder(req("verify this reply against the ledger"))).toEqual({
+      text: '{"verdict":"consistent"}',
+    });
+    expect(dispatch.mismatches()).toEqual([]);
+    expect(dispatch.consumed()).toBe(3);
+    expect(dispatch.kinds()).toEqual(["cognitive", "cognitive", "verify"]);
+  });
+
+  it("flags an unscripted extra dispatch as script exhaustion", () => {
+    const dispatch = singlePathDispatch([{ pass: "cognitive", output: "{}" }]);
+    dispatch.responder(req("round 0"));
+    expect(() => dispatch.responder(req("round 1"))).toThrow("modelScript exhausted");
+    expect(dispatch.mismatches()).toEqual(["model call 2 dispatched but modelScript is exhausted"]);
+  });
+});
+
+describe("ReadOverrideQueue (§22.15(b) tool-boundary injection)", () => {
+  it("consumes overrides in order per tool: first match wins, then it is spent", () => {
+    const queue = new ReadOverrideQueue([
+      { tool: "commitments.waiting", result: { otherOpenCount: 7 } },
+      { tool: "commitments.waiting", result: { open: [{ title: "pick up suit" }] } },
+      { tool: "gmail.search", result: { hits: [] } },
+    ]);
+    // G1's sparse variant: the old shape (no items) on the first read…
+    expect(queue.take("commitments.waiting")).toEqual({ result: { otherOpenCount: 7 } });
+    // …the full shape on the re-request — distinct results for repeat reads.
+    expect(queue.take("commitments.waiting")).toEqual({ result: { open: [{ title: "pick up suit" }] } });
+    // Both spent: the third read of the same tool falls through to the tool.
+    expect(queue.take("commitments.waiting")).toBeNull();
+    // Other tools keep their own queue.
+    expect(queue.take("gmail.search")).toEqual({ result: { hits: [] } });
+  });
+});
+
+describe("requiredCapabilities (§22 implicit cognitive_turn requirement)", () => {
+  it("single-path scenarios require cognitive_turn on top of their declared requires", () => {
+    expect(requiredCapabilities(scenario(singleBase()))).toEqual(["cognitive_turn"]);
+    const withDeclared = scenario({
+      ...singleBase(),
+      requires: ["day.state", "cognitive_turn"],
+    });
+    expect(requiredCapabilities(withDeclared)).toEqual(["day.state", "cognitive_turn"]);
+  });
+
+  it("legacy scenarios keep exactly their declared requires", () => {
+    expect(requiredCapabilities(scenario(legacyBase()))).toEqual([]);
+  });
+});
+
+function legacyBase(): Record<string, unknown> {
+  return {
+    id: "s1",
+    description: "trivial",
+    principal: "jehad",
+    turns: [
+      {
+        user: "hello there",
+        modelScript: [
+          { pass: "route", output: '{"tool":"none"}' },
+          { pass: "answer", output: "hi" },
+        ],
+      },
+    ],
+    expectations: { routed_none: true },
+  };
+}
+
+function singleBase(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "single-01",
+    description: "synthetic single-path scenario",
+    principal: "jehad",
+    path: "single",
+    turns: [
+      {
+        user: "what's on my to do list?",
+        modelScript: [
+          { pass: "cognitive", output: '{"reads_requested":[],"reply":"all clear"}' },
+        ],
+      },
+    ],
+    expectations: { reply_contains: ["all clear"] },
+    ...overrides,
+  };
+}
 
 describe("checkExpectations (pure)", () => {
   it("passes when every expected tool was routed", () => {
@@ -201,6 +313,47 @@ describe("checkExpectations (pure)", () => {
       "answer prompt pins set but the final turn dispatched no answer pass",
     ]);
   });
+
+  it("ledger_contains passes on a matching {opType, status} entry and fails with the observed ledger rendered", () => {
+    const observed = turn({
+      ledger: [
+        { opType: "task_batch", status: "parked" },
+        { opType: "profile_update", status: "applied" },
+      ],
+    });
+    expect(checkExpectations({ ledgerContains: [{ opType: "task_batch", status: "parked" }] }, [observed])).toEqual([]);
+    expect(checkExpectations({ ledgerContains: [{ opType: "task_batch", status: "applied" }] }, [observed])).toEqual([
+      'ledger_contains: no "task_batch" entry with status "applied" (ledger: [task_batch:parked, profile_update:applied])',
+    ]);
+    expect(checkExpectations({ ledgerContains: [{ opType: "reminder_create", status: "rejected" }] }, [turn()])).toEqual([
+      'ledger_contains: no "reminder_create" entry with status "rejected" (ledger: [])',
+    ]);
+  });
+
+  it("rounds_at_least / rounds_at_most bound the final turn's cognitive round count", () => {
+    const observed = turn({ rounds: 3 });
+    expect(checkExpectations({ roundsAtLeast: 2, roundsAtMost: 3 }, [observed])).toEqual([]);
+    expect(checkExpectations({ roundsAtLeast: 4 }, [observed])).toEqual([
+      "rounds_at_least: expected at least 4 cognitive round(s), got 3",
+    ]);
+    expect(checkExpectations({ roundsAtMost: 2 }, [observed])).toEqual([
+      "rounds_at_most: expected at most 2 cognitive round(s), got 3",
+    ]);
+    // The legacy path observes 0 rounds, so bounds pins fail there loudly.
+    expect(checkExpectations({ roundsAtLeast: 1 }, [turn()])).toEqual([
+      "rounds_at_least: expected at least 1 cognitive round(s), got 0",
+    ]);
+  });
+
+  it("intent_is pins the final turn's structured intent and names what was observed instead", () => {
+    expect(checkExpectations({ intentIs: "question" }, [turn({ intent: "question" })])).toEqual([]);
+    expect(checkExpectations({ intentIs: "directive" }, [turn({ intent: "question" })])).toEqual([
+      'intent_is: expected "directive", got "question"',
+    ]);
+    expect(checkExpectations({ intentIs: "chat" }, [turn()])).toEqual([
+      'intent_is: expected "chat", got null (no intent observed)',
+    ]);
+  });
 });
 
 describe("evaluatePins (pure)", () => {
@@ -227,6 +380,95 @@ describe("evaluatePins (pure)", () => {
     }, [pin]);
     expect(failures).toHaveLength(1);
     expect(failures[0]).toContain("relation missing");
+  });
+});
+
+describe("scenario schema (§22 single-path additions)", () => {
+  it("parses path, cognitive/verify kinds, readOverrides, and the new expectations", () => {
+    const parsed = scenario({
+      id: "g1-sparse-01",
+      description: "G1 sparse variant shape",
+      principal: "jehad",
+      path: "single",
+      readOverrides: [
+        { tool: "commitments.waiting", result: { otherOpenCount: 7 } },
+        { tool: "commitments.waiting", result: { open: [{ title: "pick up suit" }] } },
+      ],
+      turns: [
+        {
+          user: "what's on my to do list?",
+          modelScript: [
+            { pass: "cognitive", output: '{"reads_requested":[{"tool":"commitments.waiting"}]}' },
+            { pass: "cognitive", output: '{"reads_requested":[],"reply":"7 open"}' },
+            { pass: "verify", output: '{"verdict":"consistent"}' },
+          ],
+        },
+      ],
+      expectations: {
+        rounds_at_least: 2,
+        rounds_at_most: 3,
+        intent_is: "question",
+        ledger_contains: [{ op_type: "task_batch", status: "parked" }],
+        reply_contains: ["7 open"],
+      },
+    });
+    expect(parsed.path).toBe("single");
+    expect(parsed.readOverrides).toHaveLength(2);
+    expect(parsed.turns[0]!.modelScript.map((entry) => entry.pass)).toEqual([
+      "cognitive",
+      "cognitive",
+      "verify",
+    ]);
+    expect(parsed.expectations.roundsAtLeast).toBe(2);
+    expect(parsed.expectations.roundsAtMost).toBe(3);
+    expect(parsed.expectations.intentIs).toBe("question");
+    expect(parsed.expectations.ledgerContains).toEqual([
+      { opType: "task_batch", status: "parked" },
+    ]);
+  });
+
+  it("defaults path to legacy and rejects cognitive/verify kinds there (and legacy kinds on single)", () => {
+    expect(scenario(legacyBase()).path).toBe("legacy");
+    const cognitiveOnLegacy = legacyBase() as {
+      turns: { modelScript: { pass: string }[] }[];
+    };
+    cognitiveOnLegacy.turns[0]!.modelScript[0]!.pass = "cognitive";
+    expect(() => scenario(cognitiveOnLegacy)).toThrow(/requires scenario path: "single"/);
+
+    const routeOnSingle = singleBase() as unknown as {
+      turns: { modelScript: { pass: string }[] }[];
+    };
+    routeOnSingle.turns[0]!.modelScript[0]!.pass = "route";
+    expect(() => scenario(routeOnSingle)).toThrow(/requires path: "legacy"/);
+  });
+
+  it("rejects an unknown path value and readOverrides on the legacy path", () => {
+    expect(() => scenario({ ...legacyBase(), path: "both" })).toThrow(/path: must be "legacy" or "single"/);
+    expect(() => scenario({ ...legacyBase(), readOverrides: [{ tool: "x", result: {} }] })).toThrow(
+      /readOverrides: requires path: "single"/,
+    );
+  });
+
+  it("rejects malformed readOverrides and bad rounds/intent expectation values", () => {
+    expect(() =>
+      scenario(singleBase({ readOverrides: [{ tool: "commitments.waiting" }] })),
+    ).toThrow(/result: is required/);
+    expect(() => scenario(singleBase({ expectations: { rounds_at_least: 0 } }))).toThrow(
+      /rounds_at_least: must be a positive integer/,
+    );
+    expect(() =>
+      scenario(singleBase({ expectations: { rounds_at_least: 3, rounds_at_most: 2 } })),
+    ).toThrow(/rounds_at_least must not exceed rounds_at_most/);
+    expect(() => scenario(singleBase({ expectations: { intent_is: "" } }))).toThrow(
+      /intent_is: must be a non-empty string/,
+    );
+    expect(() =>
+      scenario(singleBase({ expectations: { ledger_contains: [{ op_type: "task_batch" }] } })),
+    ).toThrow(/op_type and status must be non-empty strings/);
+  });
+
+  it("single-path expectation keys alone satisfy the at-least-one-expectation rule", () => {
+    expect(() => scenario(singleBase({ expectations: { rounds_at_least: 1 } }))).not.toThrow();
   });
 });
 
@@ -416,7 +658,7 @@ describe.skipIf(!TEST_DATABASE_URL)("conversation eval runner (integration, herm
     const hallucination = byId.get("synthetic-persistence-hallucination-01")!;
     expect(hallucination.status).toBe("pass");
     expect(hallucination.turns[0]!.reply).not.toContain("I've saved");
-    expect(hallucination.turns[0]!.reply).toContain("nothing has been written yet");
+    expect(hallucination.turns[0]!.reply).toContain("I haven't changed anything yet");
     expect(byId.get("synthetic-persistence-honest-01")!.status).toBe("pass");
     expect(byId.get("synthetic-persistence-licensed-01")!.status).toBe("pass");
   });
@@ -452,4 +694,229 @@ describe.skipIf(!TEST_DATABASE_URL)("conversation eval runner (integration, herm
       { handle: expect.any(String), principalId: expect.any(String), proposals: [] },
     ]);
   });
+
+  it("§22: single-path scenarios skip cleanly when the cognitive loop probe is dark", async () => {
+    // The export HAS landed (runCognitiveTurn in @jehad/core) — the live
+    // probe is true and the entry resolves. Pin the skip machinery by
+    // forcing the probe dark, exactly like a pre-export world.
+    const probes = await probeCoreCapabilities(["cognitive_turn"]);
+    expect(probes["cognitive_turn"]).toBe(true);
+    expect(await resolveCognitiveTurn()).not.toBeNull();
+    probes["cognitive_turn"] = false;
+    const run = await runConversationEval({
+      databaseUrl: TEST_DATABASE_URL!,
+      dbTag: "conveval8",
+      capabilityProbes: probes,
+      scenarios: [scenario(singleBase())],
+    });
+    expect(run.counts).toEqual({ pass: 0, fail: 0, skip: 1 });
+    expect(run.results[0]!.reason).toBe("capability not available: cognitive_turn");
+    expect(run.results[0]!.turns).toEqual([]);
+  });
+
+  it("§22: probe true but no entry supplied skips with an honest reason", async () => {
+    const run = await runConversationEval({
+      databaseUrl: TEST_DATABASE_URL!,
+      dbTag: "conveval9",
+      capabilityProbes: { cognitive_turn: true },
+      scenarios: [scenario(singleBase())],
+    });
+    expect(run.counts).toEqual({ pass: 0, fail: 0, skip: 1 });
+    expect(run.results[0]!.reason).toBe("single-path cognitive turn entry not resolved");
+  });
+
+  it("§22: synthetic single-path run through the full machinery (fake core seam)", async () => {
+    const run = await runConversationEval({
+      databaseUrl: TEST_DATABASE_URL!,
+      dbTag: "conveval10",
+      capabilityProbes: { cognitive_turn: true },
+      cognitiveTurn: fakeCognitiveTurn(),
+      scenarios: [
+        // G1-sparse-flavored: read → sparse old shape → re-request → full
+        // list → final reply woven from the SECOND override (proving the
+        // override queue is consumed in order per tool). Empty ledger →
+        // no verification dispatch (§22.9), so no verify script entry.
+        scenario(
+          singleBase({
+            id: "g1-sparse-synthetic-01",
+            description: "sparse read shape forces a second round",
+            readOverrides: [
+              { tool: "commitments.waiting", result: { otherOpenCount: 7 } },
+              {
+                tool: "commitments.waiting",
+                result: {
+                  open: [{ title: "pick up suit" }, { title: "print vows" }, { title: "book the caterer" }],
+                  openTruncated: false,
+                },
+              },
+            ],
+            turns: [
+              {
+                user: "what's on my to do list?",
+                modelScript: [
+                  { pass: "cognitive", output: '{"reads_requested":[{"tool":"commitments.waiting"}]}' },
+                  { pass: "cognitive", output: '{"reads_requested":[{"tool":"commitments.waiting"}]}' },
+                  { pass: "cognitive", output: '{"reads_requested":[],"reply":"7 open: {{open}}"}' },
+                ],
+              },
+            ],
+            expectations: {
+              rounds_at_least: 2,
+              rounds_at_most: 3,
+              intent_is: "question",
+              reply_contains: ["pick up suit"],
+            },
+          }),
+        ),
+        // Directive leg: round-0 task_batch parks (§22.3 park-is-execution),
+        // continuation ships the offer, non-empty ledger triggers the
+        // §22.9 verification call (the scripted verify entry).
+        scenario(
+          singleBase({
+            id: "g4-park-synthetic-01",
+            description: "round-0 park then offer with verification",
+            turns: [
+              {
+                user: "tasks: pick up suit, print vows",
+                modelScript: [
+                  {
+                    pass: "cognitive",
+                    output:
+                      '{"reads_requested":[],"operations_requested":[{"type":"task_batch","items":[{"title":"pick up suit"},{"title":"print vows"}]}]}',
+                  },
+                  { pass: "cognitive", output: '{"reads_requested":[],"reply":"Want me to track these two?"}' },
+                  { pass: "verify", output: '{"verdict":"consistent"}' },
+                ],
+              },
+            ],
+            expectations: {
+              ledger_contains: [{ op_type: "task_batch", status: "parked" }],
+              rounds_at_least: 2,
+              rounds_at_most: 2,
+              intent_is: "directive",
+              reply_contains: ["track"],
+            },
+          }),
+        ),
+      ],
+    });
+    expect(run.counts).toEqual({ pass: 2, fail: 0, skip: 0 });
+    const byId = new Map(run.results.map((result) => [result.id, result]));
+    const sparse = byId.get("g1-sparse-synthetic-01")!;
+    expect(sparse.status).toBe("pass");
+    const sparseTurn = sparse.turns[0]!;
+    expect(sparseTurn.passes).toEqual(["cognitive", "cognitive", "cognitive"]);
+    expect(sparseTurn.rounds).toBe(3);
+    expect(sparseTurn.intent).toBe("question");
+    expect(sparseTurn.ledger).toEqual([]);
+    expect(sparseTurn.reply).toContain("pick up suit");
+    expect(sparseTurn.reply).toContain("book the caterer");
+    expect(sparseTurn.scriptIssues).toEqual([]);
+
+    const park = byId.get("g4-park-synthetic-01")!;
+    expect(park.status).toBe("pass");
+    const parkTurn = park.turns[0]!;
+    expect(parkTurn.passes).toEqual(["cognitive", "cognitive", "verify"]);
+    expect(parkTurn.rounds).toBe(2);
+    expect(parkTurn.intent).toBe("directive");
+    expect(parkTurn.ledger).toEqual([{ opType: "task_batch", status: "parked" }]);
+    expect(parkTurn.reply).toBe("Want me to track these two?");
+  });
 });
+
+/**
+ * §22 harness smoke: a minimal synthetic single-author loop standing in for
+ * core's cognitive-turn export (the `cognitive_turn` probe). Implements just
+ * enough of the CognitiveTurnFn contract (runner.ts) to exercise the runner
+ * machinery hermetically: every model call flows through deps.provider
+ * (script order IS round order), reads consult deps.readOverrides before
+ * "executing", round-0 ops park/apply into a typed ledger (later-round ops
+ * reject per the §22.2 mutation window), the §22.9 verifier is dispatched
+ * ONLY when the ledger is non-empty, and the reply lands as a notification
+ * exactly like the real turn shell does. `{{open}}` in a final reply is
+ * substituted with the titles from the most recent `open`-bearing read
+ * result, making override flow observable in the shipped reply.
+ */
+function fakeCognitiveTurn(): CognitiveTurnFn {
+  return async (
+    deps: SinglePathConversationDeps,
+    input: { principalId: string; handle: string; text: string },
+  ): Promise<CognitiveTurnOutcome> => {
+    interface FakeEnvelope {
+      reads_requested?: { tool: string }[];
+      operations_requested?: { type: string }[];
+      reply?: string;
+    }
+    const dispatch = (round: number, context: string) =>
+      deps.provider.complete({
+        domainId: "personal",
+        sensitivity: "normal",
+        provider: "fake",
+        model: "fake/model-x",
+        prompt: `cognitive round ${round}\n${context}`,
+      } as ModelRequest);
+
+    let rounds = 0;
+    let intent: string | null = null;
+    let reply: string | null = null;
+    let openTitles: string[] = [];
+    const ledger: { opType: string; status: string }[] = [];
+    let context = `user message: ${input.text}`;
+    while (reply === null) {
+      if (rounds >= 5) throw new Error("fake cognitive turn: no final reply within 5 rounds");
+      const envelope = JSON.parse((await dispatch(rounds, context)).text) as FakeEnvelope;
+      rounds += 1;
+      if (rounds === 1) {
+        intent =
+          (envelope.operations_requested?.length ?? 0) > 0
+            ? "directive"
+            : (envelope.reads_requested?.length ?? 0) > 0
+              ? "question"
+              : "chat";
+      }
+      const roundContext: string[] = [];
+      for (const op of envelope.operations_requested ?? []) {
+        const status = rounds === 1 ? (op.type === "task_batch" ? "parked" : "applied") : "rejected";
+        ledger.push({ opType: op.type, status });
+        roundContext.push(`op result {type: ${op.type}, status: ${status}}`);
+      }
+      for (const read of envelope.reads_requested ?? []) {
+        const override = deps.readOverrides?.take(read.tool) ?? null;
+        const result = override !== null ? override.result : { tool: read.tool, error: "no override" };
+        if (
+          typeof result === "object" &&
+          result !== null &&
+          Array.isArray((result as { open?: unknown }).open)
+        ) {
+          openTitles = (result as { open: { title: string }[] }).open.map((item) => item.title);
+        }
+        roundContext.push(`read result ${read.tool}: ${JSON.stringify(result)}`);
+      }
+      if ((envelope.reads_requested?.length ?? 0) === 0 && typeof envelope.reply === "string") {
+        reply = envelope.reply.replace("{{open}}", openTitles.join(", "));
+      }
+      context = roundContext.join("\n");
+    }
+    if (ledger.length > 0) {
+      // §22.9: one verification call over reply + ledger (script entry).
+      await dispatch(rounds, `verify the reply against the ledger: ${JSON.stringify(ledger)}`);
+    }
+    const notification = await createNotification(
+      deps.db,
+      {
+        kind: "reply",
+        title: "Reply",
+        payload: { content: reply, recipient: input.handle },
+        recipient: input.handle,
+        sourceType: "run",
+        sourceId: null,
+        createdBy: input.principalId,
+        surface: "imessage",
+        requestingPrincipalId: input.principalId,
+        conversationPrincipalId: input.principalId,
+      },
+      { actor: "system:imessage-gateway", now: () => new Date() },
+    );
+    return { replied: true, notificationId: notification.id, rounds, intent, ledger };
+  };
+}

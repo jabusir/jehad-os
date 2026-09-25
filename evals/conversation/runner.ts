@@ -9,11 +9,29 @@ import {
   issueGrant,
   openCalibrationItem,
 } from "@jehad/core";
-import type { ConversationDeps, GatewayPrincipalPolicy } from "@jehad/core";
+import type {
+  ConversationDeps,
+  ConverseOutcome,
+  GatewayPrincipalPolicy,
+  InboundConversationMessage,
+} from "@jehad/core";
 import { migrateUp, seedDomains } from "@jehad/db";
 import { createIsolatedTestDb, dropIsolatedTestDb } from "../../packages/db/tests/test-db.js";
 import { persistenceClaimIn } from "./assertions.js";
-import type { DbPin, Scenario, ScenarioExpectations } from "./scenarios.js";
+import {
+  intentIsFailure,
+  ledgerContainsFailures,
+  roundsBoundFailures,
+} from "./assertions.js";
+import type { LedgerEntryObservation } from "./assertions.js";
+import type {
+  DbPin,
+  ReadOverride,
+  Scenario,
+  ScenarioExpectations,
+  ScriptPass,
+  ScriptedPass,
+} from "./scenarios.js";
 
 export type CapabilityProbes = Readonly<Record<string, boolean>>;
 
@@ -32,14 +50,30 @@ export interface TurnObservation {
   readonly replyReason: string | null;
   readonly reply: string | null;
   readonly routedTools: readonly string[];
-  readonly passes: readonly ("route" | "interpret" | "answer")[];
+  /** Legacy path: dispatches classified by prompt marker. Single path
+   * (§22): the scripted kinds in consumption order — "cognitive" per model
+   * round, "verify" for the truth-verifier call — because the §22.11
+   * deletion removes the marker-bearing prompts. */
+  readonly passes: readonly ScriptPass[];
   readonly interpretation: InterpretationObservation;
   /** C11: deterministic markers on this turn's `imessage.converse.replied`
    * audit rows (outputs_ref->deterministic; model replies carry none). */
   readonly auditMarkers: readonly string[];
   /** C11: prompts dispatched as the answer pass this turn (prompt-level pins:
-   * persona fragment, self-brief). */
+   * persona fragment, self-brief). Empty on the single path — its prompts
+   * are round contexts, not the legacy answer pass. */
   readonly answerPrompts: readonly string[];
+  /** §22: the operation/resolution ledger entries this turn produced,
+  * normalized to {opType, status} (§22.2/§22.3 vocabulary, including
+  * rejected/failed entries — the same ledger §22.9 verifies against).
+  * Empty on the legacy path, which has no typed ledger. */
+  readonly ledger: readonly LedgerEntryObservation[];
+  /** §22: cognitive rounds executed this turn (0 on the legacy path). */
+  readonly rounds: number;
+  /** §22: the structured intent from the envelope audit (§22.2 owner
+   * correction 5 — the durable enum, never the ephemeral interpretation).
+   * null on the legacy path / when no envelope landed. */
+  readonly intent: string | null;
   readonly scriptIssues: readonly string[];
 }
 
@@ -61,6 +95,12 @@ export interface ConversationEvalOptions {
   readonly scenarios: readonly Scenario[];
   readonly capabilityProbes?: CapabilityProbes;
   readonly dbTag?: string;
+  /** §22: the single-path turn entry. Production (run.ts CLI) resolves it
+   * from @jehad/core's cognitive_turn export; tests inject a fake core
+   * seam to exercise the machinery hermetically before the export lands.
+   * Single-path scenarios skip when the probe passes but no entry is
+   * supplied. */
+  readonly cognitiveTurn?: CognitiveTurnFn;
 }
 
 export type SqlRunner = (sql: string) => Promise<readonly Record<string, unknown>[]>;
@@ -114,12 +154,14 @@ interface ScriptedDispatch {
   readonly responder: (request: ModelRequest) => ModelResult;
   readonly mismatches: () => readonly string[];
   readonly consumed: () => number;
+  readonly kinds: () => readonly ScriptPass[];
 }
 
 export function scriptedDispatch(
   script: readonly { readonly pass: string; readonly output: string }[],
 ): ScriptedDispatch {
   const mismatches: string[] = [];
+  const kinds: ScriptPass[] = [];
   let index = 0;
   return {
     responder: (request: ModelRequest): ModelResult => {
@@ -143,11 +185,158 @@ export function scriptedDispatch(
       if (scripted.pass !== actual) {
         mismatches.push(`pass mismatch — scripted ${scripted.pass}, dispatched ${actual}`);
       }
+      kinds.push(scripted.pass as ScriptPass);
       return { text: scripted.output };
     },
     mismatches: () => mismatches,
     consumed: () => index,
+    kinds: () => [...kinds],
   };
+}
+
+// ---------------------------------------------------------------------
+// §22 single-author path (intelligence-reset §22.15 runner extension).
+// The legacy classifier above keys on the route/interpret prompt markers —
+// both prompts die per §22.11 — so the single path's dispatch is matched by
+// ROUND INDEX instead: every model call the loop makes (cognitive round or
+// truth verification) consumes the next script entry, and script order IS
+// round order. The scenario schema enforces that single-path scripts use
+// only the cognitive/verify kinds.
+// ---------------------------------------------------------------------
+
+/** Script the single path's model calls by round index: the loop's Nth
+ * provider dispatch returns the Nth script entry verbatim (cognitive
+ * entries emit envelope JSON as the model output; verify entries emit the
+ * verifier verdict). No prompt classification — a scripted verify entry
+ * that never dispatches (e.g. an empty ledger skips §22.9 verification)
+ * surfaces as "scripted pass(es) never dispatched", and any extra
+ * unscripted dispatch exhausts the script and fails the scenario.
+ * `kinds()` is the scripted kinds actually consumed, in dispatch order —
+ * the round-indexed `passes` observation for the turn. */
+export function singlePathDispatch(script: readonly ScriptedPass[]): ScriptedDispatch {
+  const mismatches: string[] = [];
+  const kinds: ScriptPass[] = [];
+  let index = 0;
+  return {
+    responder: (request: ModelRequest): ModelResult => {
+      // Round-index matching: the prompt is deliberately unread (§22.11
+      // deletes the marker-bearing prompts; classification is impossible).
+      void request;
+      const scripted = script[index];
+      index += 1;
+      if (scripted === undefined) {
+        mismatches.push(`model call ${index} dispatched but modelScript is exhausted`);
+        throw new Error("conversation eval: modelScript exhausted");
+      }
+      kinds.push(scripted.pass);
+      return { text: scripted.output };
+    },
+    mismatches: () => mismatches,
+    consumed: () => index,
+    kinds: () => [...kinds],
+  };
+}
+
+/** §22.15(b): the read-override queue handed to the single path through
+ * deps.readOverrides. Scenario-level list, consumed IN ORDER PER TOOL: the
+ * first unconsumed entry whose tool name matches supplies its `result`
+ * verbatim and is then spent, so repeated reads of the same tool get
+ * distinct scripted results (G1's sparse variant: read 1 returns the old
+ * `{otherOpenCount: 7}` shape, read 2 returns the full item list). Reads
+ * with no live override fall through to the DB-backed tool. */
+export class ReadOverrideQueue {
+  private readonly spent: boolean[];
+
+  constructor(readonly overrides: readonly ReadOverride[]) {
+    this.spent = overrides.map(() => false);
+  }
+
+  /** First unconsumed override for `tool`, or null to execute normally. */
+  take(tool: string): { readonly result: unknown } | null {
+    for (const [index, override] of this.overrides.entries()) {
+      if (this.spent[index]!) continue;
+      if (override.tool === tool) {
+        this.spent[index] = true;
+        return { result: override.result };
+      }
+    }
+    return null;
+  }
+}
+
+/** §22: the deps object the runner hands the single path — ConversationDeps
+ * plus the eval-only readOverrides seam. */
+export interface SinglePathConversationDeps extends ConversationDeps {
+  readonly readOverrides?: ReadOverrideQueue;
+}
+
+/** §22: what the single-path turn entry returns — ConverseOutcome plus the
+ * observations the G-scenarios pin. `ledger` entries are the turn's
+ * operation/resolution ledger (§22.2/§22.3, including rejected/failed
+ * entries) shaped {opType, status} (`type`/`op_type` are normalized).
+ * `intent` is the §22.2 structured enum from the envelope audit. */
+export interface CognitiveTurnOutcome extends ConverseOutcome {
+  readonly rounds?: number;
+  readonly intent?: string | null;
+  readonly ledger?: readonly Record<string, unknown>[];
+}
+
+/**
+ * LOOP-BUILDER CONTRACT (§22.15 runner extension — the seams this harness
+ * requires of `packages/core`'s cognitive-turn module; parallel work):
+ *
+ * 1. ENTRY — core exports ONE function whose name matches the
+ *    `cognitive_turn` capability pattern in run.ts (e.g. `runCognitiveTurn`),
+ *    with this signature. handleInbound keeps owning the shell (grants,
+ *    budgets, locks, thread writes, notifications — §22.14); this entry is
+ *    the turn-orchestration core the flag selects.
+ *
+ * 2. MODEL DISPATCH — every provider call the loop makes (cognitive rounds
+ *    AND the §22.9 verification call) flows through deps.provider in loop
+ *    order, so the round-indexed script answers each in sequence.
+ *
+ * 3. READ EXECUTION / OVERRIDES — before executing a DB-backed read tool,
+ *    consult `(deps as SinglePathConversationDeps).readOverrides?.take(toolName)`;
+ *    a non-null take supplies the RESULT OBJECT verbatim (no DB call). This
+ *    is the only way to script read shapes the live tool never emits (G1's
+ *    sparse `{otherOpenCount: 7}` variant — read-tools.ts always emits
+ *    `open:` alongside).
+ *
+ * 4. WALL GUARD — thread the scenario clock: read the current instant via
+ *    `deps.now?.() ?? new Date()` at turn start AND at every round
+ *    boundary, and force the final round when elapsed exceeds §22.5's 20s.
+ *    Never use Date.now() and never cache one `now` value across rounds —
+ *    G8's injected-clock pin drives the guard through this seam, and the
+ *    runner pins one instant per turn (advancing 60s per turn) precisely so
+ *    elapsed time is deterministic under the harness.
+ *
+ * 5. OBSERVATIONS — return rounds/intent/ledger per CognitiveTurnOutcome so
+ *    the runner can pin them (rounds may be omitted; the harness then falls
+ *    back to the count of scripted cognitive rounds consumed).
+ */
+export type CognitiveTurnFn = (
+  deps: SinglePathConversationDeps,
+  input: InboundConversationMessage,
+) => Promise<CognitiveTurnOutcome>;
+
+/** §22: capabilities a scenario requires — its declared `requires` plus,
+ * for path: "single", the `cognitive_turn` probe key (satisfied once core
+ * exports the loop per the contract above; until then single-path
+ * scenarios skip cleanly, exactly like the existing requires: pattern). */
+export function requiredCapabilities(scenario: Scenario): readonly string[] {
+  if (scenario.path !== "single") return scenario.requires;
+  return [...new Set([...scenario.requires, "cognitive_turn"])];
+}
+
+/** §22: normalize the entry's ledger entries to {opType, status}. */
+function normalizeLedger(
+  entries: readonly Record<string, unknown>[] | undefined,
+): readonly LedgerEntryObservation[] {
+  if (entries === undefined) return [];
+  return entries.map((entry) => ({
+    opType: String(entry["opType"] ?? entry["type"] ?? entry["op_type"] ?? "unknown"),
+    status: String(entry["status"] ?? "unknown"),
+  }));
 }
 
 export interface ExpectationContext {
@@ -245,6 +434,20 @@ export function checkExpectations(
   }
   if (expectations.routedNone === true && lastTurn.routedTools.length > 0) {
     failures.push(`expected no tools routed, got [${lastTurn.routedTools.join(", ")}]`);
+  }
+  // §22 single-path observations (final turn; the legacy path observes an
+  // empty ledger / 0 rounds / null intent, so these pins fail there rather
+  // than silently passing).
+  failures.push(...ledgerContainsFailures(expectations.ledgerContains ?? [], lastTurn.ledger));
+  failures.push(
+    ...roundsBoundFailures(lastTurn.rounds, {
+      atLeast: expectations.roundsAtLeast,
+      atMost: expectations.roundsAtMost,
+    }),
+  );
+  if (expectations.intentIs !== undefined) {
+    const failure = intentIsFailure(expectations.intentIs, lastTurn.intent);
+    if (failure !== null) failures.push(failure);
   }
   return failures;
 }
@@ -440,6 +643,9 @@ async function runScenario(
     readonly principalName: string;
     readonly handle: string;
     readonly domainId: string;
+    /** §22: the single-path turn entry (guaranteed present for
+     * path: "single" — the caller skips those scenarios without one). */
+    readonly cognitiveTurn: CognitiveTurnFn;
   },
 ): Promise<ScenarioResult> {
   const { scenario, principalId, principalName, handle, domainId } = ctx;
@@ -467,10 +673,40 @@ async function runScenario(
       messages: scenario.seed.gmailMessages,
     });
   }
+  if (scenario.seed?.pendingProposal !== undefined) {
+    const seeded = scenario.seed.pendingProposal;
+    const { resolveActiveThread } = await import("@jehad/core");
+    const thread = await resolveActiveThread(pool, {
+      principalId,
+      surface: "imessage",
+      now: anchor,
+    });
+    const { setThreadPendingProposals } = await import("@jehad/core");
+    await setThreadPendingProposals(pool, {
+      threadId: thread.id,
+      principalId,
+      pending: [
+        {
+          type: seeded.type as never,
+          at: anchor.toISOString(),
+          payload: seeded.payload,
+          offered: seeded.offered ?? "seeded fixture offer",
+          id: seeded.id,
+          expiresAt: new Date(anchor.getTime() + 24 * 60 * 60_000).toISOString(),
+          parkedAtSeq: 0,
+        },
+      ],
+      now: anchor,
+    });
+  }
 
   const knownPrincipals = new Set([scenario.principal]);
   const observations: TurnObservation[] = [];
   let scenarioNow = new Date(anchor.getTime());
+  const single = scenario.path === "single";
+  // §22.15(b): the scenario-level read-override queue, shared across the
+  // scenario's turns (consumed in order per tool — see ReadOverrideQueue).
+  const readOverrides = new ReadOverrideQueue(scenario.readOverrides ?? []);
   for (const turn of scenario.turns) {
     const before = await toolUsedCount(pool);
     const beforeInterpretations = (
@@ -479,27 +715,46 @@ async function runScenario(
       )
     ).rows[0];
     const beforeReplied = await repliedRowCount(pool);
-    const script = scriptedDispatch(turn.modelScript);
-    const provider = new FakeModelProvider({ respond: script.responder });
-    const deps: ConversationDeps = {
+    // §22: legacy scripts classify by prompt marker; single-path scripts are
+    // consumed by round index (script order IS dispatch order).
+    const dispatch = single
+      ? singlePathDispatch(turn.modelScript)
+      : scriptedDispatch(turn.modelScript);
+    const provider = new FakeModelProvider({ respond: dispatch.responder });
+    // CLOCK SEAM (§22.5 wall guard, G8's injected-clock pin): `now` is
+    // pinned to one scenario instant per turn (advanced TURN_STEP_MS per
+    // turn) and threaded through deps. The single path's wall guard MUST
+    // read `deps.now?.()` fresh at each round boundary — never Date.now(),
+    // never a value captured once at turn start — so the harness clock
+    // deterministically drives the >20s forced-final boundary.
+    const deps: SinglePathConversationDeps = {
       db: pool,
       provider,
       registry: REGISTRY,
       principalPolicy: (name) => (knownPrincipals.has(name) ? PRINCIPAL_POLICY : null),
       now: () => scenarioNow,
+      ...(single ? { readOverrides } : {}),
     };
-    const outcome = await handleInbound(deps, { principalId, handle, text: turn.user });
+    const input = { principalId, handle, text: turn.user };
+    const outcome = single
+      ? await ctx.cognitiveTurn(deps, input)
+      : await handleInbound(deps, input);
     const routedTools = await toolsUsedSince(pool, before);
     const interpretation = await interpretationsSince(pool, Number(beforeInterpretations?.["n"] ?? 0));
     const auditMarkers = await replyMarkersSince(pool, beforeReplied);
     const reply = outcome.notificationId !== undefined ? await replyContent(pool, outcome.notificationId) : null;
-    const passes = provider.requests.map((request) => passKindOf(request.prompt));
-    const answerPrompts = provider.requests
-      .filter((request) => passKindOf(request.prompt) === "answer")
-      .map((request) => request.prompt);
-    const issues = [...script.mismatches()];
-    if (script.consumed() !== turn.modelScript.length) {
-      issues.push(`${turn.modelScript.length - script.consumed()} scripted pass(es) never dispatched`);
+    const passes = single
+      ? dispatch.kinds()
+      : provider.requests.map((request) => passKindOf(request.prompt));
+    const answerPrompts = single
+      ? []
+      : provider.requests
+          .filter((request) => passKindOf(request.prompt) === "answer")
+          .map((request) => request.prompt);
+    const singleOutcome = single ? (outcome as CognitiveTurnOutcome) : null;
+    const issues = [...dispatch.mismatches()];
+    if (dispatch.consumed() !== turn.modelScript.length) {
+      issues.push(`${turn.modelScript.length - dispatch.consumed()} scripted pass(es) never dispatched`);
     }
     observations.push({
       user: turn.user,
@@ -511,6 +766,13 @@ async function runScenario(
       interpretation,
       auditMarkers,
       answerPrompts,
+      ledger: normalizeLedger(singleOutcome?.ledger),
+      // Authoritative when the entry reports rounds; otherwise fall back to
+      // the scripted cognitive rounds actually consumed.
+      rounds:
+        singleOutcome?.rounds ??
+        (single ? dispatch.kinds().filter((kind) => kind === "cognitive").length : 0),
+      intent: singleOutcome?.intent ?? null,
       scriptIssues: issues,
     });
     scenarioNow = new Date(scenarioNow.getTime() + TURN_STEP_MS);
@@ -559,12 +821,26 @@ export async function runConversationEval(options: ConversationEvalOptions): Pro
     const principals = new Map<string, { id: string; handle: string }>();
     let handleIndex = 0;
     for (const scenario of options.scenarios) {
-      const missing = scenario.requires.filter((capability) => !probes[capability]);
+      // §22: single-path scenarios implicitly require the cognitive_turn
+      // capability (core's cognitive-loop export per the contract above).
+      const missing = requiredCapabilities(scenario).filter((capability) => !probes[capability]);
       if (missing.length > 0) {
         results.push({
           id: scenario.id,
           status: "skip",
           reason: `capability not available: ${missing.join(", ")}`,
+          failures: [],
+          turns: [],
+        });
+        continue;
+      }
+      if (scenario.path === "single" && options.cognitiveTurn === undefined) {
+        // Probe passed but no entry was supplied (CLI resolves it from
+        // core; tests inject a fake). Skip rather than crash.
+        results.push({
+          id: scenario.id,
+          status: "skip",
+          reason: "single-path cognitive turn entry not resolved",
           failures: [],
           turns: [],
         });
@@ -585,6 +861,7 @@ export async function runConversationEval(options: ConversationEvalOptions): Pro
           principalName: scenario.principal,
           handle: principal.handle,
           domainId,
+          cognitiveTurn: options.cognitiveTurn!,
         }),
       );
     }

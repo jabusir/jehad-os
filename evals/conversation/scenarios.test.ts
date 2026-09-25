@@ -5,6 +5,12 @@ import {
   parseScenarioFile,
 } from "./scenarios.js";
 
+// §22 dual-window: legacy scenarios in this suite run through handleInbound,
+// which reads the repo-root policy (now routing: single for dogfood) — pin
+// the legacy fixture so legacy scripting stays valid; single-path scenarios
+// are invoked directly (runCognitiveTurn) and never consult this flag.
+process.env.POLICY_YAML_PATH ??= new URL("../../packages/core/src/imessage/legacy-routing.fixture.yaml", import.meta.url).pathname;
+
 const FILE = new URL("./scenarios.yaml", import.meta.url).pathname;
 
 function baseScenario(): Record<string, unknown> {

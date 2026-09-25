@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { loadScenarioFile } from "./scenarios.js";
 import { runConversationEval } from "./runner.js";
 
+// §22 dual-window: legacy scenarios in this suite run through handleInbound,
+// which reads the repo-root policy (now routing: single for dogfood) — pin
+// the legacy fixture so legacy scripting stays valid; single-path scenarios
+// are invoked directly (runCognitiveTurn) and never consult this flag.
+process.env.POLICY_YAML_PATH ??= new URL("../../packages/core/src/imessage/legacy-routing.fixture.yaml", import.meta.url).pathname;
+
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const FILE = new URL("./scenarios-memory.yaml", import.meta.url).pathname;
 

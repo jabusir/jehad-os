@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { REDACTED_TOKEN } from "./redact";
 import {
   THREAD_REFERENT_REGISTRY_CAP,
   TURN_REFERENTS_MAX,
   deriveThreadState,
+  isPendingExpired,
   mergeThreadState,
   parseThreadMetadata,
+  pendingWithDerivedIds,
   retractLastStance,
   type ThreadMetadata,
+  type ThreadPendingProposal,
   type ThreadReferent,
 } from "./threads";
 
@@ -339,5 +343,109 @@ describe("parseThreadMetadata (fail-closed DB reader)", () => {
     );
     expect(both.profile_override).toEqual({ brevityDelta: { maxSentences: -2 } });
     expect(both.pendingProposal).toEqual(existing.pendingProposal);
+  });
+});
+
+const LEGACY_PENDING: ThreadPendingProposal = {
+  type: "task_batch",
+  at: AT,
+  payload: { type: "task_batch", items: [{ title: "Clean apartment", due: "by wednesday" }] },
+  offered: "I pulled out 1 tasks: Clean apartment. Reply 'track them' and I'll track all 1.",
+};
+
+const STAMPED_PENDING: ThreadPendingProposal = {
+  ...LEGACY_PENDING,
+  id: "task_batch:1a2b",
+  expiresAt: "2026-09-22T12:00:00.000Z",
+  parkedAtSeq: 7,
+};
+
+describe("parseThreadMetadata §22.14 dual-shape pending entries", () => {
+  it("parses legacy 4-key entries unchanged and carries id/expiresAt/parkedAtSeq through", () => {
+    expect(parseThreadMetadata(JSON.parse(JSON.stringify({ pendingProposals: [LEGACY_PENDING] })))).toEqual({
+      pendingProposals: [LEGACY_PENDING],
+    });
+    expect(parseThreadMetadata(JSON.parse(JSON.stringify({ pendingProposals: [STAMPED_PENDING] })))).toEqual({
+      pendingProposals: [STAMPED_PENDING],
+    });
+    expect(parseThreadMetadata(JSON.parse(JSON.stringify({ pendingProposal: STAMPED_PENDING })))).toEqual({
+      pendingProposal: STAMPED_PENDING,
+    });
+  });
+
+  it("merges and retractions carry the new fields through untouched (hazard 2: carry, not tolerate)", () => {
+    const existing: ThreadMetadata = { topic: "t", pendingProposals: [STAMPED_PENDING] };
+    const turn = deriveThreadState({ at: AT, topic: "new", stance: { kind: "answer", summary: "s" } });
+    const merged = mergeThreadState(existing, turn);
+    expect(merged.pendingProposals).toEqual([STAMPED_PENDING]);
+    expect(retractLastStance(merged).pendingProposals).toEqual([STAMPED_PENDING]);
+  });
+
+  it("fails closed on malformed id/expiresAt/parkedAtSeq", () => {
+    const base = { type: "task_batch", at: AT, payload: {}, offered: "x" };
+    const malformed: unknown[] = [
+      { pendingProposal: { ...base, id: "task_batch:1A2B" } },
+      { pendingProposal: { ...base, id: "task_batch:1a2" } },
+      { pendingProposal: { ...base, id: "task_batch:1a2b3" } },
+      { pendingProposal: { ...base, id: "system_feedback:1a2b" } },
+      { pendingProposal: { ...base, id: "task_batch" } },
+      { pendingProposal: { ...base, id: 7 } },
+      { pendingProposal: { ...base, expiresAt: "garbage" } },
+      { pendingProposal: { ...base, expiresAt: 42 } },
+      { pendingProposal: { ...base, parkedAtSeq: 1.5 } },
+      { pendingProposal: { ...base, parkedAtSeq: "3" } },
+      { pendingProposal: { ...base, parkedAtSeq: -1 } },
+      { pendingProposal: { ...base, extraNew: 1 } },
+    ];
+    for (const value of malformed) {
+      expect(parseThreadMetadata(value), JSON.stringify(value)).toBeNull();
+    }
+  });
+});
+
+describe("pendingWithDerivedIds (§22.14 legacy provenance)", () => {
+  it("derives the documented hash id for legacy-parked entries; expiresAt/parkedAtSeq stay absent", () => {
+    const digest = createHash("sha256").update("task_batch" + AT).digest("hex").slice(0, 4);
+    const expected: ThreadPendingProposal = { ...LEGACY_PENDING, id: `task_batch:${digest}` };
+    const derived = pendingWithDerivedIds({
+      pendingProposal: LEGACY_PENDING,
+      pendingProposals: [LEGACY_PENDING],
+    });
+    expect(derived).toEqual({ pendingProposal: expected, pendingProposals: [expected] });
+    expect(derived!.pendingProposals![0]!.expiresAt).toBeUndefined();
+    expect(derived!.pendingProposals![0]!.parkedAtSeq).toBeUndefined();
+  });
+
+  it("passes id-bearing entries through untouched (same reference)", () => {
+    const metadata: ThreadMetadata = { pendingProposals: [STAMPED_PENDING], pendingProposal: STAMPED_PENDING };
+    expect(pendingWithDerivedIds(metadata)).toBe(metadata);
+    expect(pendingWithDerivedIds({ topic: "t" })).toEqual({ topic: "t" });
+    expect(pendingWithDerivedIds(null)).toBeNull();
+  });
+
+  it("derives only for the legacy entries in a mixed set", () => {
+    const digest = createHash("sha256").update("system_feedback" + AT).digest("hex").slice(0, 4);
+    const legacy: ThreadPendingProposal = {
+      type: "system_feedback",
+      at: AT,
+      payload: { type: "system_feedback", category: "bug", subject: "s", detail: null },
+      offered: "Worth logging about me: \"s\" (bug).",
+    };
+    const derived = pendingWithDerivedIds({ pendingProposals: [STAMPED_PENDING, legacy] });
+    expect(derived).toEqual({
+      pendingProposals: [STAMPED_PENDING, { ...legacy, id: `system_feedback:${digest}` }],
+    });
+  });
+});
+
+describe("isPendingExpired (§22.6 24h TTL)", () => {
+  it("detects expired entries; unexpired and unknown-but-unexpired pass", () => {
+    const expiresAt = "2026-09-22T12:00:00.000Z";
+    const stamped: ThreadPendingProposal = { ...STAMPED_PENDING, expiresAt };
+    expect(isPendingExpired(stamped, new Date("2026-09-22T12:00:00.000Z"))).toBe(true);
+    expect(isPendingExpired(stamped, new Date("2026-09-23T00:00:00.000Z"))).toBe(true);
+    expect(isPendingExpired(stamped, new Date("2026-09-22T11:59:59.999Z"))).toBe(false);
+    expect(isPendingExpired(stamped, new Date("2026-09-21T00:00:00.000Z"))).toBe(false);
+    expect(isPendingExpired(LEGACY_PENDING, new Date("2027-01-01T00:00:00.000Z"))).toBe(false);
   });
 });

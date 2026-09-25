@@ -47,11 +47,10 @@ notifications:
 # `openrouter/auto-fast` is not in the repo's allowlisted model ids; the
 # cheapest fast allowlisted model is the evals-pinned openai/gpt-4o-mini.
 gateway:
-  # §22 single-author cognitive loop — LIVE for dogfood 2026-09-24 (hermetic
-  # G-suite green: evals/conversation/scenarios-single-path.yaml, 9/9 incl.
-  # the G1 to-do loop + G2 preference normative cases). Rollback = set
-  # routing back to legacy (60s TTL, no restart).
-  routing: single
+  # §22 dual-window test fixture: identical to the live policy except
+  # routing stays legacy — the suites referencing this file pin the LEGACY
+  # orchestration path (the rollback path) while dogfood runs on single.
+  routing: legacy
   # per-pass model routing — W3 tiers, RESET C7 (2026-09-24 bake-off,
   # docs/evals + evals/model-bakeoff/out/): route+interpret upgraded from
   # gpt-4.1-mini to gpt-4.1 — the live probe measured the mini at 88.9%
