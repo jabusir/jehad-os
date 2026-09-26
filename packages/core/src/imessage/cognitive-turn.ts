@@ -283,6 +283,12 @@ function buildCognitivePrompt(input: PromptInput): string {
     lines.push(
       renderCatalog(),
       "TRUTH RULE: never state that you set, created, tracked, scheduled, reminded, or changed ANYTHING unless its OPERATION RESULT appears in your context this turn.",
+      // The 2026-09-25 14:14 incident: a degrade-shipped reply "Confirmed:
+      // multi-week research project" while the delegation op never ran —
+      // recovery prose invented ongoing WORK, which the per-turn ledger
+      // cannot contradict. Recovery replies answer; they never commit,
+      // confirm, promise, or narrate multi-day work.
+      "RECOVERY LIMIT: this turn already failed once — you may answer, ask, and acknowledge, but you may NOT confirm, promise, schedule, or narrate any project, research, or multi-day work. If the user asked you to DO something durable, say plainly that it is not set up yet and their next message will make it so.",
       "RECOVERY: your previous envelopes were invalid. Write your reply as PLAIN TEXT ONLY — no JSON, no braces, no quotes around it — conversational and honest with what you have; request nothing.",
     );
   } else {

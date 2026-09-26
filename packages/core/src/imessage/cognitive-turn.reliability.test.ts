@@ -558,4 +558,29 @@ describe.skipIf(!TEST_DATABASE_URL)("cognitive turn reliability wave (goals 1-4,
     const audits = await auditRows("cognitive.turn");
     expect(String(audits.at(-1)!["verified"])).toBe("regenerated");
   });
+
+  it("goal 4 case F (the 2026-09-25 14:14 incident): a degrade-shipped reply may NOT confirm or narrate multi-day work", async () => {
+    await grant();
+    // Round 0: invalid envelope (prose). Round 1 re-prompt: invalid again.
+    // Degrade: sonnet authors recovery prose for a DELEGATION ask — the
+    // reply must refuse to confirm the project exists.
+    const { outcome, requests } = await turn([
+      "Sure thing — I'll set up the research project right away.",
+      "{\"operations_requested\": malformed",
+      "Understood — that research project isn't set up yet. Nothing is running and nothing is scheduled; send the delegation again and it will be created for real this time.",
+      VERIFY_CONSISTENT,
+    ], "delegate: research low maintenance businesses that can replace my income");
+
+    expect(outcome.replied).toBe(true);
+    // The degrade prompt carried the recovery limit.
+    const degradePrompt = requests.find((r) => r.prompt.includes("RECOVERY:"))?.prompt ?? "";
+    expect(degradePrompt).toContain("RECOVERY LIMIT");
+    // And the shipped reply does not confirm ongoing work.
+    const reply = await replyContent(outcome);
+    expect(reply).toContain("isn't set up");
+    expect(reply!.toLowerCase()).not.toContain("confirmed");
+    // No outcome was minted by a degrade path.
+    const outcomes = await db.pool.query(`SELECT count(*)::int AS n FROM outcomes`);
+    expect(Number(outcomes.rows[0]!.n)).toBe(0);
+  });
 });
