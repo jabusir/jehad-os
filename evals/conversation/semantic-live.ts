@@ -273,7 +273,9 @@ async function main(): Promise<void> {
   if (apiKey === "") throw new Error("OPENROUTER_API_KEY is not set (env or launchctl)");
 
   const corpus = loadSemanticCorpus(corpusFile);
-  const judgeModel = (await loadRepoPolicy()).policy?.gateway?.passes?.route?.model ?? JUDGE_MODEL_FALLBACK;
+  // Bake-off comparability: JUDGE_MODEL pins the judge across candidates
+  // (defaults to the policy route model = gpt-4.1 in the repo policy).
+  const judgeModel = process.env.JUDGE_MODEL ?? (await loadRepoPolicy()).policy?.gateway?.passes?.route?.model ?? JUDGE_MODEL_FALLBACK;
   const cases = corpus.cases.slice(0, Number.isFinite(limit) ? limit : corpus.cases.length);
 
   const db = await createIsolatedTestDb(databaseUrl, `semantic_${split}_${Date.now() % 100000}`);
