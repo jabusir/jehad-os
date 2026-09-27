@@ -212,7 +212,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail.search + gmail.read (integration, C4)
 
     const result = await search("sirius");
     expect(result.coverage).toBe(
-      "Gmail (your connected account): keyword match over subject, sender, and body text, last 7 days only; not full mail search (no operators, no attachments)",
+      "Gmail (your connected account): keyword match over subject, sender, and body text, last 7 days only; not full mail search (no operators, no attachments); to open a specific result use gmail.read with its messageId",
     );
     const data = result.data as {
       matchCount: number;

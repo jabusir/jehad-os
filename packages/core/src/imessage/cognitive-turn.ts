@@ -172,8 +172,8 @@ const ENVELOPE_CONTRACT = [
   "Include EVERY key every time (empty arrays are fine). Omit only \"reply\" when not final.",
   "reads_requested: tools from the READ CATALOG below (≤3 per round). WHEN THE USER ASKS ABOUT THEIR OWN DATA — calendar, to-dos, email, what's due, their day — ALWAYS request the read FIRST and answer from its results; never say you lack information a catalog tool provides. A read that RETURNS data is ground truth over the SELF-BRIEF's connectivity summary.",
   "operations_requested: ≤4 typed operations, ONLY on the user's own instruction THIS TURN — your ONE chance (later rounds and post-read envelopes reject them). If the user asks to set, move, complete, stop, or change anything, emit the op IMMEDIATELY on this round — requesting a read first CLOSES your chance to act. Operation forms:",
-  '- {"type":"reminder_create","title":"X","whenWords":"<ONLY their time words, e.g. \'tomorrow at 2pm\'; null when they gave none>","dueDate":"<YYYY-MM-DD when you can derive it, else null>","dueTime":{"hour":H,"minute":M} (or null)} — "remind me / ping me / don\'t let me forget X". The system resolves whenWords; fill dueDate/dueTime yourself when the user\'s words make them clear ("tomorrow around two" → your best date+time).',
-  '- {"type":"task_batch","items":[{"title":"...","due":"<their due words|null>"}]} — the user lists to-dos for themselves (parks as an offer; ask them to confirm).',
+  '- {"type":"reminder_create","title":"X","whenWords":"<ONLY their time words, e.g. \'tomorrow at 2pm\'; null when they gave none>","dueDate":"<YYYY-MM-DD when you can derive it, else null>","dueTime":{"hour":H,"minute":M} (or null)} — "remind me / ping me / don\'t let me forget X". The system resolves whenWords; ALWAYS fill dueDate/dueTime yourself when the user\'s words imply any date or time. Fuzzy qualifiers are DEFINITE: "around 2", "by 3ish", "sometime after lunch" → schedule at the stated time (2:00, 3:00) or the stated anchor, and say the concrete time you scheduled in your reply ("set for 2 PM — say the word to shift it"). Never reject a fuzzy time; pick the concrete time it names.',
+  '- {"type":"reminder_create","title":"X","whenWords":"<ONLY their time words, e.g. \'tomorrow at 2pm\'; null when they gave none>","dueDate":"<YYYY-MM-DD when you can derive it, else null>","dueTime":{"hour":H,"minute":M} (or null)} — "remind me / ping me / don\'t let me forget X". The system resolves whenWords; ALWAYS fill dueDate/dueTime yourself when the user\'s words imply any date or time. Fuzzy qualifiers are DEFINITE: "around 2", "by 3ish", "sometime after lunch" → schedule at the stated time (2:00, 3:00) or the stated anchor, and say the concrete time you scheduled in your reply ("set for 2 PM — say the word to shift it"). Never reject a fuzzy time; pick the concrete time it names.',
   '- {"type":"commitment_transition","target":{"text":"<the distinctive words NAMING their to-do — drop times and filler like \'3pm\'/\'thing\'; e.g. \'dentist\', \'seating chart\'>"},"verb":"done|missed|renegotiated","note":null} — the user says one of their to-dos is done / was missed / is moved. Emit it NOW on this round — do NOT read first (a read ends your chance to act); the system matches their words against their open to-dos and the result tells you what matched or lists candidates when ambiguous.',
   '- {"type":"occurrence_update","target":{"text":"<the distinctive words naming their SCHEDULED EVENT — gym, dentist, a meeting on the calendar>"},"happened":true|false} — the user says a scheduled calendar event happened or was skipped. Same rule: act now, never read first.',
   '- {"type":"reminder_reply","target":{"checkIn":"live"},"kind":"done|stop|not_done|renegotiate","whenText":"<their new time words|null>"} — answering a LIVE CHECK-IN ("done", a new time, "stop"), or moving/stopping a reminder (use "target":{"text":"..."} to pick among several). When the LIVE CHECK-INS block lists the item, prefer reminder_reply — it resolves the check-in (and any linked to-do); emit it NOW, never read first.',
@@ -185,6 +185,13 @@ const ENVELOPE_CONTRACT = [
   "reply: your final user-facing message, plain text (it is sent verbatim — never JSON, never quotes around it). Include it ONLY when reads_requested is empty AND every operation/resolution you requested has already returned a result in your context. Otherwise omit it and the loop will continue.",
   "TRUTH RULE: never state that you set, created, tracked, scheduled, reminded, or changed ANYTHING unless its OPERATION RESULT appears in your context this turn. \"I\'ll remind you at 2 PM\" is a LIE unless reminder_create returned applied. If you did not or could not run it, say what you actually did (\"I haven\'t set that up — say the word and I will\") or run the operation now.",
 ].join("\n");
+
+/** Bounded READ EVIDENCE render (R7): the turn's executed reads as the
+ *  truth source for personal-data claims. */
+function renderReadEvidence(readEvidence: readonly string[]): string {
+  if (readEvidence.length === 0) return "NO CANONICAL READS RAN THIS TURN";
+  return readEvidence.join("\n").slice(0, 1600);
+}
 
 function todayLine(now: Date): string {
   const today = new Intl.DateTimeFormat("en-US", {
@@ -558,6 +565,7 @@ async function executeReads(
   readsExecuted: number,
   roundResults: string[],
   ledger: RoundLedger[],
+  readEvidence: string[],
 ): Promise<number> {
   let executed = readsExecuted;
   for (const read of reads) {
@@ -598,6 +606,13 @@ async function executeReads(
     } else {
       roundResults.push(`[tool ${outcome.tool} | coverage: ${outcome.coverage}] ${serialized}`);
     }
+    // Shell-trust R7 (owner directive 2026-09-26): READ EVIDENCE — the
+    // per-turn truth source for personal-data claims. Without it the
+    // verifier could contradict action lies and work lies but not
+    // "You don't have any to-dos" against a read that returned seven.
+    readEvidence.push(
+      `${outcome.tool} (coverage: ${outcome.coverage}): ${serialized.slice(0, 400)}`,
+    );
     executed += 1;
     try {
       ctx.deps.onReadExecuted?.(read.tool, override !== null);
@@ -917,6 +932,7 @@ export async function runCognitiveTurn(
   const checkInLines = await renderLiveCheckIns(ctx);
 
   const roundResults: string[] = [];
+  const readEvidence: string[] = [];
   const ledger: RoundLedger[] = [];
   const referents: TurnReferentArtifact[] = [];
   let readsExecuted = 0;
@@ -1028,7 +1044,7 @@ export async function runCognitiveTurn(
           // action-claim verification (an empty-handed {"reply": "...I set
           // it..."} is still a claim against an empty ledger).
           let reply = recovered.reply;
-      let verified = await verifyLadder(ctx, reply, ledger, models.standard, models.fast, models.fallback, workSnapshot, (c) => {
+      let verified = await verifyLadder(ctx, reply, ledger, models.standard, models.fast, models.fallback, workSnapshot, readEvidence, (c) => {
             cost += c;
           });
           if (verified.startsWith("regenerated")) {
@@ -1059,7 +1075,7 @@ export async function runCognitiveTurn(
           // claiming an action that never ran is still a lie.
           await audit(ctx.db, "cognitive.degrade_nonjson", { principalId: ctx.input.principalId });
           let reply = plain;
-          let verified = await verifyLadder(ctx, reply, ledger, models.standard, models.fast, models.fallback, workSnapshot, (c) => {
+          let verified = await verifyLadder(ctx, reply, ledger, models.standard, models.fast, models.fallback, workSnapshot, readEvidence, (c) => {
             cost += c;
           });
           if (verified.startsWith("regenerated")) {
@@ -1152,7 +1168,7 @@ export async function runCognitiveTurn(
     const wantsReads = envelope.reads_requested.length > 0 && !final;
     if (wantsReads) {
       const before = readsExecuted;
-      readsExecuted = await executeReads(ctx, envelope.reads_requested, readsExecuted, roundResults, ledger);
+      readsExecuted = await executeReads(ctx, envelope.reads_requested, readsExecuted, roundResults, ledger, readEvidence);
       for (const read of envelope.reads_requested.slice(0, COGNITIVE_MAX_READS - before)) {
         referents.push({ kind: "read", ref: read.tool, label: `${read.tool}` });
       }
@@ -1188,7 +1204,7 @@ export async function runCognitiveTurn(
       // empty ledger is handed to the verifier verbatim ([]) and the
       // verifier contract treats any current-turn action claim against []
       // as contradictory. Extra model call per turn accepted.
-      let verified = await verifyLadder(ctx, reply, ledger, models.standard, models.fast, models.fallback, workSnapshot, (c) => {
+      let verified = await verifyLadder(ctx, reply, ledger, models.standard, models.fast, models.fallback, workSnapshot, readEvidence, (c) => {
         cost += c;
       });
       if (verified.startsWith("regenerated")) {
@@ -1240,6 +1256,7 @@ async function verifyLadder(
   verdictModel: string,
   fallbackModel: string,
   workState: string,
+  readEvidence: readonly string[],
   addCost: (c: number) => void,
 ): Promise<string> {
   let reply = draftReply;
@@ -1255,7 +1272,7 @@ async function verifyLadder(
         // not on lying drafts). Regeneration stays on the prose model.
         const dispatched = await dispatchModel(
           ctx,
-          buildVerificationPrompt(reply, ledger, workState, todayLine(ctx.now())),
+          buildVerificationPrompt(reply, ledger, workState, todayLine(ctx.now()), renderReadEvidence(readEvidence)),
           COGNITIVE_VERIFY_PROMPT_VERSION,
           dispatchAttempt === 0 ? verdictModel : fallbackModel,
         );
@@ -1275,7 +1292,7 @@ async function verifyLadder(
       try {
         const retried = await dispatchModel(
           ctx,
-          buildVerificationPrompt(reply, ledger, workState, todayLine(ctx.now())),
+          buildVerificationPrompt(reply, ledger, workState, todayLine(ctx.now()), renderReadEvidence(readEvidence)),
           COGNITIVE_VERIFY_PROMPT_VERSION,
           verdictModel,
         );
@@ -1294,7 +1311,7 @@ async function verifyLadder(
       try {
         const regen = await dispatchModel(
           ctx,
-          buildRegenerationPrompt(contextSummary(ctx), ledger, verdict.finding, reply, workState, todayLine(ctx.now())),
+          buildRegenerationPrompt(contextSummary(ctx), ledger, verdict.finding, reply, workState, todayLine(ctx.now()), renderReadEvidence(readEvidence)),
           COGNITIVE_REGEN_PROMPT_VERSION,
           model,
         );
@@ -1309,7 +1326,7 @@ async function verifyLadder(
       try {
         await dispatchModel(
           ctx,
-          buildRegenerationPrompt(contextSummary(ctx), ledger, findings.join(" | "), reply, workState, todayLine(ctx.now())) +
+          buildRegenerationPrompt(contextSummary(ctx), ledger, findings.join(" | "), reply, workState, todayLine(ctx.now()), renderReadEvidence(readEvidence)) +
             "\nFINAL ROUND: produce the truthful reply now.",
           COGNITIVE_TURN_FINAL_PROMPT_VERSION,
           model,

@@ -791,4 +791,55 @@ describe.skipIf(!TEST_DATABASE_URL)("cognitive turn reliability wave (goals 1-4,
     expect(rows[0]!["standard"]).toBe("anthropic/claude-sonnet-4.5");
     expect(rows[0]!["fallback"]).toBe("google/gemini-3.8-flash");
   });
+
+  // ============================================ shell-trust R7: read evidence
+
+  it("R7: 'You don't have any to-dos.' against a read that RETURNED items is a production contradiction — read evidence closes the last truth gap", async () => {
+    await grant();
+    // Round 0 requests the read (the runner's readOverride supplies the
+    // canonical payload); round 1 drafts the empty-list lie; the verifier
+    // sees <read_evidence> listing the items → contradicts → regeneration
+    // states the actual list.
+    const { outcome, requests } = await turn([
+      envelope({ reads_requested: [{ tool: "commitments.waiting" }] }),
+      envelope({ reply: "You don't have anything on your to-do list right now — nothing's been set up." }),
+      '{"verdict":"contradicts","finding":"the reply claims the to-do list is empty but the read evidence lists two open items: seating chart and call the florist"}',
+      "You've actually got two open to-dos: the seating chart and calling the florist.",
+      VERIFY_CONSISTENT,
+    ], "what's on my to-do list?", {
+      readOverrides: {
+        take: (tool) =>
+          tool === "commitments.waiting"
+            ? { result: { open: [{ description: "seating chart" }, { description: "call the florist" }], openTruncated: false } }
+            : null,
+      },
+    });
+
+    expect(outcome.replied).toBe(true);
+    // The verification prompt carried the read evidence.
+    const verifyPrompt = requests.find((r) => r.prompt.includes("<read_evidence>"))?.prompt ?? "";
+    expect(verifyPrompt).toContain("seating chart");
+    expect(verifyPrompt).toContain("PERSONAL-DATA claims");
+    const reply = await replyContent(outcome);
+    expect(reply).toContain("seating chart");
+    const audits = await auditRows("cognitive.turn");
+    expect(String(audits.at(-1)!["verified"])).toBe("regenerated");
+  });
+
+  it("R7: an honest empty read still ships — read evidence never fabricates items", async () => {
+    await grant();
+    const { outcome } = await turn([
+      envelope({ reads_requested: [{ tool: "commitments.waiting" }] }),
+      envelope({ reply: "Nothing open right now — your to-do list is clear." }),
+      VERIFY_CONSISTENT,
+    ], "what's on my to-do list?", {
+      readOverrides: {
+        take: (tool) =>
+          tool === "commitments.waiting" ? { result: { open: [], openTruncated: false } } : null,
+      },
+    });
+    expect(outcome.replied).toBe(true);
+    const reply = await replyContent(outcome);
+    expect(reply).toContain("clear");
+  });
 });

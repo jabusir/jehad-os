@@ -371,6 +371,27 @@ tests → rollback → exit signal. Five build waves (R1–R5) + dogfood (R6).
    re-run the strict-JSON probe (`eval:bakeoff:probe`) across candidate
    models; a swap is a policy.yaml pin change only. No new orchestration.
 
+### R7 — Read evidence (owner directive 2026-09-26, post-80%-review)
+
+The production verifier judged action claims (ledger) and work claims (work
+state) but NOT personal-data claims — "You don't have any to-dos." shipped
+green against a read that returned seven items (the eval judge caught it;
+production could not). Fix: the turn's EXECUTED reads ride the verification
+and regeneration prompts as bounded `<read_evidence>` (tool + coverage +
+≤400-char data digest each, ≤1600 total; "NO CANONICAL READS RAN THIS TURN"
+when none). Truth architecture, now complete: **ledger = truth for actions;
+read evidence = truth for personal-data claims; work state = truth for
+delegated-work claims.** Empty-claims-against-returned-items contradict and
+regenerate; no-read specific data claims contradict only when they assert a
+check happened; coverage-limited reads bound the claim. Regression-pinned
+(R7 cases in the reliability suite). Bounded generic contract pass rides
+along: fuzzy time is DEFINITE ("around 2" → schedule 2:00, say it), parked
+batches are phrased STAGED-not-tracked, gmail.search coverage carries the
+gmail.read affordance. Sequence per owner: read-evidence → generic pass →
+PROMPT FREEZE → dev re-run → model re-probe if common-control still weak →
+model selection → THEN owner-authored holdout v2 → freeze → final run →
+30+ turn dogfood (a prompt change after freeze voids the freeze).
+
 ### R6 — Live dogfood + exit (directive §8)
 
 Protocol in §8 below. Daily audit report — `scripts/dogfood-audit.mts`

@@ -110,7 +110,7 @@ const GMAIL_NO_SENSOR_COVERAGE =
 // C4 coverage: the same one account, now with bounded content depth —
 // 7-day window, keyword match, sanitized untrusted bodies.
 const GMAIL_SEARCH_COVERAGE =
-  "Gmail (your connected account): keyword match over subject, sender, and body text, last 7 days only; not full mail search (no operators, no attachments)";
+  "Gmail (your connected account): keyword match over subject, sender, and body text, last 7 days only; not full mail search (no operators, no attachments); to open a specific result use gmail.read with its messageId";
 const GMAIL_READ_COVERAGE =
   "Gmail (your connected account): one message by id, last 7 days only; body is sanitized untrusted content";
 const GMAIL_READ_NOT_FOUND_COVERAGE =

@@ -29,6 +29,12 @@ export const REGENERATION_CONTEXT_CHAR_CAP = 2000;
 /** Render cap for the canonical WORK STATE section (shell-trust R1). */
 export const WORK_STATE_CHAR_CAP = 1400;
 
+/** Render cap for the READ EVIDENCE section (shell-trust R7 — owner
+ *  directive 2026-09-26: the verifier must judge personal-data claims
+ *  against the reads the turn actually executed, closing the production
+ *  "You don't have any to-dos."-against-seven-returned-items gap). */
+export const READ_EVIDENCE_CHAR_CAP = 1600;
+
 /** Ledger entries rendered into a prompt. A legal turn cannot exceed 6
  *  (§22.2: ≤4 operations + ≤2 resolutions per envelope; a validation
  *  re-prompt's rejects double that at most) — 16 is the defensive render
@@ -120,6 +126,7 @@ export function buildVerificationPrompt(
   ledger: readonly LedgerEntry[],
   workState?: string,
   todayLine?: string,
+  readEvidence?: string,
 ): string {
   return [
     "You are verifying a draft assistant reply against the execution ledger of what this turn's actions actually did.",
@@ -133,11 +140,22 @@ export function buildVerificationPrompt(
     renderLedgerJson(ledger),
     "</execution_ledger>",
     "",
+    "<read_evidence>",
+    clip(
+      readEvidence ?? "NO CANONICAL READS RAN THIS TURN",
+      READ_EVIDENCE_CHAR_CAP,
+    ),
+    "</read_evidence>",
+    "",
     "<work_state>",
     clip(workState ?? "NO DELEGATED WORK EXISTS (canonical work state is empty)", WORK_STATE_CHAR_CAP),
     "</work_state>",
     "",
-    'The execution ledger is ground truth for ACTION claims; the work state is ground truth for WORK claims. Judge ACTION claims: whether the reply\'s statements about operations and proposal resolutions — mutations, resolutions, and their outcomes, INCLUDING failed and rejected attempts — match the ledger. An EMPTY ledger ([]) means NO action ran this turn: any claim that the reply set, created, tracked, scheduled, reminded, changed, or completed something contradicts. Judge WORK claims: statements that DELEGATED work (multi-day projects, research, assignments, outcomes) exists, is underway, in progress, paused, or finished — and any deadline, checkpoint, or timeline attached to them — are true ONLY if the work_state shows it. Ordinary to-dos, reminders, and calendar events are NOT delegated work: claims about them are ACTION claims judged against the ledger, never against work_state. Ledger parked/queued is an OFFER or queued work, never "underway" or "started". History, memory, or the user having discussed an idea NEVER establishes that work exists; work_state saying NO WORK EXISTS + any work-existence claim contradicts. Substantive findings claims ("we found three viable verticals") are truthful only with verified criteria in work_state; "an assignment completed and produced an artifact" is the honest form otherwise. A reply that only offers, asks, recommends, or explains makes no action claim — including general explanations of how the assistant or its features work ("reminders work by..."), which say nothing about THIS turn actions. Do not judge style, vocabulary, tone, opinions, or any other non-action content; a reply making no action or work claim is consistent.',
+    'Three truth sources, each authoritative for its claim class: the execution ledger for ACTION claims; the read evidence for PERSONAL-DATA claims (to-dos, calendar items, emails, senders, counts, times the reads returned); the work state for DELEGATED-WORK claims.',
+    'Judge ACTION claims: whether the reply\'s statements about operations and proposal resolutions — mutations, resolutions, and their outcomes, INCLUDING failed and rejected attempts — match the ledger. An EMPTY ledger ([]) means NO action ran this turn: any claim that the reply set, created, tracked, scheduled, reminded, changed, or completed something contradicts.',
+    'Judge PERSONAL-DATA claims: statements about what the owner data contains - to-do lists, calendar events, emails, senders, counts, times - are true ONLY if the read_evidence supports them. A reply claiming a list is empty or that items do not exist while read_evidence lists them CONTRADICTS. Misquoting returned counts, titles, times, or senders contradicts. When NO CANONICAL READS RAN THIS TURN, specific claims about the owner personal data are unsupported - such a claim contradicts only if it asserts data was checked or found; offering to check is honest. Coverage-limited reads bound the claim: honest replies state the coverage limit rather than inventing beyond it.',
+    'Judge WORK claims: statements that DELEGATED work (multi-day projects, research, assignments, outcomes) exists, is underway, in progress, paused, or finished - and any deadline, checkpoint, or timeline attached to them - are true ONLY if the work_state shows it. Ordinary to-dos, reminders, and calendar events are NOT delegated work: claims about them are ACTION claims judged against the ledger, never against work_state.',
+    "Do not judge style, vocabulary, tone, opinions, or any other non-action content; a reply making no action, personal-data, or work claim is consistent. A reply that only offers, asks, recommends, or explains makes no action claim - including general explanations of how the assistant or its features work, which say nothing about THIS turn actions.",
     "",
     "Respond with EXACTLY one line of JSON and no other text — no markdown fences, no prose:",
     '{"verdict":"consistent"}',
@@ -199,6 +217,7 @@ export function buildRegenerationPrompt(
   draftReply: string,
   workState?: string,
   todayLine?: string,
+  readEvidence?: string,
 ): string {
   return [
     "Regenerate the final user-facing reply for this turn. Your draft made a claim the execution ledger or the canonical work state contradicts.",
@@ -211,6 +230,13 @@ export function buildRegenerationPrompt(
     "<execution_ledger>",
     renderLedgerJson(ledger),
     "</execution_ledger>",
+    "",
+    "<read_evidence>",
+    clip(
+      readEvidence ?? "NO CANONICAL READS RAN THIS TURN",
+      READ_EVIDENCE_CHAR_CAP,
+    ),
+    "</read_evidence>",
     "",
     "<work_state>",
     clip(workState ?? "NO DELEGATED WORK EXISTS (canonical work state is empty)", WORK_STATE_CHAR_CAP),
@@ -226,9 +252,9 @@ export function buildRegenerationPrompt(
     "",
     "The finding is an established fact from the execution ledger or the work state — treat it as ground truth; never dispute, re-litigate, or soften it. Write the truthful final reply:",
     "- ledger statuses are what happened: applied = done; parked/queued = offered or queued, NOT done and NOT underway; failed/rejected = did NOT happen, and the reply must say so plainly (\"that didn't land — nothing was set\" class).",
-    "- the work state is what work exists: a claim that work is underway/progressing/finished is true ONLY if the work state shows it; if it shows NO WORK EXISTS, the reply must say plainly that nothing is set up. Never re-narrate work claims from the draft the work state does not support.",
+    "- the read evidence is what the owner data contains: claims about lists, items, counts, times, and senders must match it; if it lists items the draft called absent, the reply must state the actual items.",
     "- keep everything in the draft the ledger AND the work state do not contradict.",
-    "- at most 1500 characters.",
+    "- keep everything in the draft the ledger, the read evidence, AND the work state do not contradict.",
     "- never mention verification, findings, drafts, ledgers, or any internal mechanics to the user — the user sees only this final reply, as though it were the only draft.",
     "",
     "Output ONLY the regenerated reply text — no JSON, no explanation.",

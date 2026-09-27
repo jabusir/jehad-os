@@ -482,7 +482,7 @@ describe("gmail.search + gmail.read execution (no-DB fake executor)", () => {
     expect(result.tool).toBe("gmail.search");
     expect(result.source).toBe("gmail");
     expect(result.coverage).toBe(
-      "Gmail (your connected account): keyword match over subject, sender, and body text, last 7 days only; not full mail search (no operators, no attachments)",
+      "Gmail (your connected account): keyword match over subject, sender, and body text, last 7 days only; not full mail search (no operators, no attachments); to open a specific result use gmail.read with its messageId",
     );
     const data = result.data as {
       timezone: string;
