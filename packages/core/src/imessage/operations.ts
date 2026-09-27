@@ -1279,7 +1279,31 @@ async function executeReminderReply(
     kind: op.kind,
     at: ctx.now.toISOString(),
   });
-  return { status: "applied", id: row.id, detail: op.kind };
+  // Grounded detail (verifier/judge + user truth): name the reminder and,
+  // for renegotiate, the NEW date the canonical writer actually set.
+  const title = row.title.slice(0, 60);
+  if (op.kind === "renegotiate" && op.whenText !== null) {
+    const when = resolveWhenWords(op.whenText, ctx.now);
+    const target = when !== null ? rollForwardPastTime(when.dueDate, when.dueTime, ctx.now) : null;
+    return {
+      status: "applied",
+      id: row.id,
+      detail:
+        target !== null
+          ? `reminder "${title}" moved to ${target.dueDate}${target.dueTime !== null ? ` ${String(target.dueTime.hour).padStart(2, "0")}:${String(target.dueTime.minute).padStart(2, "0")}` : ""}`
+          : `reminder "${title}" renegotiate deferred (no resolvable time given)`,
+    };
+  }
+  return {
+    status: "applied",
+    id: row.id,
+    detail:
+      op.kind === "done"
+        ? `reminder "${title}" completed${row.commitmentId !== null ? " (its linked to-do is done too)" : ""}`
+        : op.kind === "stop"
+          ? `reminder "${title}" stopped`
+          : `reminder "${title}" ${op.kind}`,
+  };
 }
 
 // ------------------------------------------------------ commitment_transition
@@ -1553,11 +1577,18 @@ export async function executeOperation(
               detail: `${selectorDetail("selector-ambiguous", resolution.searched)} → ${resolution.candidates.join(" | ").slice(0, 120)}`,
             };
           }
-          return await executeCommitmentTransition(
+          const transitioned = await executeCommitmentTransition(
             db,
             { type: "commitment_transition", commitmentId: resolution.value.commitmentId, verb: op.verb, note: op.note },
             ctx,
           );
+          if (transitioned.status === "applied") {
+            return {
+              ...transitioned,
+              detail: `commitment "${resolution.value.description.slice(0, 60)}" → ${op.verb}${transitioned.detail !== undefined ? ` (${transitioned.detail})` : ""}`,
+            };
+          }
+          return transitioned;
         }
         return await executeCommitmentTransition(db, op, ctx);
       }
@@ -1576,11 +1607,18 @@ export async function executeOperation(
               detail: `${selectorDetail("selector-ambiguous", resolution.searched)} → ${resolution.candidates.join(" | ").slice(0, 120)}`,
             };
           }
-          return await executeOccurrenceUpdate(
+          const updated = await executeOccurrenceUpdate(
             db,
             { type: "occurrence_update", calendarEventId: resolution.value.calendarEventId, happened: op.happened },
             ctx,
           );
+          if (updated.status === "applied") {
+            return {
+              ...updated,
+              detail: `event "${resolution.value.summary.slice(0, 60)}" → ${op.happened ? "happened" : "missed"}${updated.detail !== undefined ? ` (${updated.detail})` : ""}`,
+            };
+          }
+          return updated;
         }
         return await executeOccurrenceUpdate(db, op, ctx);
       }

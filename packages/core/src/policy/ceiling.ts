@@ -1001,12 +1001,12 @@ export function parsePolicyV1(text: string): PolicyV1 {
       if (key === "provider_retry") {
         // The gateway section parses scalar values as strings (same as
         // routing) — accept the boolean or its string form.
-        const bool = value === true || value === "true";
-        if (!bool && value !== false && value !== "false") {
-          throw new Error(`policy: gateway.provider_retry must be a boolean, got '${String(value)}'`);
+        const raw = String(value);
+        if (raw !== "true" && raw !== "false") {
+          throw new Error(`policy: gateway.provider_retry must be a boolean, got '${raw}'`);
         }
         if (gatewayProviderRetry !== null) throw new Error("policy: duplicate gateway.provider_retry key");
-        gatewayProviderRetry = bool;
+        gatewayProviderRetry = raw === "true";
         continue;
       }
       throw new Error(`policy: unknown gateway key '${key}'`);

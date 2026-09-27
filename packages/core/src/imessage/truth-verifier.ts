@@ -119,9 +119,11 @@ export function buildVerificationPrompt(
   reply: string,
   ledger: readonly LedgerEntry[],
   workState?: string,
+  todayLine?: string,
 ): string {
   return [
     "You are verifying a draft assistant reply against the execution ledger of what this turn's actions actually did.",
+    ...(todayLine !== undefined ? [todayLine] : []),
     "",
     "<draft_reply>",
     clip(reply, DRAFT_REPLY_CHAR_CAP),
@@ -135,7 +137,7 @@ export function buildVerificationPrompt(
     clip(workState ?? "NO DELEGATED WORK EXISTS (canonical work state is empty)", WORK_STATE_CHAR_CAP),
     "</work_state>",
     "",
-    'The execution ledger is ground truth for ACTION claims; the work state is ground truth for WORK claims. Judge ACTION claims: whether the reply\'s statements about operations and proposal resolutions — mutations, resolutions, and their outcomes, INCLUDING failed and rejected attempts — match the ledger. An EMPTY ledger ([]) means NO action ran this turn: any claim that the reply set, created, tracked, scheduled, reminded, changed, or completed something contradicts. Judge WORK claims: statements that work/projects/research/delegation exists, is underway, in progress, paused, or finished — and any deadline, checkpoint, or timeline attached to them — are true ONLY if the work_state shows it. Ledger parked/queued is an OFFER or queued work, never "underway" or "started". History, memory, or the user having discussed an idea NEVER establishes that work exists; work_state saying NO WORK EXISTS + any work-existence claim contradicts. Substantive findings claims ("we found three viable verticals") are truthful only with verified criteria in work_state; "an assignment completed and produced an artifact" is the honest form otherwise. A reply that only offers, asks, recommends, or explains makes no action claim. Do not judge style, vocabulary, tone, opinions, or any other non-action content; a reply making no action or work claim is consistent.',
+    'The execution ledger is ground truth for ACTION claims; the work state is ground truth for WORK claims. Judge ACTION claims: whether the reply\'s statements about operations and proposal resolutions — mutations, resolutions, and their outcomes, INCLUDING failed and rejected attempts — match the ledger. An EMPTY ledger ([]) means NO action ran this turn: any claim that the reply set, created, tracked, scheduled, reminded, changed, or completed something contradicts. Judge WORK claims: statements that DELEGATED work (multi-day projects, research, assignments, outcomes) exists, is underway, in progress, paused, or finished — and any deadline, checkpoint, or timeline attached to them — are true ONLY if the work_state shows it. Ordinary to-dos, reminders, and calendar events are NOT delegated work: claims about them are ACTION claims judged against the ledger, never against work_state. Ledger parked/queued is an OFFER or queued work, never "underway" or "started". History, memory, or the user having discussed an idea NEVER establishes that work exists; work_state saying NO WORK EXISTS + any work-existence claim contradicts. Substantive findings claims ("we found three viable verticals") are truthful only with verified criteria in work_state; "an assignment completed and produced an artifact" is the honest form otherwise. A reply that only offers, asks, recommends, or explains makes no action claim — including general explanations of how the assistant or its features work ("reminders work by..."), which say nothing about THIS turn actions. Do not judge style, vocabulary, tone, opinions, or any other non-action content; a reply making no action or work claim is consistent.',
     "",
     "Respond with EXACTLY one line of JSON and no other text — no markdown fences, no prose:",
     '{"verdict":"consistent"}',
@@ -196,9 +198,11 @@ export function buildRegenerationPrompt(
   finding: string,
   draftReply: string,
   workState?: string,
+  todayLine?: string,
 ): string {
   return [
     "Regenerate the final user-facing reply for this turn. Your draft made a claim the execution ledger or the canonical work state contradicts.",
+    ...(todayLine !== undefined ? [todayLine] : []),
     "",
     "<original_context>",
     clip(originalContextSummary, REGENERATION_CONTEXT_CHAR_CAP),

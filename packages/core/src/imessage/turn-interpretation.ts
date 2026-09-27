@@ -543,7 +543,7 @@ function renderOutcomeSpecOffer(
   if (proposal.deadline_days !== null) extras.push(`due in ${proposal.deadline_days} day${proposal.deadline_days === 1 ? "" : "s"}`);
   const extrasText = extras.length > 0 ? ` (${extras.join(", ")})` : "";
   const cta = behaviors.preferNextAction ? " Want me to start it?" : "";
-  return `Staged as a delegated outcome: "${proposal.title}"${extrasText} — done means: ${done}.${cta}`;
+  return `Staged as a delegated outcome: "${proposal.title}"${extrasText} — success criteria: ${done}.${cta}`;
 }
 
 /**
@@ -1583,7 +1583,7 @@ export async function applyOutcomeSpec(
   return {
     applied: true,
     reply:
-      `Outcome ${created.outcome.ref} accepted — "${created.outcome.title}", done means: ${created.criteria[0]!.criterion}` +
+      `Outcome ${created.outcome.ref} accepted — "${created.outcome.title}", success criteria: ${created.criteria[0]!.criterion}` +
       (n > 1 ? ` (+${n - 1} more)` : "") +
       `.${dispatchNote} I'll surface progress in your briefs and only interrupt you if it needs judgment.`,
     ref: created.outcome.ref,

@@ -232,8 +232,10 @@ describe.skipIf(!TEST_DATABASE_URL)("cognitive turn reliability wave (goals 1-4,
     // Round 0 dispatches the ROUTE pass model from the fixture policy —
     // NOT the principal fallback (openai/gpt-4o-mini).
     expect(requests[0]!.model).toBe("openai/gpt-4.1");
-    // The verify pass dispatches the STANDARD model.
-    expect(requests[1]!.model).toBe("anthropic/claude-sonnet-4.5");
+    // The verify pass dispatches the STRICT-JSON verdict model (fast) —
+    // shell-trust R3: sonnet's 55.6% strict-JSON class made the fail-closed
+    // verifier terminal fire on flakiness; verdicts ride the 97.2% model.
+    expect(requests[1]!.model).toBe("openai/gpt-4.1");
     // The persona fragment and a consistent self-brief are in the prompt.
     expect(requests[0]!.prompt).toContain("Be terse.");
     expect(requests[0]!.prompt).toContain("(active profile v1)");
@@ -241,7 +243,7 @@ describe.skipIf(!TEST_DATABASE_URL)("cognitive turn reliability wave (goals 1-4,
     const calls = await db.pool.query(`SELECT model FROM model_calls ORDER BY created_at`);
     expect(calls.rows.map((r: { model: string }) => r.model)).toEqual([
       "openai/gpt-4.1",
-      "anthropic/claude-sonnet-4.5",
+      "openai/gpt-4.1",
     ]);
   });
 

@@ -50,7 +50,8 @@ const SELECTOR_STOPWORDS: ReadonlySet<string> = new Set([
   "the", "a", "an", "my", "your", "that", "this", "these", "those", "it", "its",
   "is", "was", "are", "were", "be", "been", "to", "for", "of", "on", "in",
   "at", "and", "or", "with", "about", "thing", "things", "stuff", "item",
-  "items", "one", "please", "just", "actually",
+  "items", "one", "please", "just", "actually", "task", "tasks", "todo",
+  "todos", "chore", "errand",
 ]);
 
 /** Clock-like tokens ("3pm", "15:00", "noon") — structural time noise on

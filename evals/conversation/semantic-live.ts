@@ -32,7 +32,7 @@ import {
   collectWorkState,
   renderWorkSnapshotText,
 } from "@jehad/core";
-import type { CognitiveOperation, OperationResult } from "@jehad/core";
+import type { CognitiveOperation, LedgerEntry, OperationResult } from "@jehad/core";
 import { migrateUp, seedDomains } from "@jehad/db";
 import { createIsolatedTestDb, dropIsolatedTestDb } from "../../packages/db/tests/test-db.js";
 import {
@@ -50,6 +50,11 @@ const SPEND_CEILING_USD = 8;
 const NOW = new Date("2026-09-25T17:00:00.000Z"); // 10:00 AM PDT Friday
 const TOMORROW = "2026-09-26";
 const PRINCIPAL_NAME = "josctl"; // the real policy's conversational principal
+// R5: the judges ride the PRODUCTION verdict model (the strict-JSON fast
+// pass) with the PRODUCTION prompt — truthful_ack then measures exactly what
+// production would ship; a different-family judge second-guessed offers and
+// read claims the production verifier correctly passes.
+const JUDGE_MODEL_FALLBACK = "openai/gpt-4.1";
 
 // ------------------------------------------------------------------- CLI
 
@@ -204,14 +209,14 @@ async function seedCase(db: { pool: unknown }, domainId: string, c: SemanticCase
     for (const content of c.seed.phantomHistory) {
       offset += 2;
       await pool.query(
-        `INSERT INTO interaction_messages (id, thread_id, principal_id, surface, direction, trust_class, content, received_at)
-         VALUES ($1::uuid, $2::uuid, $3::uuid, 'imessage', 'outbound', 'assistant_output', $4, $5::timestamptz)`,
-        [randomUUID(), thread.id, principalId, content, new Date(NOW.getTime() - offset * 3_600_000).toISOString()],
+        `INSERT INTO interaction_messages (id, thread_id, principal_id, surface, direction, trust_class, content, token_estimate, received_at, expires_at)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, 'imessage', 'outbound', 'assistant_output', $4, 0, $5::timestamptz, $6::timestamptz)`,
+        [randomUUID(), thread.id, principalId, content, new Date(NOW.getTime() - offset * 3_600_000).toISOString(), new Date(NOW.getTime() + 7 * 86_400_000).toISOString()],
       );
       await pool.query(
-        `INSERT INTO interaction_messages (id, thread_id, principal_id, surface, direction, trust_class, content, received_at)
-         VALUES ($1::uuid, $2::uuid, $3::uuid, 'imessage', 'inbound', 'authenticated_user_intent', $4, $5::timestamptz)`,
-        [randomUUID(), thread.id, principalId, "any progress on this?", new Date(NOW.getTime() - (offset - 1) * 3_600_000).toISOString()],
+        `INSERT INTO interaction_messages (id, thread_id, principal_id, surface, direction, trust_class, content, token_estimate, received_at, expires_at)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, 'imessage', 'inbound', 'authenticated_user_intent', $4, 0, $5::timestamptz, $6::timestamptz)`,
+        [randomUUID(), thread.id, principalId, "any progress on this?", new Date(NOW.getTime() - (offset - 1) * 3_600_000).toISOString(), new Date(NOW.getTime() + 7 * 86_400_000).toISOString()],
       );
     }
   }
@@ -268,6 +273,7 @@ async function main(): Promise<void> {
   if (apiKey === "") throw new Error("OPENROUTER_API_KEY is not set (env or launchctl)");
 
   const corpus = loadSemanticCorpus(corpusFile);
+  const judgeModel = (await loadRepoPolicy()).policy?.gateway?.passes?.route?.model ?? JUDGE_MODEL_FALLBACK;
   const cases = corpus.cases.slice(0, Number.isFinite(limit) ? limit : corpus.cases.length);
 
   const db = await createIsolatedTestDb(databaseUrl, `semantic_${split}_${Date.now() % 100000}`);
@@ -336,14 +342,26 @@ async function main(): Promise<void> {
       break;
     }
     // Hermetic world per case: full reset of the mutable canonical tables.
+    // (R2 links outcomes→threads via source_thread_id: children first.)
     await db.pool.query(`
       DELETE FROM model_calls; DELETE FROM notifications; DELETE FROM reminders;
+      DELETE FROM assignments; DELETE FROM outcome_criteria; DELETE FROM outcomes;
       DELETE FROM commitments; DELETE FROM calendar_events; DELETE FROM events;
       DELETE FROM interaction_messages; DELETE FROM interaction_threads;
-      DELETE FROM memory_candidates; DELETE FROM outcomes; DELETE FROM audit_log;
+      DELETE FROM memory_candidates; DELETE FROM audit_log;
       DELETE FROM runs; DELETE FROM gmail_messages; TRUNCATE interaction_profiles;
     `);
     await seedCase(db as never, domainId, c);
+    // The runner-side judges call callModel, which requires a LIVE runs row
+    // — minted per case (the per-case reset wipes runs; a pre-loop row
+    // dangles and every judge call fails — pre-R5 the fail-open hid this).
+    const judgeRun = await db.pool.query(
+      `INSERT INTO runs (kind, principal_id, status, intent, domain_id, started_at, ended_at, created_at, updated_at)
+       VALUES ('harness', $1::uuid, 'completed', 'semantic eval judge', $2::uuid, $3::timestamptz, $3::timestamptz, $3::timestamptz, $3::timestamptz)
+       RETURNING id`,
+      [cachedPrincipalId, domainId, NOW.toISOString()],
+    );
+    const judgeRunId = String(judgeRun.rows[0]!.id);
 
     const executedReads: string[] = [];
     const observedOps: { op: CognitiveOperation; result: OperationResult }[] = [];
@@ -386,6 +404,7 @@ async function main(): Promise<void> {
     const turnFailures: string[] = [];
     const perTurnOps: { type: string }[][] = [];
     let confirmToken: string | null = null;
+    let laneDispatchObserved = false;
     const turns = c.turns !== undefined ? c.turns : [{ user: c.user! }];
     try {
       for (const [turnIndex, turn] of turns.entries()) {
@@ -404,6 +423,20 @@ async function main(): Promise<void> {
           const row = await db.pool.query(`SELECT payload->>'content' AS c FROM notifications WHERE id = $1::uuid`, [outcome.notificationId]);
           const content = typeof row.rows[0]?.["c"] === "string" ? String(row.rows[0]!["c"]) : null;
           if (turnIndex === turns.length - 1) reply = content;
+        }
+        // Deterministic-lane turns (the R2 confirm/cancel token lane) carry
+        // no cognitive ledger — synthesize the applied op from the lane's
+        // audit row so the judge sees the TRUE canonical effect.
+        const laneConfirmed = await db.pool.query(
+          `SELECT outputs_ref::jsonb AS o FROM audit_log
+            WHERE action = 'imessage.outcome_token.confirmed' ORDER BY occurred_at DESC LIMIT 1`,
+        );
+        if (laneConfirmed.rows[0] !== undefined && laneConfirmed.rows[0]!.o["applied"] === true) {
+          ledger = [...ledger, {
+            opType: "outcome_spec",
+            status: "applied",
+          }];
+          laneDispatchObserved = true;
         }
         // Capture the runtime-minted confirm token for later turns.
         if (confirmToken === null) {
@@ -439,6 +472,14 @@ async function main(): Promise<void> {
       );
       if (audit.rows[0] !== undefined) {
         verified = String(JSON.parse(String(audit.rows[0]!.outputs_ref)).verified ?? "unknown");
+      }
+      const flaggedRow = await db.pool.query(
+        `SELECT outputs_ref FROM audit_log WHERE action = 'cognitive.turn_flagged' ORDER BY occurred_at DESC LIMIT 1`,
+      );
+      if (verified === "availability-notice" && flaggedRow.rows[0] !== undefined) {
+        const flagged = JSON.parse(String(flaggedRow.rows[0]!.outputs_ref));
+        if (String(flagged["verified"]) === "contradicted_unresolved") turnFailures.push(`flagged: contradicted_unresolved (draft lied twice): ${String(flagged["draft"] ?? "").slice(0, 120)}`);
+        else turnFailures.push(`flagged: ${String(flagged["verified"])} — verifier leg failed after retries`);
       }
       const failed = await db.pool.query(
         `SELECT outputs_ref FROM audit_log WHERE action = 'cognitive.turn_failed' ORDER BY occurred_at DESC LIMIT 1`,
@@ -578,7 +619,35 @@ async function main(): Promise<void> {
     // can silently pass cannot certify a hard-zero bar).
     let judgeUnavailable = false;
     if (reply !== null) {
-      const ledgerEntries = ledger.map((l) => ({ kind: "operation" as const, opType: l.opType, status: l.status as never }));
+      // Judge at PRODUCTION fidelity: the verify ladder passes ledger
+      // entries WITH detail — a detail-less ledger made the judge flag
+      // true replies (parked batches "awaiting confirmation", applied
+      // transitions "marked missed") it could not ground.
+      const ledgerEntries: LedgerEntry[] =
+        observedOps.map((o) => ({
+          kind: "operation" as const,
+          opType: o.op.type,
+          status: o.result.status,
+          ...(o.result.detail !== undefined ? { detail: o.result.detail } : {}),
+        }));
+      for (const l of ledger) {
+        if (l.opType !== "outcome_spec" && ledgerEntries.some((e) => e.opType === l.opType)) continue;
+        if (l.opType === "outcome_spec" && l.status === "applied" && laneDispatchObserved) {
+          ledgerEntries.push({
+            kind: "operation",
+            opType: "outcome_spec",
+            status: "applied",
+            detail: "outcome accepted; dispatch observed — the executor picked it up, queued to run (not running yet)",
+          });
+          continue;
+        }
+        ledgerEntries.push({
+            kind: "operation",
+            opType: l.opType,
+            status: l.status as LedgerEntry["status"],
+            ...((l as { detail?: string }).detail !== undefined ? { detail: (l as { detail?: string }).detail } : {}),
+          });
+      }
       const workSnapshot = renderWorkSnapshotText(
         await collectWorkState(db.pool as never, { principalId: cachedPrincipalId, now: NOW }),
       );
@@ -587,11 +656,17 @@ async function main(): Promise<void> {
           domainId: "personal",
           sensitivity: "normal",
           provider: "openrouter",
-          model: "google/gemini-2.5-flash",
-          prompt: buildVerificationPrompt(reply, ledgerEntries, workSnapshot),
+          model: judgeModel,
+          prompt: buildVerificationPrompt(
+              reply,
+              ledgerEntries,
+              workSnapshot,
+              `Today is Friday, September 25, 2026 (America/Los_Angeles); tomorrow is Saturday, Sep 26. Judge relative-date claims against this anchor.`,
+            ),
           promptVersion: "semantic-truth-judge-r5",
           principalId: cachedPrincipalId,
           surface: "imessage",
+          runId: judgeRunId,
         });
         caseCost += verdictCall.costUsd;
         return parseVerificationVerdict(verdictCall.result.text);
@@ -658,11 +733,12 @@ async function main(): Promise<void> {
             domainId: "personal",
             sensitivity: "normal",
             provider: "openrouter",
-            model: "google/gemini-2.5-flash",
+            model: judgeModel,
             prompt,
             promptVersion: "semantic-read-judge-r5",
             principalId: cachedPrincipalId,
             surface: "imessage",
+            runId: judgeRunId,
           });
           caseCost += readCall.costUsd;
           const verdict = parseVerificationVerdict(readCall.result.text);

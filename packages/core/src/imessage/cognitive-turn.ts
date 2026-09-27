@@ -55,6 +55,7 @@ import {
   seedProfile,
 } from "./profiles.js";
 import { collectSelfBrief, renderSelfBrief } from "../queries/system-self-brief.js";
+import { BRIEF_TIMEZONE } from "../briefs/timezone.js";
 import { collectWorkState, renderWorkSnapshotText } from "../queries/work-state.js";
 import {
   executeReadTool,
@@ -170,12 +171,12 @@ const ENVELOPE_CONTRACT = [
   '{"reads_requested":[{"tool":"<name>"}],"operations_requested":[{"type":"<op>", ...}],"proposal_resolutions":[{"id":"<type>:<hex>","action":"apply|decline"}],"interpretation":"<your one-line reading>","intent":"question|directive|preference|correction|feedback|delegation|capability|chat","reply":"<final reply — ONLY when you need nothing else>"}',
   "Include EVERY key every time (empty arrays are fine). Omit only \"reply\" when not final.",
   "reads_requested: tools from the READ CATALOG below (≤3 per round). WHEN THE USER ASKS ABOUT THEIR OWN DATA — calendar, to-dos, email, what's due, their day — ALWAYS request the read FIRST and answer from its results; never say you lack information a catalog tool provides. A read that RETURNS data is ground truth over the SELF-BRIEF's connectivity summary.",
-  "operations_requested: ≤4 typed operations, ONLY on the user's own instruction THIS TURN — your ONE chance (later rounds and post-read envelopes reject them). Operation forms:",
+  "operations_requested: ≤4 typed operations, ONLY on the user's own instruction THIS TURN — your ONE chance (later rounds and post-read envelopes reject them). If the user asks to set, move, complete, stop, or change anything, emit the op IMMEDIATELY on this round — requesting a read first CLOSES your chance to act. Operation forms:",
   '- {"type":"reminder_create","title":"X","whenWords":"<ONLY their time words, e.g. \'tomorrow at 2pm\'; null when they gave none>","dueDate":"<YYYY-MM-DD when you can derive it, else null>","dueTime":{"hour":H,"minute":M} (or null)} — "remind me / ping me / don\'t let me forget X". The system resolves whenWords; fill dueDate/dueTime yourself when the user\'s words make them clear ("tomorrow around two" → your best date+time).',
   '- {"type":"task_batch","items":[{"title":"...","due":"<their due words|null>"}]} — the user lists to-dos for themselves (parks as an offer; ask them to confirm).',
   '- {"type":"commitment_transition","target":{"text":"<the distinctive words NAMING their to-do — drop times and filler like \'3pm\'/\'thing\'; e.g. \'dentist\', \'seating chart\'>"},"verb":"done|missed|renegotiated","note":null} — the user says one of their to-dos is done / was missed / is moved. Emit it NOW on this round — do NOT read first (a read ends your chance to act); the system matches their words against their open to-dos and the result tells you what matched or lists candidates when ambiguous.',
   '- {"type":"occurrence_update","target":{"text":"<the distinctive words naming their SCHEDULED EVENT — gym, dentist, a meeting on the calendar>"},"happened":true|false} — the user says a scheduled calendar event happened or was skipped. Same rule: act now, never read first.',
-  '- {"type":"reminder_reply","target":{"checkIn":"live"},"kind":"done|stop|not_done|renegotiate","whenText":"<their new time words|null>"} — answering a LIVE CHECK-IN, or moving/stopping a reminder (use "target":{"text":"..."} to pick among several).',
+  '- {"type":"reminder_reply","target":{"checkIn":"live"},"kind":"done|stop|not_done|renegotiate","whenText":"<their new time words|null>"} — answering a LIVE CHECK-IN ("done", a new time, "stop"), or moving/stopping a reminder (use "target":{"text":"..."} to pick among several). When the LIVE CHECK-INS block lists the item, prefer reminder_reply — it resolves the check-in (and any linked to-do); emit it NOW, never read first.',
   '- {"type":"profile_update",<exactly ONE of "addressOwnerName":"..."|"removeAddress":true|"toneNote":"..."|"brevityMaxSentences":N|"extraDirective":"...">} — the user asks to be called something, OR changes how you talk: tone ("be more playful"), verbosity/sentence-length ("one sentence replies" → brevityMaxSentences) — these are changes, not chat.',
   '- {"type":"memory_candidate","summary":"..."} — a major life fact worth remembering across days ("tomorrow is my wedding day").',
     '- {"type":"outcome_spec","title":"...","directive":"<their words>","criteria":["..."],"budget_usd":null,"deadline_days":null} — the user delegates research/work to a worker. It STAGES as an offer with a confirm token in the result; ask them to confirm by typing confirm + the token, and never say the work is running until it is accepted (result says staged/NOT started).',
@@ -185,15 +186,32 @@ const ENVELOPE_CONTRACT = [
   "TRUTH RULE: never state that you set, created, tracked, scheduled, reminded, or changed ANYTHING unless its OPERATION RESULT appears in your context this turn. \"I\'ll remind you at 2 PM\" is a LIE unless reminder_create returned applied. If you did not or could not run it, say what you actually did (\"I haven\'t set that up — say the word and I will\") or run the operation now.",
 ].join("\n");
 
+function todayLine(now: Date): string {
+  const today = new Intl.DateTimeFormat("en-US", {
+    timeZone: BRIEF_TIMEZONE,
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).format(now);
+  const tomorrow = new Intl.DateTimeFormat("en-US", {
+    timeZone: BRIEF_TIMEZONE,
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(now.getTime() + 36 * 3_600_000));
+  return `Today is ${today} (${BRIEF_TIMEZONE}); tomorrow is ${tomorrow}. Resolve every relative date word against THIS anchor.`;
+}
+
 function renderCatalog(): string {
   return [
     "READ CATALOG (tool + required args — copy the arg shape exactly):",
     '- {"tool":"calendar.day","day":"today"} (or "tomorrow")',
     '- {"tool":"calendar.next"}',
-    '- {"tool":"commitments.waiting"}',
+    '- {"tool":"commitments.waiting"} — the to-do list is overdue + dueSoon + open TOGETHER; zero overdue/dueSoon counts do NOT mean the list is empty — read the open[] titles before answering',
     '- {"tool":"gmail.recent"}',
     '- {"tool":"gmail.search","query":"<keywords>"}',
-    '- {"tool":"gmail.read","message_id":"<id from a search result>"}',
+    '- {"tool":"gmail.read","message_id":"<id from a search result>"} — "open that one / what did it say" after a gmail.search: the ids ride your context (search results or the gmail.search reference line)',
     '- {"tool":"day.state"}',
     '- {"tool":"memory.recall"}',
     '- {"tool":"system.state"}',
@@ -234,7 +252,17 @@ function renderPendingProposals(metadata: ReturnType<typeof pendingWithDerivedId
   const lines = ["PENDING OFFERS (yours, from earlier turns — ids for resolutions):"];
   for (const p of metadata.pendingProposals) {
     const expired = p.expiresAt !== undefined && isPendingExpired(p, new Date());
-    const label = p.offered.slice(0, 120);
+    let label = p.offered.slice(0, 120);
+    // R5 finding: a confirmable batch must SHOW its items — the model
+    // cannot meaningfully confirm (or the user, via the model's ask) a
+    // list it cannot see.
+    if (p.type === "task_batch") {
+      const items = (p.payload as { items?: { title?: string }[] } | null)?.items ?? [];
+      const titles = items.slice(0, 3).map((i) => String(i.title ?? "")).filter((t) => t.length > 0);
+      if (titles.length > 0) {
+        label = `${label} — items: ${titles.join("; ").slice(0, 160)}`;
+      }
+    }
     lines.push(`- ${p.id ?? `${p.type}:????`} (${p.type}${expired ? ", EXPIRED" : ""}): ${label}`);
   }
   return lines;
@@ -267,6 +295,9 @@ async function renderLiveCheckIns(ctx: TurnCtx): Promise<string[]> {
 
 interface PromptInput {
   readonly principalName: string;
+  /** Civil date anchor rendered server-side (BRIEF_TIMEZONE) — the model
+   *  never derives 'today'/'tomorrow' from a UTC instant. */
+  readonly todayLine: string;
   readonly personaFragment: string | null;
   readonly selfBrief: string | null;
   readonly history: WorkingContext | null;
@@ -284,6 +315,7 @@ interface PromptInput {
 function buildCognitivePrompt(input: PromptInput): string {
   const lines: string[] = [
     `You are Jin, the chief of staff chatting over iMessage with ${input.principalName}.`,
+    input.todayLine,
   ];
   if (input.personaFragment !== null) lines.push(input.personaFragment);
   if (input.selfBrief !== null) lines.push(input.selfBrief);
@@ -901,6 +933,7 @@ export async function runCognitiveTurn(
     const final = round >= COGNITIVE_MAX_ROUNDS - 1 || elapsed > COGNITIVE_WALL_CLOCK_MS;
     const prompt = buildCognitivePrompt({
       principalName: ctx.principalName,
+      todayLine: todayLine(ctx.now()),
       personaFragment,
       selfBrief: brief,
       history: ctx.history,
@@ -972,6 +1005,7 @@ export async function runCognitiveTurn(
       // degrade: one recovery round, reply-only
       const degradePrompt = buildCognitivePrompt({
         principalName: ctx.principalName,
+        todayLine: todayLine(ctx.now()),
         personaFragment,
         selfBrief: brief,
         history: ctx.history,
@@ -994,7 +1028,7 @@ export async function runCognitiveTurn(
           // action-claim verification (an empty-handed {"reply": "...I set
           // it..."} is still a claim against an empty ledger).
           let reply = recovered.reply;
-          let verified = await verifyLadder(ctx, reply, ledger, models.standard, models.fallback, workSnapshot, (c) => {
+      let verified = await verifyLadder(ctx, reply, ledger, models.standard, models.fast, models.fallback, workSnapshot, (c) => {
             cost += c;
           });
           if (verified.startsWith("regenerated")) {
@@ -1025,7 +1059,7 @@ export async function runCognitiveTurn(
           // claiming an action that never ran is still a lie.
           await audit(ctx.db, "cognitive.degrade_nonjson", { principalId: ctx.input.principalId });
           let reply = plain;
-          let verified = await verifyLadder(ctx, reply, ledger, models.standard, models.fallback, workSnapshot, (c) => {
+          let verified = await verifyLadder(ctx, reply, ledger, models.standard, models.fast, models.fallback, workSnapshot, (c) => {
             cost += c;
           });
           if (verified.startsWith("regenerated")) {
@@ -1122,6 +1156,26 @@ export async function runCognitiveTurn(
       for (const read of envelope.reads_requested.slice(0, COGNITIVE_MAX_READS - before)) {
         referents.push({ kind: "read", ref: read.tool, label: `${read.tool}` });
       }
+      // Shell-trust R5: a gmail.search mints a referent carrying the top
+      // messageIds — the NEXT turn's "open that one" needs an id to call
+      // gmail.read, and round results never cross turns. Deterministic
+      // plumbing of the tool's own ids, never interpretation.
+      for (const block of roundResults.slice(-envelope.reads_requested.length)) {
+        const match = /^\\[tool gmail\\.search \\| coverage: [^\\]]*\\] (.*)$/s.exec(block);
+        if (match === null) continue;
+        try {
+          const parsed = JSON.parse(match[1]!) as { matches?: { messageId?: string }[] };
+          const ids = (parsed.matches ?? [])
+            .map((m) => m.messageId)
+            .filter((id): id is string => typeof id === "string")
+            .slice(0, 3);
+          if (ids.length > 0) {
+            referents.push({ kind: "read", ref: "gmail.search", label: `gmail.search messageIds (gmail.read {"message_id":"<one>"}): ${ids.join(", ")}` });
+          }
+        } catch {
+          // unparseable block — referent simply absent
+        }
+      }
       round += 1;
       continue;
     }
@@ -1134,7 +1188,7 @@ export async function runCognitiveTurn(
       // empty ledger is handed to the verifier verbatim ([]) and the
       // verifier contract treats any current-turn action claim against []
       // as contradictory. Extra model call per turn accepted.
-      let verified = await verifyLadder(ctx, reply, ledger, models.standard, models.fallback, workSnapshot, (c) => {
+      let verified = await verifyLadder(ctx, reply, ledger, models.standard, models.fast, models.fallback, workSnapshot, (c) => {
         cost += c;
       });
       if (verified.startsWith("regenerated")) {
@@ -1183,6 +1237,7 @@ async function verifyLadder(
   draftReply: string,
   ledger: readonly RoundLedger[],
   model: string,
+  verdictModel: string,
   fallbackModel: string,
   workState: string,
   addCost: (c: number) => void,
@@ -1194,11 +1249,15 @@ async function verifyLadder(
     let verdictDispatched = false;
     for (let dispatchAttempt = 0; dispatchAttempt < 2 && !verdictDispatched; dispatchAttempt += 1) {
       try {
+        // Verdicts are STRICT one-line JSON: they dispatch the fast model
+        // (the 97.2% probe model — §5; sonnet's 55.6% strict-JSON class
+        // made the fail-closed R3.2 terminal fire on verifier flakiness,
+        // not on lying drafts). Regeneration stays on the prose model.
         const dispatched = await dispatchModel(
           ctx,
-          buildVerificationPrompt(reply, ledger, workState),
+          buildVerificationPrompt(reply, ledger, workState, todayLine(ctx.now())),
           COGNITIVE_VERIFY_PROMPT_VERSION,
-          dispatchAttempt === 0 ? model : fallbackModel,
+          dispatchAttempt === 0 ? verdictModel : fallbackModel,
         );
         addCost(dispatched.costUsd);
         verdictText = dispatched.text;
@@ -1216,9 +1275,9 @@ async function verifyLadder(
       try {
         const retried = await dispatchModel(
           ctx,
-          buildVerificationPrompt(reply, ledger, workState),
+          buildVerificationPrompt(reply, ledger, workState, todayLine(ctx.now())),
           COGNITIVE_VERIFY_PROMPT_VERSION,
-          model,
+          verdictModel,
         );
         addCost(retried.costUsd);
         verdict = parseVerificationVerdict(retried.text);
@@ -1235,7 +1294,7 @@ async function verifyLadder(
       try {
         const regen = await dispatchModel(
           ctx,
-          buildRegenerationPrompt(contextSummary(ctx), ledger, verdict.finding, reply, workState),
+          buildRegenerationPrompt(contextSummary(ctx), ledger, verdict.finding, reply, workState, todayLine(ctx.now())),
           COGNITIVE_REGEN_PROMPT_VERSION,
           model,
         );
@@ -1250,7 +1309,7 @@ async function verifyLadder(
       try {
         await dispatchModel(
           ctx,
-          buildRegenerationPrompt(contextSummary(ctx), ledger, findings.join(" | "), reply, workState) +
+          buildRegenerationPrompt(contextSummary(ctx), ledger, findings.join(" | "), reply, workState, todayLine(ctx.now())) +
             "\nFINAL ROUND: produce the truthful reply now.",
           COGNITIVE_TURN_FINAL_PROMPT_VERSION,
           model,

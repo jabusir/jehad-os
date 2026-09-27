@@ -508,7 +508,7 @@ describe("outcome_spec proposals (DELEGATE intake, D0 finisher)", () => {
       { type: "outcome_spec", ...valid, criteria: ["the review covers all findings", "owner signs off"] },
     ]);
     expect(offer).toBe(
-      'Staged as a delegated outcome: "Plaid security review" (budget $2, due in 7 days) — done means: the review covers all findings (+1 more). Want me to start it?',
+      'Staged as a delegated outcome: "Plaid security review" (budget $2, due in 7 days) — success criteria: the review covers all findings (+1 more). Want me to start it?',
     );
   });
 
@@ -517,7 +517,7 @@ describe("outcome_spec proposals (DELEGATE intake, D0 finisher)", () => {
       { type: "outcome_spec", ...valid, budget_usd: null, deadline_days: null, criteria: ["done state"] },
     ]);
     expect(offer).toBe(
-      'Staged as a delegated outcome: "Plaid security review" — done means: done state. Want me to start it?',
+      'Staged as a delegated outcome: "Plaid security review" — success criteria: done state. Want me to start it?',
     );
   });
 });
