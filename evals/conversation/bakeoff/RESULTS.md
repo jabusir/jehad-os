@@ -1,50 +1,53 @@
-# Model bake-off — 2026-09-27 (partial: blocked on account credits)
+# Model bake-off — FINAL (2026-09-27, credits restored mid-matrix)
 
-Directive: 3 dev runs each for gpt-5.6-luna / gpt-5.6-terra / gpt-5.6-sol /
-gemini-3.8-flash / claude-sonnet-5; gpt-6-astra ×1 diagnostic ceiling.
-Prompt/architecture/config frozen (only the route model pin swapped per
-candidate; the truth judge pinned to gpt-4.1 across all runs via
-JUDGE_MODEL for comparability). Holdout untouched.
+Directive: 3 dev runs each for the five production candidates, gpt-6-astra
+×1 as diagnostic ceiling. Prompt/architecture/config frozen throughout
+(route model pin swapped per candidate; truth judge pinned to gpt-4.1 via
+JUDGE_MODEL for cross-candidate comparability). Holdout untouched. Hard
+trust classes (unauthorized mutation, phantom work) held at **zero for
+every candidate in every run**.
 
-## Results
+## Ranking (common-control semantic success, then latency/cost)
 
-| candidate | runs | common-control | case pass | envelope | avg latency | $/run | trust zeros |
+| rank | candidate | cc% (3 runs) | case% | envelope | latency | $/run | false-acks |
 |---|---|---|---|---|---|---|---|
-| gpt-4.1 (incumbent, dev16 baseline) | 1 | 76.0% | 76.7% | 93% | 3.9s | 1.30 | held |
-| gpt-5.6-luna | 2 credible + 1 credit-degraded | **76.0% / 68.0%** | 81.7% / 76.7% | 98% / 90% | 6.6–6.9s | 0.54–0.68 | held (unauth=0, phantom=0) |
-| gpt-5.6-terra | 3 | **INFEASIBLE** — provider rejects every request: default max_tokens 65536 exceeds the account's per-request credit authorization ("can only afford 52725") | | | ~20s (all fail-closed notices) | ~0.01 | n/a |
-| gpt-5.6-sol | 3 | **INFEASIBLE** — same credits gate (65536 vs 30996 affordable) | | | ~20s | ~0.01 | n/a |
-| gemini-3.8-flash | 1 partial + 2 blocked | 52.0% (partial; 38% envelope, 20s latency — provider-throttled) then hard credits block | | | 20s | 0.45 | n/a |
-| claude-sonnet-5 | 0 | **NOT RUN** — credits exhausted first | | | | | |
-| gpt-6-astra | 0 | **NOT RUN** — credits exhausted first | | | | | |
+| diag | **gpt-6-astra** (ceiling, 1 run) | **88.0** | 78.3 | 88% | 10.6s | 4.64 | 2 |
+| 1 | **gpt-5.6-sol** | **81.3** (80/88/76) | 83.3 | 98% | 7.6s | 1.62 | 8 |
+| 1 | **claude-sonnet-5** | **81.3** (80/84/80) | 78.3 | 94% | 10.8s | 1.83 | 15 |
+| 3 | gpt-4.1 (incumbent) | 76.0 | 76.7 | 93% | **3.9s** | 1.30 | 4 |
+| 4 | gpt-5.6-luna | 74.7 (76/68/80) | 80.6 | 94% | 6.7s | **0.66** | 12 |
+| 5 | gpt-5.6-terra | 72.0 (68/76/72) | 75.6 | 88% | 6.2s | 1.57 | 9 |
 
-Account at stop: **$0.24 of $25 remaining** (openrouter /api/v1/credits).
+(terra runs 1–3 / sol runs 1–3 / gemini runs 2–3 / luna run 3 from the
+credit-blocked phase are excluded — authorization-gate artifacts, not
+semantic results. gemini-3.8-flash stays disqualified: 38% envelope on its
+one unblocked-tail run.)
 
-## Findings
+## Read
 
-1. **The matrix is blocked on OpenRouter credits, not on models.** Terra
-   and Sol cannot be AUTHORIZED under the frozen architecture: the adapter
-   sends no max_tokens, these models default to 65536 output tokens, and
-   OpenRouter's pre-flight affordability check rejects the request against
-   the remaining balance. Working around it needs either a credit top-up
-   or an adapter max_tokens cap (architecture change — frozen).
-2. **Luna is credible but not a step change.** Over its two clean runs:
-   common-control 76%/68% vs the incumbent's 76% — within noise, no better
-   on the tail classes (its false-acks are the same parked-batch/offer
-   phrasing family), ~1.7× slower, ~2× cheaper per run, envelope validity
-   90–98%. Trust zeros hold.
-3. **Gemini-3.8-flash is disqualified for the envelope role** even on its
-   partial run: 38% envelope validity, 20s turns (provider throttling).
-4. Luna run 3's collapse (13 notices) is credit contamination — the
-   verifier leg (gpt-4.1 via the same balance) started failing; flagged,
-   excluded from the candidate's numbers.
-5. **Production exposure**: at $0.24 the live shell has at most dozens of
-   turns left before every turn fails closed to availability notices
-   (safe, but Jin goes deaf).
+1. **Sol and Sonnet-5 tie at 81.3% cc**, ~5pp above the incumbent. Sol
+   wins the tiebreak: faster (7.6s vs 10.8s), cleaner envelopes (98% vs
+   94%), half the false-acks (8 vs 15 — sonnet-5 hits the parked-batch
+   phrasing class hardest). gpt-4.1 remains 2× faster than everything.
+2. **The frontier ceiling is 88%** — and astra's failures are the SAME
+   systematic classes as everyone's: task-capture, offer-apply,
+   gmail-read-chain fail ~2/6 per run for every candidate INCLUDING the
+   incumbent and the ceiling model. These are system/corpus-side, not
+   model-choice-side:
+   - task-capture: the NEW models' op-envelope dialect trips the strict
+     op parser (invalid envelope → degrade → honest "technical issue"
+     reply; gpt-4.1's dialect parses clean) — a parser-tolerance question
+     (operations.ts, code — not prompt).
+   - offer-apply: the seeded pending-offer → resolution flow (runner/
+     system mechanics, needs ledger-level diagnosis).
+   - gmail-read-chain: a corpus artifact — the model's chosen keywords
+     ("plumber invoice") genuinely don't match the seeded sender/subject
+     ("plumbco"/"Invoice #4417"), so the search honestly returns zero.
+3. No model reaches 98% under the current suite state; the suite itself
+   bounds everyone at ~88%. Fixing the three systematic classes first
+   would give the model comparison (and holdout v2) a clean baseline.
 
-## To finish the matrix
+## Artifacts
 
-Top up OpenRouter (~$20 covers: sonnet-5 ×3, astra ×1, and credible
-terra/sol ×3 each — the gate authorizes per-request max cost, so a healthy
-balance clears the 65536 default), then re-run:
-`evals/conversation/bakeoff/run-one.sh <cand> <n>` for the remaining cells.
+`evals/conversation/out/semantic-bo-*.json` (16 runs). Re-run any cell:
+`evals/conversation/bakeoff/run-one.sh <cand> <n>`.
