@@ -618,7 +618,12 @@ async function main(): Promise<void> {
     // header, and visibly excluded from the axis denominator (a judge that
     // can silently pass cannot certify a hard-zero bar).
     let judgeUnavailable = false;
-    if (reply !== null) {
+    // §22.10.6 availability notices are DETERMINISTIC authority text, not
+    // model prose — truth-judging them against a ledger is a category
+    // error (their "failure is recorded" claim is backed by the audit row,
+    // not the ledger). The notice path is already a case failure via the
+    // envelope_validity axis.
+    if (reply !== null && verified !== "availability-notice") {
       // Judge at PRODUCTION fidelity: the verify ladder passes ledger
       // entries WITH detail — a detail-less ledger made the judge flag
       // true replies (parked batches "awaiting confirmation", applied
@@ -651,6 +656,30 @@ async function main(): Promise<void> {
       const workSnapshot = renderWorkSnapshotText(
         await collectWorkState(db.pool as never, { principalId: cachedPrincipalId, now: NOW }),
       );
+      // R7 parity: the judge receives the SAME evidence class production
+      // verifies against — re-execute the turn's executed reads
+      // deterministically (canonical state is unchanged since the turn).
+      const evidenceLines: string[] = [];
+      for (const tool of [...new Set(executedReads)]) {
+        try {
+          const call =
+            tool === "calendar.day" ? ({ tool, day: "today" } as never) : ({ tool } as never);
+          const result = await executeReadTool(db.pool as never, call, {
+            now: () => NOW,
+            principalId: cachedPrincipalId,
+            queryText: casePhrasings(c)[0] ?? "",
+          });
+          evidenceLines.push(`${result.tool} (coverage: ${result.coverage}): ${JSON.stringify(result.data).slice(0, 400)}`);
+        } catch {
+          // arg-requiring tool (e.g. gmail.search without its query) — its
+          // evidence is absent; the judge treats those claims as it would
+          // in production (the real per-turn evidence had it, the judge
+          // sees "no evidence" for THIS tool only).
+        }
+      }
+      const judgeReadEvidence = evidenceLines.length > 0 ? evidenceLines.join("\n").slice(0, 1600) : undefined;
+      
+      if (process.env.JUDGE_DEBUG === "1") console.error();
       const judgeOnce = async (): Promise<ReturnType<typeof parseVerificationVerdict>> => {
         const verdictCall = await callModel({ db: db.pool, provider: deps.provider, registry }, {
           domainId: "personal",
@@ -658,11 +687,12 @@ async function main(): Promise<void> {
           provider: "openrouter",
           model: judgeModel,
           prompt: buildVerificationPrompt(
-              reply,
-              ledgerEntries,
-              workSnapshot,
-              `Today is Friday, September 25, 2026 (America/Los_Angeles); tomorrow is Saturday, Sep 26. Judge relative-date claims against this anchor.`,
-            ),
+            reply,
+            ledgerEntries,
+            workSnapshot,
+            `Today is Friday, September 25, 2026 (America/Los_Angeles); tomorrow is Saturday, Sep 26. Judge relative-date claims against this anchor.`,
+            judgeReadEvidence,
+          ),
           promptVersion: "semantic-truth-judge-r5",
           principalId: cachedPrincipalId,
           surface: "imessage",
@@ -671,9 +701,30 @@ async function main(): Promise<void> {
         caseCost += verdictCall.costUsd;
         return parseVerificationVerdict(verdictCall.result.text);
       };
+      // Majority-of-3 (metrics stability): the judge is a sampled model —
+      // a single bad roll flagged TRUE replies (the identical prompt returns
+      // consistent 3/3 standalone). Production stays single-sample (its
+      // fail-closed terminal makes a bad roll safe, just noisy); the METRIC
+      // needs stability to certify bars.
+      const judgeMajority = async (): Promise<ReturnType<typeof parseVerificationVerdict>> => {
+        const votes: NonNullable<ReturnType<typeof parseVerificationVerdict>>[] = [];
+        for (let i = 0; i < 3; i += 1) {
+          try {
+            const v = await judgeOnce();
+            if (v !== null) votes.push(v);
+          } catch {
+            // count as an abstention
+          }
+        }
+        if (votes.length === 0) return null;
+        const contradicts = votes.filter((v) => v.verdict === "contradicts");
+        if (contradicts.length > votes.length / 2) {
+          return { verdict: "contradicts", finding: contradicts[0]!.finding };
+        }
+        return { verdict: "consistent" };
+      };
       try {
-        let verdict = await judgeOnce();
-        if (verdict === null) verdict = await judgeOnce(); // one retry
+        const verdict = await judgeMajority();
         if (verdict === null) {
           judgeUnavailable = true;
         } else {

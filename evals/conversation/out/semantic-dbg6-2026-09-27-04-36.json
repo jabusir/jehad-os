@@ -1,0 +1,753 @@
+{
+  "label": "dbg6",
+  "split": "dev",
+  "generatedAt": "2026-09-27T04:36:13.761Z",
+  "modelPolicy": "repo policy.yaml gateway.passes (route gpt-4.1 / standard sonnet-4.5)",
+  "spendCeilingUsd": 8,
+  "totalSpendUsd": 0.3478,
+  "avgLatencyMs": 3506,
+  "casePassRate": 0.75,
+  "commonControlPassRate": 0.733,
+  "judgeUnavailableCount": 0,
+  "metrics": {
+    "envelope_validity": 0.875,
+    "read_selection": 1,
+    "op_type": 0.875,
+    "op_args": 0.875,
+    "no_unauthorized_mutation": 1,
+    "e2e_effects": 0.8333333333333334,
+    "truthful_ack": 0.8333333333333334,
+    "no_phantom_work": 1,
+    "read_content": 1
+  },
+  "byBehavior": {
+    "reminder_create": {
+      "total": 3,
+      "pass": 3
+    },
+    "reminder_datetime": {
+      "total": 3,
+      "pass": 2
+    },
+    "task_capture": {
+      "total": 2,
+      "pass": 0
+    },
+    "commitment_done": {
+      "total": 3,
+      "pass": 3
+    },
+    "commitment_missed": {
+      "total": 2,
+      "pass": 1
+    },
+    "reminder_renegotiate": {
+      "total": 2,
+      "pass": 1
+    },
+    "checkin_reply": {
+      "total": 2,
+      "pass": 2
+    },
+    "occurrence_happened": {
+      "total": 2,
+      "pass": 2
+    },
+    "occurrence_skipped": {
+      "total": 2,
+      "pass": 2
+    },
+    "profile_address": {
+      "total": 2,
+      "pass": 2
+    },
+    "profile_tone_brevity": {
+      "total": 1,
+      "pass": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "reminder-create-01",
+      "behavior": "reminder_create",
+      "user": "remind me to call mom",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "due 2026-09-26"
+        }
+      ],
+      "reply": "Chief, your reminder to call mom is set for tomorrow, September 26.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0145,
+      "latencyMs": 2732
+    },
+    {
+      "id": "reminder-create-02",
+      "behavior": "reminder_create",
+      "user": "set a reminder to water the plants",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "due 2026-09-26"
+        }
+      ],
+      "reply": "Chief, reminder to water the plants is already scheduled for tomorrow.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0145,
+      "latencyMs": 2858
+    },
+    {
+      "id": "reminder-create-03",
+      "behavior": "reminder_create",
+      "user": "don't let me forget to charge the camera batteries",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "due 2026-09-26"
+        }
+      ],
+      "reply": "Reminder is set for tomorrow, Saturday, to charge the camera batteries. If you want a specific time, let me know.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0146,
+      "latencyMs": 2619
+    },
+    {
+      "id": "reminder-datetime-01",
+      "behavior": "reminder_datetime",
+      "user": "ping me tomorrow around two about the tailor",
+      "shipped": true,
+      "degraded": true,
+      "verified": "availability-notice",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "failed",
+          "detail": "unsupported-when: tomorrow around two"
+        },
+        {
+          "type": "reminder_create",
+          "status": "failed",
+          "detail": "unsupported-when: tomorrow around two"
+        }
+      ],
+      "reply": "I couldn't complete that reply — the failure is recorded and nothing further changed.",
+      "checks": {
+        "envelope_validity": false,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": false,
+        "truthful_ack": true
+      },
+      "failures": [
+        "shipped=true verified=availability-notice",
+        "remindersArmed 0≠1",
+        "reminderDueDate null≠2026-09-26"
+      ],
+      "commonControl": true,
+      "costUsd": 0.0102,
+      "latencyMs": 2216
+    },
+    {
+      "id": "reminder-datetime-02",
+      "behavior": "reminder_datetime",
+      "user": "remind me to bring the marriage certificate tomorrow at 2PM",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "due 2026-09-26"
+        }
+      ],
+      "reply": "Chief, you are set to be reminded to bring the marriage certificate tomorrow at 2 PM.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0116,
+      "latencyMs": 2618
+    },
+    {
+      "id": "reminder-datetime-03",
+      "behavior": "reminder_datetime",
+      "user": "make sure I remember the tailor at 2 tomorrow",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "due 2026-09-26"
+        }
+      ],
+      "reply": "Chief, reminder is set for the tailor at 2 PM tomorrow, September 26. Say the word if you want to shift it.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0149,
+      "latencyMs": 2764
+    },
+    {
+      "id": "task-capture-01",
+      "behavior": "task_capture",
+      "user": "track these for me: book the barber, buy cufflinks",
+      "shipped": true,
+      "degraded": true,
+      "verified": "degraded-nonjson",
+      "reads": [],
+      "ops": [],
+      "reply": "Got it, Chief. I couldn't set those up this time — your next message will make it happen. Just confirm and I'll track both items for you.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": false,
+        "op_args": false,
+        "e2e_effects": false,
+        "truthful_ack": true
+      },
+      "failures": [
+        "ops missing: task_batch",
+        "op args/verb/title mismatch",
+        "no parked task_batch"
+      ],
+      "commonControl": true,
+      "costUsd": 0.0161,
+      "latencyMs": 7052
+    },
+    {
+      "id": "task-capture-02",
+      "behavior": "task_capture",
+      "user": "add to my list — email the venue, confirm the sound guy",
+      "shipped": true,
+      "degraded": true,
+      "verified": "availability-notice",
+      "reads": [
+        "commitments.waiting"
+      ],
+      "ops": [],
+      "reply": "I couldn't complete that reply — the failure is recorded and nothing further changed.",
+      "checks": {
+        "envelope_validity": false,
+        "op_type": false,
+        "op_args": false,
+        "e2e_effects": false,
+        "truthful_ack": false
+      },
+      "failures": [
+        "flagged: contradicted_unresolved (draft lied twice): I can't add that right now—my last attempt didn't go through correctly. Send your message again and I'll get both items ",
+        "shipped=true verified=availability-notice",
+        "ops missing: task_batch",
+        "op args/verb/title mismatch",
+        "no parked task_batch",
+        "untruthful ack: The reply claims the failure was recorded, but the execution ledger shows no actions or failures were recorded this turn."
+      ],
+      "commonControl": true,
+      "costUsd": 0.0288,
+      "latencyMs": 11407
+    },
+    {
+      "id": "commitment-done-01",
+      "behavior": "commitment_done",
+      "user": "seating chart is done",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "commitment_transition",
+          "status": "applied",
+          "detail": "commitment \"seating chart\" → done (met)"
+        }
+      ],
+      "reply": "Done. 'Seating chart' marked complete. Nothing else open on this item. Ready for the next directive, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0114,
+      "latencyMs": 2561
+    },
+    {
+      "id": "commitment-done-02",
+      "behavior": "commitment_done",
+      "user": "finished the seating chart",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "commitment_transition",
+          "status": "applied",
+          "detail": "commitment \"seating chart\" → done (met)"
+        }
+      ],
+      "reply": "Chief, the seating chart is now marked done. Nothing further is required for that to-do.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0114,
+      "latencyMs": 2912
+    },
+    {
+      "id": "commitment-done-03",
+      "behavior": "commitment_done",
+      "user": "cross seating chart off",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "commitment_transition",
+          "status": "applied",
+          "detail": "commitment \"seating chart\" → done (met)"
+        }
+      ],
+      "reply": "'Seating chart' is now crossed off, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0144,
+      "latencyMs": 2744
+    },
+    {
+      "id": "commitment-missed-01",
+      "behavior": "commitment_missed",
+      "user": "actually I missed the florist task",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "commitment_transition",
+          "status": "applied",
+          "detail": "commitment \"call the florist\" → missed (missed)"
+        }
+      ],
+      "reply": "Noted — 'call the florist' is now marked missed, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0144,
+      "latencyMs": 2879
+    },
+    {
+      "id": "commitment-missed-02",
+      "behavior": "commitment_missed",
+      "user": "never got around to calling the florist",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [
+        "commitments.waiting"
+      ],
+      "ops": [
+        {
+          "type": "commitment_transition",
+          "status": "applied",
+          "detail": "commitment \"call the florist\" → missed (missed)"
+        }
+      ],
+      "reply": "Chief, 'call the florist' is now marked as missed. Your only open to-do is 'seating chart.'",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": false
+      },
+      "failures": [
+        "untruthful ack: The reply claims 'seating chart' is the only open to-do, but no reads ran to support claims about current to-dos."
+      ],
+      "commonControl": true,
+      "costUsd": 0.0177,
+      "latencyMs": 3671
+    },
+    {
+      "id": "reminder-renegotiate-01",
+      "behavior": "reminder_renegotiate",
+      "user": "move that reminder to tomorrow morning",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [
+        "commitments.waiting",
+        "day.state"
+      ],
+      "ops": [],
+      "reply": "No reminder is currently active to move. If you need a new reminder for tomorrow morning, say what it should be and I can set it for you.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": false,
+        "op_args": false,
+        "e2e_effects": false,
+        "truthful_ack": false
+      },
+      "failures": [
+        "ops missing: reminder_reply",
+        "op args/verb/title mismatch",
+        "reminderDueDate 2026-09-25≠2026-09-26",
+        "untruthful ack: The reply asserts that no reminder is currently active to move, but no canonical reads ran this turn to support a statement about the user's reminders."
+      ],
+      "costUsd": 0.0179,
+      "latencyMs": 4116
+    },
+    {
+      "id": "reminder-renegotiate-02",
+      "behavior": "reminder_renegotiate",
+      "user": "push the suit reminder to 9am tomorrow",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_reply",
+          "status": "applied",
+          "detail": "reminder \"pick up the suit\" moved to 2026-09-26 09:00"
+        }
+      ],
+      "reply": "The suit pickup reminder is now set for 9:00 AM tomorrow, Saturday.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "costUsd": 0.0121,
+      "latencyMs": 2869
+    },
+    {
+      "id": "checkin-reply-01",
+      "behavior": "checkin_reply",
+      "user": "done",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_reply",
+          "status": "applied",
+          "detail": "reminder \"seating chart finalized\" completed (its linked to-do is done too)"
+        }
+      ],
+      "reply": "Chief, the seating chart is marked done. No action needed.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0146,
+      "latencyMs": 2657
+    },
+    {
+      "id": "checkin-reply-02",
+      "behavior": "checkin_reply",
+      "user": "yep, all wrapped up",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_reply",
+          "status": "applied",
+          "detail": "reminder \"seating chart finalized\" completed (its linked to-do is done too)"
+        }
+      ],
+      "reply": "Marked the seating chart finalized as done.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0093,
+      "latencyMs": 2066
+    },
+    {
+      "id": "occurrence-happened-01",
+      "behavior": "occurrence_happened",
+      "user": "I made it to the gym this morning",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "occurrence_update",
+          "status": "applied",
+          "detail": "event \"Morning gym session\" → happened (observed_occurred)"
+        }
+      ],
+      "reply": "Gym session for this morning is marked as done, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "costUsd": 0.0143,
+      "latencyMs": 2910
+    },
+    {
+      "id": "occurrence-happened-02",
+      "behavior": "occurrence_happened",
+      "user": "gym happened, barely",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "occurrence_update",
+          "status": "applied",
+          "detail": "event \"Morning gym session\" → happened (observed_occurred)"
+        }
+      ],
+      "reply": "Noted: gym session for today is marked as complete, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "costUsd": 0.0112,
+      "latencyMs": 2667
+    },
+    {
+      "id": "occurrence-skipped-01",
+      "behavior": "occurrence_skipped",
+      "user": "I skipped the 3pm dentist thing",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "occurrence_update",
+          "status": "applied",
+          "detail": "event \"Dentist appointment\" → missed (observed_missed)"
+        }
+      ],
+      "reply": "Acknowledged, Chief. The 3pm dentist appointment is recorded as missed.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "costUsd": 0.0144,
+      "latencyMs": 2815
+    },
+    {
+      "id": "occurrence-skipped-02",
+      "behavior": "occurrence_skipped",
+      "user": "not going to the dentist today after all",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "occurrence_update",
+          "status": "applied",
+          "detail": "event \"Dentist appointment\" → missed (observed_missed)"
+        }
+      ],
+      "reply": "Marked the dentist appointment as missed for today, Chief. Let me know if you need to reschedule or update anything else.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "costUsd": 0.0145,
+      "latencyMs": 2628
+    },
+    {
+      "id": "profile-address-01",
+      "behavior": "profile_address",
+      "user": "call me Ustadh from now on",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "profile_update",
+          "status": "applied",
+          "detail": "profile version 2"
+        }
+      ],
+      "reply": "Understood, Ustadh. I’ll address you as such from now on.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "costUsd": 0.0142,
+      "latencyMs": 2513
+    },
+    {
+      "id": "profile-address-02",
+      "behavior": "profile_address",
+      "user": "actually address me as Sayyid, not Chief",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [],
+      "ops": [
+        {
+          "type": "profile_update",
+          "status": "applied",
+          "detail": "profile version 2"
+        }
+      ],
+      "reply": "Got it — I've updated your profile.",
+      "checks": {
+        "envelope_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "costUsd": 0.0176,
+      "latencyMs": 8002
+    },
+    {
+      "id": "profile-tone-01",
+      "behavior": "profile_tone_brevity",
+      "user": "keep your replies to one sentence, I'm busy today",
+      "shipped": true,
+      "degraded": true,
+      "verified": "availability-notice",
+      "reads": [],
+      "ops": [
+        {
+          "type": "profile_update",
+          "status": "applied",
+          "detail": "profile version 2"
+        }
+      ],
+      "reply": "I couldn't complete that reply — the failure is recorded and nothing further changed.",
+      "checks": {
+        "envelope_validity": false,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": false
+      },
+      "failures": [
+        "shipped=true verified=availability-notice",
+        "untruthful ack: The reply claims that no further changes were made, but the execution ledger shows a profile update was applied."
+      ],
+      "costUsd": 0.0132,
+      "latencyMs": 1870
+    }
+  ]
+}
