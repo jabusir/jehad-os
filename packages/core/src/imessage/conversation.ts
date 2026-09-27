@@ -171,8 +171,14 @@ import {
   confirmSoleCalendarAction,
   guestsSoleCalendarAction,
   proposeCalendarAction,
+  soleLiveCalendarIntent,
   type CalendarActionPolicy,
 } from "./calendar-actions.js";
+import {
+  cancelOutcomeToken,
+  confirmOutcomeToken,
+  soleLiveOutcomeParks,
+} from "./outcome-confirm.js";
 import {
   DEFAULT_CAPTURE_POLICY,
   considerCapture,
@@ -217,7 +223,8 @@ export type ConverseDenialReason =
   | "policy-unavailable"
   | "over-requests-hour"
   | "over-cost-day"
-  | "model-error";
+  | "model-error"
+  | "outcome-token-cooldown";
 
 export interface ConverseOutcome {
   readonly replied: boolean;
@@ -1119,22 +1126,69 @@ async function converseTurn(
 
   const hVerb = /^(confirm|cancel)(?:\s+([A-Za-z0-9]+))?\s*[.!?]*$/i.exec(input.text.trim());
   if (hVerb !== null) {
-    // §22.10.4 shared token lane — runs on BOTH routing paths.
+    // §22.10.4 shared token lane — runs on BOTH routing paths. Shell-trust
+    // R2: it now resolves BOTH token stores — outcome_spec parks (new) and
+    // calendar actions (unchanged). Token resolution: outcome parks first
+    // (exact metadata lookup, cheap); an unknown-to-outcomes token falls
+    // through to the calendar store unchanged. Bare verb: the JOINTLY-sole
+    // live park across both kinds (several → a human question, never a
+    // guess). External data can neither mint nor resolve a token — the lane
+    // matches the authenticated inbound text only.
     const rawToken = (hVerb[2] ?? "").trim();
-    const token = rawToken === "" ? null : normalizeConfirmToken(rawToken);
+    const verb = hVerb[1]!.toLowerCase() === "confirm" ? "confirm" : "cancel";
     const actionPolicy =
       deps.calendarActionPolicy ??
       calendarActionsFromPolicyV1(await loadConversationPolicyFile()) ??
       DEFAULT_CALENDAR_ACTION_POLICY;
-    if (rawToken !== "" && token === null) {
+    if (rawToken !== "" && normalizeConfirmToken(rawToken) === null) {
       return deterministicReply(deps, input, ctx, {
         content: "That confirmation code doesn't look valid — nothing was changed.",
         outboundTrust: "system_generated",
         marker: "action-confirm-invalid-token",
       });
     }
-    if (hVerb[1]!.toLowerCase() === "confirm") {
-      if (deps.actionProvider === undefined) {
+    const token = rawToken === "" ? null : normalizeConfirmToken(rawToken);
+    if (token !== null) {
+      const outcomePolicyFile = await loadConversationPolicyFile();
+      const outcome =
+        verb === "confirm"
+          ? await confirmOutcomeToken(db, {
+              principalId: input.principalId,
+              token,
+              now,
+              policyFile: outcomePolicyFile,
+              ...(deps.outcomeDispatcher !== undefined ? { dispatch: deps.outcomeDispatcher } : {}),
+            })
+          : await cancelOutcomeToken(db, {
+              principalId: input.principalId,
+              token,
+              now,
+              policyFile: outcomePolicyFile,
+            });
+      if (outcome.status === "cooldown" && outcome.reply === "") {
+        // Silent drop (audit only) — the review-ref lockout semantics.
+        return { replied: false, reason: "outcome-token-cooldown" };
+      }
+      if (outcome.status !== "unknown" && outcome.status !== "cooldown") {
+        return deterministicReply(deps, input, ctx, {
+          content: outcome.reply,
+          outboundTrust: "system_generated",
+          marker: `outcome-token-${outcome.status}`,
+          bypassReplyCap: true,
+        });
+      }
+      if (outcome.status === "cooldown") {
+        return deterministicReply(deps, input, ctx, {
+          content: outcome.reply,
+          outboundTrust: "system_generated",
+          marker: `outcome-token-cooldown`,
+          bypassReplyCap: true,
+        });
+      }
+      // unknown → the calendar store may own this token; fall through.
+    }
+    if (verb === "confirm") {
+      if (deps.actionProvider === undefined && token !== null) {
         await audit(db, actor, "imessage.action.rejected", {
           principalId: input.principalId,
           handle,
@@ -1146,44 +1200,142 @@ async function converseTurn(
           marker: "action-confirm-no-provider",
         });
       }
-      const result =
-        token !== null
-          ? await confirmCalendarAction(db, {
-              principalId: input.principalId,
-              confirmToken: token,
-              now,
-              policy: actionPolicy,
-              provider: deps.actionProvider as NonNullable<ConfirmCalendarActionInput["provider"]>,
-            })
-          : await confirmSoleCalendarAction(db, {
-              principalId: input.principalId,
-              now,
-              policy: actionPolicy,
-              provider: deps.actionProvider as NonNullable<ConfirmCalendarActionInput["provider"]>,
-            });
+      if (token !== null) {
+        const result = await confirmCalendarAction(db, {
+          principalId: input.principalId,
+          confirmToken: token,
+          now,
+          policy: actionPolicy,
+          provider: deps.actionProvider as NonNullable<ConfirmCalendarActionInput["provider"]>,
+        });
+        return deterministicReply(deps, input, ctx, {
+          content: result.reply,
+          outboundTrust: "system_generated",
+          marker: `action-confirm-${result.status}`,
+        });
+      }
+      // Bare verb: jointly-sole live park across BOTH stores.
+      const cal = await soleLiveCalendarIntent(db, { principalId: input.principalId, now });
+      const out = await soleLiveOutcomeParks(db, { principalId: input.principalId, now });
+      const ambiguous = cal.kind === "ambiguous" || out.kind === "ambiguous";
+      const total = (cal.kind === "sole" ? 1 : 0) + (out.kind === "sole" ? 1 : 0);
+      if (ambiguous || total > 1) {
+        return deterministicReply(deps, input, ctx, {
+          content: "More than one thing is waiting for confirmation — reply with its code, like: confirm XW1MS.",
+          outboundTrust: "system_generated",
+          marker: "action-confirm-ambiguous",
+          bypassReplyCap: true,
+        });
+      }
+      if (cal.kind === "sole") {
+        if (deps.actionProvider === undefined) {
+          await audit(db, actor, "imessage.action.rejected", {
+            principalId: input.principalId,
+            handle,
+            reason: "no-provider-configured",
+          });
+          return deterministicReply(deps, input, ctx, {
+            content: "I can't reach the calendar right now — nothing was created. The proposal stays open until its code expires.",
+            outboundTrust: "system_generated",
+            marker: "action-confirm-no-provider",
+          });
+        }
+        const result = await confirmCalendarAction(db, {
+          principalId: input.principalId,
+          confirmToken: "",
+          now,
+          policy: actionPolicy,
+          provider: deps.actionProvider as NonNullable<ConfirmCalendarActionInput["provider"]>,
+        });
+        return deterministicReply(deps, input, ctx, {
+          content: result.reply,
+          outboundTrust: "system_generated",
+          marker: `action-confirm-${result.status}`,
+        });
+      }
+      if (out.kind === "sole") {
+        const outcome = await confirmOutcomeToken(db, {
+          principalId: input.principalId,
+          token: null,
+          now,
+          policyFile: await loadConversationPolicyFile(),
+          ...(deps.outcomeDispatcher !== undefined ? { dispatch: deps.outcomeDispatcher } : {}),
+        });
+        if (outcome.status === "cooldown" && outcome.reply === "") {
+          return { replied: false, reason: "outcome-token-cooldown" };
+        }
+        return deterministicReply(deps, input, ctx, {
+          content: outcome.reply,
+          outboundTrust: "system_generated",
+          marker: `outcome-token-${outcome.status}`,
+          bypassReplyCap: true,
+        });
+      }
+      return deterministicReply(deps, input, ctx, {
+        content: "Nothing is waiting for confirmation right now.",
+        outboundTrust: "system_generated",
+        marker: "action-confirm-none",
+        bypassReplyCap: true,
+      });
+    }
+    // cancel
+    if (token !== null) {
+      const result = await cancelCalendarAction(db, {
+        principalId: input.principalId,
+        confirmToken: token,
+        now,
+        policy: actionPolicy,
+      });
       return deterministicReply(deps, input, ctx, {
         content: result.reply,
         outboundTrust: "system_generated",
-        marker: `action-confirm-${result.status}`,
+        marker: `action-cancel-${result.status}`,
       });
     }
-    const result =
-      token !== null
-        ? await cancelCalendarAction(db, {
-            principalId: input.principalId,
-            confirmToken: token,
-            now,
-            policy: actionPolicy,
-          })
-        : await cancelSoleCalendarAction(db, {
-            principalId: input.principalId,
-            now,
-            policy: actionPolicy,
-          });
+    const cal = await soleLiveCalendarIntent(db, { principalId: input.principalId, now });
+    const out = await soleLiveOutcomeParks(db, { principalId: input.principalId, now });
+    const ambiguous = cal.kind === "ambiguous" || out.kind === "ambiguous";
+    const total = (cal.kind === "sole" ? 1 : 0) + (out.kind === "sole" ? 1 : 0);
+    if (ambiguous || total > 1) {
+      return deterministicReply(deps, input, ctx, {
+        content: "More than one thing is waiting — reply with its code, like: cancel XW1MS.",
+        outboundTrust: "system_generated",
+        marker: "action-cancel-ambiguous",
+        bypassReplyCap: true,
+      });
+    }
+    if (cal.kind === "sole") {
+      const result = await cancelCalendarAction(db, {
+        principalId: input.principalId,
+        confirmToken: "",
+        now,
+        policy: actionPolicy,
+      });
+      return deterministicReply(deps, input, ctx, {
+        content: result.reply,
+        outboundTrust: "system_generated",
+        marker: `action-cancel-${result.status}`,
+      });
+    }
+    if (out.kind === "sole") {
+      const outcome = await cancelOutcomeToken(db, {
+        principalId: input.principalId,
+        token: null,
+        now,
+        policyFile: await loadConversationPolicyFile(),
+      });
+      return deterministicReply(deps, input, ctx, {
+        content: outcome.reply,
+        outboundTrust: "system_generated",
+        marker: `outcome-token-${outcome.status}`,
+        bypassReplyCap: true,
+      });
+    }
     return deterministicReply(deps, input, ctx, {
-      content: result.reply,
+      content: "Nothing is waiting for cancellation right now.",
       outboundTrust: "system_generated",
-      marker: `action-cancel-${result.status}`,
+      marker: "action-cancel-none",
+      bypassReplyCap: true,
     });
   }
 

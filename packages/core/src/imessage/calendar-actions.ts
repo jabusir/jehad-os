@@ -393,7 +393,7 @@ function sanitizedProviderError(error: string | null): string {
 const CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 export const CONFIRM_TOKEN_LENGTH = 5;
 
-function mintConfirmToken(): string {
+export function mintConfirmToken(): string {
   const bytes = randomBytes(CONFIRM_TOKEN_LENGTH);
   let token = "";
   for (const byte of bytes) {

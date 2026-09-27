@@ -119,10 +119,13 @@ export interface SelfBriefData {
   readonly actions: SelfBriefActions;
   /** Armed reminder check-ins (W6-phase-2); null when not determined. */
   readonly remindersArmed?: number | null;
-  /** Reset C5: delegated work in flight (what the system is doing now). */
+  /** Reset C5: delegated work in flight (what the system is doing now).
+   *  Shell-trust R1: bounded titles + refs — a count alone left "how's the
+   *  research going" answerable only from history. */
   readonly armedWork?: {
     readonly activeOutcomes: number | null;
     readonly runningAssignments: number | null;
+    readonly activeTitles?: readonly { readonly ref: string; readonly title: string }[];
   };
   readonly limits: readonly string[];
 }
@@ -211,9 +214,8 @@ export async function collectSelfBrief(
   }
   const view = policyView(input.policy ?? null, input.principalName);
   const armedReminders = await countArmedReminders(db, input.principalId).catch(() => null);
-  const armedOutcomes = await listActiveOutcomes(db, input.principalId)
-    .then((outcomes) => outcomes.length)
-    .catch(() => null);
+  const armedOutcomeRows = await listActiveOutcomes(db, input.principalId).catch(() => null);
+  const armedOutcomes = armedOutcomeRows === null ? null : armedOutcomeRows.length;
   const runningAssignments = await db
     .query(
       `SELECT count(*)::int AS n FROM assignments WHERE status IN ('queued','running')`,
@@ -253,6 +255,14 @@ export async function collectSelfBrief(
           armedWork: {
             activeOutcomes: armedOutcomes,
             runningAssignments,
+            ...(armedOutcomeRows !== null
+              ? {
+                  activeTitles: armedOutcomeRows.slice(0, 3).map((o) => ({
+                    ref: o.ref,
+                    title: o.title.length > 60 ? o.title.slice(0, 59) + "…" : o.title,
+                  })),
+                }
+              : {}),
           },
         }
       : {}),
@@ -300,7 +310,11 @@ export function renderSelfBrief(brief: SelfBriefData): string {
     ...(brief.armedWork !== undefined &&
     ((brief.armedWork.activeOutcomes ?? 0) > 0 || (brief.armedWork.runningAssignments ?? 0) > 0)
       ? [
-          `work in flight: ${brief.armedWork.activeOutcomes ?? 0} delegated outcome(s) active, ${brief.armedWork.runningAssignments ?? 0} worker assignment(s) queued/running — progress rides the briefs`,
+          `work in flight: ${
+            brief.armedWork.activeTitles !== undefined && brief.armedWork.activeTitles.length > 0
+              ? brief.armedWork.activeTitles.map((o) => `"${o.title}" [${o.ref}]`).join(", ")
+              : `${brief.armedWork.activeOutcomes ?? 0} delegated outcome(s)`
+          } active, ${brief.armedWork.runningAssignments ?? 0} worker assignment(s) queued/running — when asked how work is going, read work.status and answer from it, never from memory`,
         ]
       : []),
     `limits: ${brief.limits.join("; ")}`,

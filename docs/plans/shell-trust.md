@@ -102,9 +102,12 @@ multi-turn cases at all [`semantic-corpus.ts:85-96`, single `user` field] —
 delegation confirm, referent chains ("mark that one done"), /new survival,
 and progress queries are untested end-to-end.
 
-**H5 — Observability residue.** launchd stderr redirect is stale (api.log
-untouched since 09-23; `[repo-policy]` markers land nowhere visible) — an ops
-fix, not code.
+**H5 — Observability residue.** launchd stderr redirect was suspected stale
+(api.log untouched since 09-23) — at build time this was DISPROVEN: the api
+process holds live fds 1/2 on api.log (`lsof`); the api is quiet by nature,
+and any `[repo-policy]` marker or crash trace will land there. The real gap
+was "what models are actually running" having no daily trace — closed by
+R3.4's `gateway.models_resolved` audit, not by plist surgery.
 
 ## 2. Root causes verified in code
 

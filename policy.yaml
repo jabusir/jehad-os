@@ -69,6 +69,9 @@ gateway:
   # gpt-4.1 clears the D-2 bar, but two gpt-4.1 passes ≈ $0.0025/~2s —
   # revisit after dogfood.
   passes: { route: { model: openai/gpt-4.1 }, answer_fast: { model: openai/gpt-4.1 }, answer_standard: { model: anthropic/claude-sonnet-4.5 }, answer_fallback: { model: google/gemini-3.8-flash }, route_fallback: { model: google/gemini-3.8-flash } }
+  # shell-trust R3.3 — bounded transient retry (429/5xx) for INTERACTIVE
+  # cognition/verifier calls only; worker/assignment execution is exempt.
+  provider_retry: true
   capture: { enabled: true, principals: [josctl], max_per_hour: 5, dedupe_window_hours: 24 }
   # review — Phase G deterministic review/control over iMessage
   # (ig-phase-g-contracts.md §7). Control commands are exact-match, zero
@@ -85,7 +88,7 @@ gateway:
   interpret: { enabled: true }
   principals:
     yusra: { model: openai/gpt-4o-mini, requests_per_hour: 20, cost_per_day: 2.0 }
-    josctl: { model: openai/gpt-4o-mini, requests_per_hour: 60, cost_per_day: 5.0, reads: [calendar, commitments, gmail, state, memory, system] }
+    josctl: { model: openai/gpt-4o-mini, requests_per_hour: 60, cost_per_day: 5.0, reads: [calendar, commitments, gmail, state, memory, system, work] }
 
 # personas — W4 interaction-profile switch (jarvis-v1.md §7 W4 rev2 R2;
 # §5 invariant 2). SECURITY/DEFAULT LAYER ONLY: the on/off flag plus the

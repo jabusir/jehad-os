@@ -65,7 +65,15 @@ function renderWaitingOnYou(data: MorningBriefData): string[] {
   for (const item of w.overdue) lines.push(waitLine(item, "OVERDUE"));
   for (const item of w.dueSoon) lines.push(waitLine(item, "DUE SOON"));
   if (w.otherOpenCount > 0) {
-    lines.push(`- ${w.otherOpenCount} more open commitments without near due dates`);
+    // R4/F6: stale opens surface BY TITLE + AGE until closed.
+    const others = w.otherOpen ?? [];
+    for (const item of others) {
+      const age = item.openDays === null ? "" : ` — open ${item.openDays}d`;
+      lines.push(`- ${item.description}${age}`);
+    }
+    if (others.length === 0 || others.length < w.otherOpenCount) {
+      lines.push(`- ${w.otherOpenCount - others.length} more open commitments without near due dates`);
+    }
   }
   return lines;
 }

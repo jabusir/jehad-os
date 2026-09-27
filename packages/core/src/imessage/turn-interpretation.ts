@@ -1567,7 +1567,13 @@ export async function applyOutcomeSpec(
       " It's saved, but the runner isn't wired here, so it's not moving yet.";
   } else {
     try {
-      await input.dispatch({ outcomeId: created.outcome.id, ref: created.outcome.ref });
+      const started = await input.dispatch({ outcomeId: created.outcome.id, ref: created.outcome.ref });
+      // Accepted ≠ dispatched ≠ running (shell-trust R2 / owner amendment
+      // 3): the reply narrates the OBSERVED dispatch result only.
+      dispatchNote =
+        typeof started === "string" && started.length > 0
+          ? ` The executor picked it up (${started.slice(0, 60)}) — queued to run, not running yet.`
+          : " The executor picked it up — queued to run, not running yet.";
     } catch {
       dispatchNote =
         " It's saved, but the runner didn't pick it up — I'll retry from the ops lane rather than pretend it's moving.";

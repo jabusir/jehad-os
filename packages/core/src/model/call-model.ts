@@ -73,6 +73,10 @@ export interface ModelCallInput extends ModelRequest {
   readonly outcomeId?: string | null;
   /** D1 attribution: the assignment this call executes (nullable). */
   readonly assignmentId?: string | null;
+  /** Shell-trust R3.3: opt-in bounded transient retry (429/5xx-class
+   *  provider flakiness) — INTERACTIVE cognition/verifier calls only.
+   *  Worker/assignment execution never sets it. */
+  readonly retryOnTransient?: boolean;
 }
 
 export interface ModelCallDeps {
@@ -281,53 +285,88 @@ export async function callModel(deps: ModelCallDeps, input: ModelCallInput): Pro
   const gated = egressGatedModelProvider(deps.provider, deps.registry, deps.db);
 
   const startedAt = Date.now();
-  let result: ModelResult;
-  try {
-    result = await gated.complete(input);
-  } catch (err) {
-    if (err instanceof EgressDenialError) {
-      // T12: auditable denial, no dispatch, no ledger row (the reservation
-      // is released). The audit payload carries domain/sensitivity/provider/
-      // model only — no user content.
-      await releaseReservation(deps.db, reservation.id);
-      await recordAudit(deps.db, {
-        actor: "system:model-egress",
-        action: "model.egress.denied",
-        reversible: false,
-        inputsRef: JSON.stringify(err.audit),
-      });
-      throw err;
+  let result: ModelResult | undefined;
+  // Shell-trust R3.3 (owner amendment 4): INTERACTIVE-ONLY transient retry.
+  // The flag is set by the cognitive loop's dispatchModel (cognition +
+  // verifier calls) — worker/assignment execution stays single-shot with
+  // its own budget police, so retry can never silently multiply worker
+  // spend. Every attempt stays inside the per-call reservation; retries are
+  // audited (one row per retried call, no content). Egress/budget errors
+  // are NOT retried (they are pre-dispatch decisions, not flakiness).
+  const maxAttempts = input.retryOnTransient === true ? 3 : 1;
+  let lastDispatchError: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      result = await gated.complete(input);
+      
+      if (attempt > 1) {
+        await recordAudit(deps.db, {
+          actor: "system:model-provider",
+          action: "model.provider.retried",
+          reversible: true,
+          outputsRef: JSON.stringify({
+            runId: input.runId,
+            provider: input.provider,
+            model: input.model,
+            surface: input.surface ?? null,
+            attempts: attempt,
+            errorName: lastDispatchError instanceof Error ? lastDispatchError.name : "unknown",
+          }),
+        });
+      }
+      break;
+    } catch (err) {
+      if (err instanceof EgressDenialError) {
+        // T12: auditable denial, no dispatch, no ledger row (the reservation
+        // is released). The audit payload carries domain/sensitivity/provider/
+        // model only — no user content.
+        await releaseReservation(deps.db, reservation.id);
+        await recordAudit(deps.db, {
+          actor: "system:model-egress",
+          action: "model.egress.denied",
+          reversible: false,
+          inputsRef: JSON.stringify(err.audit),
+        });
+        throw err;
+      }
+      if (err instanceof EgressPolicyError) {
+        // Pre-dispatch wiring/config error (e.g. request.provider ≠ provider.id
+        // pinning) — nothing was dispatched, so the reservation is released
+        // and nothing stays in the ledger.
+        await releaseReservation(deps.db, reservation.id);
+        throw err;
+      }
+      // Dispatched and failed. On the FINAL attempt: finalize the
+      // reservation honestly (tokens/cost unknown → 0, status 'error'),
+      // then surface the provider error — the row still proves the gate
+      // passed and the provider was invoked. Intermediate attempts hold the
+      // reservation open for their own retry.
+      if (attempt === maxAttempts) {
+        const latencyMs = Math.max(0, Date.now() - startedAt);
+        await finalizeReservation(deps.db, reservation.id, {
+          inTokens: 0,
+          outTokens: 0,
+          costUsd: 0,
+          latencyMs,
+          resultStatus: "error",
+        });
+        throw err;
+      }
+      lastDispatchError = err;
+      await new Promise((resolve) => setTimeout(resolve, 600 * attempt));
     }
-    if (err instanceof EgressPolicyError) {
-      // Pre-dispatch wiring/config error (e.g. request.provider ≠ provider.id
-      // pinning) — nothing was dispatched, so the reservation is released
-      // and nothing stays in the ledger.
-      await releaseReservation(deps.db, reservation.id);
-      throw err;
-    }
-    // Dispatched and failed: finalize the reservation honestly (tokens/cost
-    // unknown → 0, status 'error'), then surface the provider error. The row
-    // still proves the gate passed and the provider was invoked.
-    const latencyMs = Math.max(0, Date.now() - startedAt);
-    await finalizeReservation(deps.db, reservation.id, {
-      inTokens: 0,
-      outTokens: 0,
-      costUsd: 0,
-      latencyMs,
-      resultStatus: "error",
-    });
-    throw err;
   }
   const latencyMs = Math.max(0, Date.now() - startedAt);
 
-  const costUsd = result.usage?.costUsd !== undefined && Number.isFinite(result.usage.costUsd) && result.usage.costUsd > 0
-    ? result.usage.costUsd
+  const finalResult = result as ModelResult;
+  const costUsd = finalResult.usage?.costUsd !== undefined && Number.isFinite(finalResult.usage.costUsd) && finalResult.usage.costUsd > 0
+    ? finalResult.usage.costUsd
     : 0;
   const resultStatus: ModelCallResultStatus = overSoftCap ? "ok_budget_warning" : "ok";
 
   await finalizeReservation(deps.db, reservation.id, {
-    inTokens: nonNegativeInt(result.usage?.inputTokens),
-    outTokens: nonNegativeInt(result.usage?.outputTokens),
+    inTokens: nonNegativeInt(finalResult.usage?.inputTokens),
+    outTokens: nonNegativeInt(finalResult.usage?.outputTokens),
     costUsd,
     latencyMs,
     resultStatus,
@@ -349,5 +388,5 @@ export async function callModel(deps: ModelCallDeps, input: ModelCallInput): Pro
     });
   }
 
-  return { result, resultStatus, latencyMs, costUsd, monthSpendUsdBefore };
+  return { result: finalResult, resultStatus, latencyMs, costUsd, monthSpendUsdBefore };
 }

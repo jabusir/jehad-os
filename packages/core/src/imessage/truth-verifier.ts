@@ -26,6 +26,9 @@ export const DRAFT_REPLY_CHAR_CAP = 2000;
  *  prompt (caller-supplied digest, bounded defensively). */
 export const REGENERATION_CONTEXT_CHAR_CAP = 2000;
 
+/** Render cap for the canonical WORK STATE section (shell-trust R1). */
+export const WORK_STATE_CHAR_CAP = 1400;
+
 /** Ledger entries rendered into a prompt. A legal turn cannot exceed 6
  *  (§22.2: ≤4 operations + ≤2 resolutions per envelope; a validation
  *  re-prompt's rejects double that at most) — 16 is the defensive render
@@ -96,14 +99,27 @@ function renderLedgerJson(ledger: readonly LedgerEntry[]): string {
 }
 
 /**
- * The bounded verification prompt (§22.9): the draft reply + the execution
- * ledger as JSON, judged on ACTION claims only. Instructs EXACTLY one line
- * of JSON back — `{"verdict":"consistent"}` or
- * `{"verdict":"contradicts","finding":"…"}` — with no prose outside it.
- * Both the reply and every ledger field are clipped to their caps, so the
- * prompt is bounded for any input.
+ * The bounded verification prompt (§22.9 + shell-trust R1): the draft
+ * reply + the execution ledger as JSON + the canonical WORK STATE, judged
+ * on ACTION claims and WORK claims. Instructs EXACTLY one line of JSON
+ * back — `{"verdict":"consistent"}` or `{"verdict":"contradicts",
+ * "finding":"…"}` — with no prose outside it. Both the reply and every
+ * ledger field are clipped to their caps, so the prompt is bounded for any
+ * input.
+ *
+ * WORK STATE semantics (owner amendment 1): the snapshot is the ONLY
+ * sanctioned source for claims that work exists / is underway / has
+ * progressed. It proves EXISTENCE-class facts (an assignment is running, a
+ * worker produced an artifact, criterion N is verified); it does NOT make
+ * an artifact's substantive sentences true — "found three viable
+ * verticals" is truthful only with verified criteria, else the truthful
+ * form is "an assignment completed and produced an artifact".
  */
-export function buildVerificationPrompt(reply: string, ledger: readonly LedgerEntry[]): string {
+export function buildVerificationPrompt(
+  reply: string,
+  ledger: readonly LedgerEntry[],
+  workState?: string,
+): string {
   return [
     "You are verifying a draft assistant reply against the execution ledger of what this turn's actions actually did.",
     "",
@@ -115,12 +131,16 @@ export function buildVerificationPrompt(reply: string, ledger: readonly LedgerEn
     renderLedgerJson(ledger),
     "</execution_ledger>",
     "",
-    'The execution ledger is ground truth. Judge ACTION claims only: whether the reply\'s statements about operations and proposal resolutions — mutations, resolutions, and their outcomes, INCLUDING failed and rejected attempts — match the ledger. An EMPTY ledger ([]) means NO action ran this turn: any claim that the reply set, created, tracked, scheduled, reminded, changed, or completed something contradicts. Example contradictions: "I set the reminder" against {"kind":"operation","opType":"reminder_create","status":"rejected"}; "Done — reminder set." against []. A reply that only offers, asks, recommends, or explains ("I can set that up — say the word") makes no action claim. Do not judge style, vocabulary, tone, opinions, or any other non-action content; a reply making no action claims is consistent.',
+    "<work_state>",
+    clip(workState ?? "NO DELEGATED WORK EXISTS (canonical work state is empty)", WORK_STATE_CHAR_CAP),
+    "</work_state>",
+    "",
+    'The execution ledger is ground truth for ACTION claims; the work state is ground truth for WORK claims. Judge ACTION claims: whether the reply\'s statements about operations and proposal resolutions — mutations, resolutions, and their outcomes, INCLUDING failed and rejected attempts — match the ledger. An EMPTY ledger ([]) means NO action ran this turn: any claim that the reply set, created, tracked, scheduled, reminded, changed, or completed something contradicts. Judge WORK claims: statements that work/projects/research/delegation exists, is underway, in progress, paused, or finished — and any deadline, checkpoint, or timeline attached to them — are true ONLY if the work_state shows it. Ledger parked/queued is an OFFER or queued work, never "underway" or "started". History, memory, or the user having discussed an idea NEVER establishes that work exists; work_state saying NO WORK EXISTS + any work-existence claim contradicts. Substantive findings claims ("we found three viable verticals") are truthful only with verified criteria in work_state; "an assignment completed and produced an artifact" is the honest form otherwise. A reply that only offers, asks, recommends, or explains makes no action claim. Do not judge style, vocabulary, tone, opinions, or any other non-action content; a reply making no action or work claim is consistent.',
     "",
     "Respond with EXACTLY one line of JSON and no other text — no markdown fences, no prose:",
     '{"verdict":"consistent"}',
     "or",
-    '{"verdict":"contradicts","finding":"<one sentence: what the reply claims vs what the ledger shows>"}',
+    '{"verdict":"contradicts","finding":"<one sentence: what the reply claims vs what the ledger/work state shows>"}',
   ].join("\n");
 }
 
@@ -162,22 +182,23 @@ export function parseVerificationVerdict(text: string): VerificationVerdict | nu
 }
 
 /**
- * The one-shot regeneration prompt (§22.9's single regeneration round): the
- * finding stated as FACT (it was established from the execution ledger),
- * with the original context summary, the ledger, and the contradicted draft.
- * Instructs a truthful final reply — ledger statuses are what happened;
- * failed/rejected means it did NOT happen and the reply must say so — and
- * forbids ever mentioning verification mechanics to the user. All inputs
- * clipped to their caps; bounded for any input.
+ * The one-shot regeneration prompt (§22.9's single regeneration round,
+ * + shell-trust R1's work state): the finding stated as FACT, with the
+ * original context summary, the ledger, the work state, and the
+ * contradicted draft. Instructs a truthful final reply — ledger statuses
+ * are what happened; the work state is what exists — and forbids ever
+ * mentioning verification mechanics to the user. All inputs clipped to
+ * their caps; bounded for any input.
  */
 export function buildRegenerationPrompt(
   originalContextSummary: string,
   ledger: readonly LedgerEntry[],
   finding: string,
   draftReply: string,
+  workState?: string,
 ): string {
   return [
-    "Regenerate the final user-facing reply for this turn. Your draft made an action claim the execution ledger contradicts.",
+    "Regenerate the final user-facing reply for this turn. Your draft made a claim the execution ledger or the canonical work state contradicts.",
     "",
     "<original_context>",
     clip(originalContextSummary, REGENERATION_CONTEXT_CHAR_CAP),
@@ -187,6 +208,10 @@ export function buildRegenerationPrompt(
     renderLedgerJson(ledger),
     "</execution_ledger>",
     "",
+    "<work_state>",
+    clip(workState ?? "NO DELEGATED WORK EXISTS (canonical work state is empty)", WORK_STATE_CHAR_CAP),
+    "</work_state>",
+    "",
     "<contradiction_finding>",
     clip(finding, FINDING_CHAR_CAP),
     "</contradiction_finding>",
@@ -195,9 +220,10 @@ export function buildRegenerationPrompt(
     clip(draftReply, DRAFT_REPLY_CHAR_CAP),
     "</draft_reply>",
     "",
-    "The finding is an established fact from the execution ledger — treat it as ground truth; never dispute, re-litigate, or soften it. Write the truthful final reply:",
-    "- ledger statuses are what happened: applied = done; parked/queued = offered or queued, NOT done; failed/rejected = did NOT happen, and the reply must say so plainly (\"that didn't land — nothing was set\" class).",
-    "- keep everything in the draft the ledger does not contradict.",
+    "The finding is an established fact from the execution ledger or the work state — treat it as ground truth; never dispute, re-litigate, or soften it. Write the truthful final reply:",
+    "- ledger statuses are what happened: applied = done; parked/queued = offered or queued, NOT done and NOT underway; failed/rejected = did NOT happen, and the reply must say so plainly (\"that didn't land — nothing was set\" class).",
+    "- the work state is what work exists: a claim that work is underway/progressing/finished is true ONLY if the work state shows it; if it shows NO WORK EXISTS, the reply must say plainly that nothing is set up. Never re-narrate work claims from the draft the work state does not support.",
+    "- keep everything in the draft the ledger AND the work state do not contradict.",
     "- at most 1500 characters.",
     "- never mention verification, findings, drafts, ledgers, or any internal mechanics to the user — the user sees only this final reply, as though it were the only draft.",
     "",

@@ -57,7 +57,7 @@ import {
   resolveOpenCommitmentByText,
   SELECTOR_TEXT_MAX_CHARS,
 } from "./target-selector.js";
-import { proposeCalendarAction, type CalendarActionPolicy } from "./calendar-actions.js";
+import { proposeCalendarAction, mintConfirmToken, type CalendarActionPolicy } from "./calendar-actions.js";
 import { resolveProposedSchedule } from "./propose-schedule.js";
 import type { CalibrationCorrectionCategory } from "./calibration-verbs.js";
 import { READ_SET_MAX_TOOLS, READ_SET_TOOLS, parseRouteJson, type ReadToolCall } from "./read-tools.js";
@@ -1068,6 +1068,7 @@ async function parkPendingProposal(
   type: ThreadPendingProposalType,
   payload: unknown,
   offered: string,
+  confirmToken?: string,
 ): Promise<OperationResult> {
   if (ctx.threadId === null) {
     return { status: "failed", detail: "no-active-thread" };
@@ -1083,12 +1084,16 @@ async function parkPendingProposal(
         ? [metadata.pendingProposal]
         : [];
   const at = ctx.now.toISOString();
-  const entry: ThreadPendingProposal = { type, at, payload, offered };
+  const entry: ThreadPendingProposal =
+    confirmToken === undefined
+      ? { type, at, payload, offered }
+      : { type, at, payload, offered, confirmToken };
   const merged = [...existing.filter((pending) => pending.type !== type), entry];
   await setThreadPendingProposals(db, {
     threadId: ctx.threadId,
     principalId: ctx.principalId,
     pending: merged,
+    now: ctx.now,
   });
   const id = pendingProposalId(type, at);
   await auditOperation(db, `operation.${type}.parked`, {
@@ -1096,7 +1101,17 @@ async function parkPendingProposal(
     pendingId: id,
     threadId: ctx.threadId,
     at,
+    ...(confirmToken !== undefined ? { confirmToken } : {}),
   });
+  if (confirmToken !== undefined) {
+    // Shell-trust R2: the token reaches cognition as ledger DATA so the
+    // model authors its own confirmation ask quoting it verbatim (§22.4).
+    return {
+      status: "parked",
+      id,
+      detail: `staged, NOT started — confirm token ${confirmToken} (quote it verbatim in your ask)`,
+    };
+  }
   return { status: "parked", id };
 }
 
@@ -1601,8 +1616,9 @@ export async function executeOperation(
       case "calendar_action":
         return await executeCalendarAction(db, op, ctx);
       case "outcome_spec": {
-        // §22.4 consequential: park in the pending slot; applyOutcomeSpec
-        // remains the token-lane applier (outside this module per §22.6).
+        // §22.4 consequential: park in the pending slot with a
+        // calendar-grade confirm token; the §22.10.4 shared token lane
+        // (conversation.ts) is the applier (shell-trust R2).
         const payload = {
           type: "outcome_spec" as const,
           title: op.title,
@@ -1611,7 +1627,29 @@ export async function executeOperation(
           budget_usd: op.budget_usd,
           deadline_days: op.deadline_days,
         };
-        return await parkPendingProposal(db, ctx, "outcome_spec", payload, `outcome_spec: ${op.title}`);
+        // Mint-once with collision re-roll against every live token in any
+        // of the principal's threads (32⁵ space; belt-and-suspenders).
+        let token = mintConfirmToken();
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          const collision = await db.query(
+            `SELECT 1 FROM interaction_threads
+              WHERE principal_id = $1::uuid
+                AND last_activity_at >= $2::timestamptz
+                AND metadata->'pendingProposals' @> $3::jsonb
+              LIMIT 1`,
+            [ctx.principalId, new Date(ctx.now.getTime() - 86_400_000).toISOString(), JSON.stringify([{ confirmToken: token }])],
+          );
+          if (collision.rows.length === 0) break;
+          token = mintConfirmToken();
+        }
+        return await parkPendingProposal(
+          db,
+          ctx,
+          "outcome_spec",
+          payload,
+          `outcome_spec: ${op.title}`,
+          token,
+        );
       }
       case "cross_principal_profile":
         return await executeCrossPrincipalProfile(db, op, ctx);

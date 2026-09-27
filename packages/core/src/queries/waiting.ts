@@ -48,6 +48,9 @@ export interface CommitmentListItem {
    * backward compatibility with older item constructors.
    */
   readonly needsReview?: typeof AMBIGUOUS_DUE_DATE | null;
+  /** Shell-trust R4: whole days since created_at (0 = today) — the stale-
+   *  open age that makes undated to-dos visible instead of immortal. */
+  readonly openDays?: number | null;
 }
 
 export interface WaitsOnMeItem extends CommitmentListItem {
@@ -62,7 +65,8 @@ export interface WaitsOnMeOptions extends WaitingOptions {
 
 const OPEN_COLUMNS = `
   SELECT c.id, c.direction, c.counterparty_text, c.counterparty_entity_id,
-         c.description, c.due_at, c.confidence, c.status, dom.key AS domain_key
+         c.description, c.due_at, c.confidence, c.status, dom.key AS domain_key,
+         GREATEST(0, EXTRACT(DAY FROM (now() - c.created_at)))::int AS open_days
 `;
 
 const OPEN_BY_DIRECTION_SQL = `
@@ -121,6 +125,9 @@ function toListItem(
     domainKey: String(row.domain_key),
     overdue: pastDue && trust.trusted,
     needsReview: pastDue && !trust.trusted ? AMBIGUOUS_DUE_DATE : null,
+    ...(row.open_days === null || row.open_days === undefined
+      ? {}
+      : { openDays: Number(row.open_days) }),
   };
 }
 

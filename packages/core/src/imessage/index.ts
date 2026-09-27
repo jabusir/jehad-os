@@ -19,3 +19,4 @@ export * from "./operations.js";
 export * from "./target-selector.js";
 export * from "./truth-verifier.js";
 export * from "./cognitive-turn.js";
+export * from "./outcome-confirm.js";

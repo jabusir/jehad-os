@@ -159,3 +159,4 @@ export {
   ratifyLesson,
   renderLessonsBlock,
 } from "./lessons.js";
+export * from "./work-state.js";

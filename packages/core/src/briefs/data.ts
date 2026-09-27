@@ -85,6 +85,9 @@ export interface WaitingOnYou {
   readonly dueSoon: readonly WaitsOnMeItem[];
   /** Open i_owe commitments that are neither overdue nor due soon. */
   readonly otherOpenCount: number;
+  /** Shell-trust R4 (§24 F6): the undated/stale opens by title + age — a
+   *  count alone left them invisible until they rotted (the wedding list). */
+  readonly otherOpen?: readonly { readonly description: string; readonly openDays: number | null }[];
 }
 
 /**
@@ -396,6 +399,13 @@ export async function collectMorningBriefData(
       overdue,
       dueSoon,
       otherOpenCount: waitsOnMe.length - overdue.length - dueSoon.length,
+      otherOpen: waitsOnMe
+        .filter((item) => !overdue.includes(item) && !dueSoon.includes(item))
+        .slice(0, 8)
+        .map((item) => ({
+          description: item.description.slice(0, 80),
+          openDays: item.openDays ?? null,
+        })),
     },
     blocked: blockedResult.blocked,
     stalled: blockedResult.stalled,

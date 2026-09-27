@@ -583,4 +583,210 @@ describe.skipIf(!TEST_DATABASE_URL)("cognitive turn reliability wave (goals 1-4,
     const outcomes = await db.pool.query(`SELECT count(*)::int AS n FROM outcomes`);
     expect(Number(outcomes.rows[0]!.n)).toBe(0);
   });
+
+  // ================================================= shell-trust R1: work truth
+
+  async function seedOutcomeRow(input: {
+    ref: string;
+    title: string;
+    status: string;
+  }): Promise<void> {
+    await db.pool.query(
+      `INSERT INTO outcomes (id, principal_id, ref, title, directive, status)
+       VALUES ($1::uuid, $2::uuid, $3, $4, 'their words', $5)`,
+      [randomUUID(), josctlId, input.ref, input.title, input.status],
+    );
+  }
+
+  it("R1 case G (the phantom-work class, canonical form): a clean-envelope reply claiming work is REWRITTEN against the empty canonical work state", async () => {
+    await grant();
+    // No outcomes exist. The model narrates the fiction from history;
+    // the verifier sees WORK STATE = NO WORK EXISTS → contradicts →
+    // regeneration states the truth.
+    const { outcome, requests } = await turn([
+      envelope({ reply: "The research is underway and progressing nicely — phase two scoping continues on schedule." }),
+      '{"verdict":"contradicts","finding":"the reply claims research is underway but the canonical work state shows no delegated work exists"}',
+      "Actually — nothing is running. That research was never set up; no outcome exists. Say the word and I'll set it up for real this time.",
+      VERIFY_CONSISTENT,
+    ], "how's the research going?");
+
+    expect(outcome.replied).toBe(true);
+    // The verification prompt carried the explicit empty work state.
+    const verifyPrompt = requests.find((r) => r.prompt.includes("<work_state>"))?.prompt ?? "";
+    expect(verifyPrompt).toContain("NO DELEGATED WORK EXISTS");
+    expect(verifyPrompt).toContain("<execution_ledger>");
+    // The regeneration prompt carried it too (R1.2: no blind regen).
+    const regenPrompt = requests.find((r) => r.prompt.includes("Regenerate the final user-facing reply"))?.prompt ?? "";
+    expect(regenPrompt).toContain("NO DELEGATED WORK EXISTS");
+    // The honest reply shipped, flagged regenerated.
+    const reply = await replyContent(outcome);
+    expect(reply).toContain("never set up");
+    const audits = await auditRows("cognitive.turn");
+    expect(String(audits.at(-1)!["verified"])).toBe("regenerated");
+  });
+
+  it("R1 case H: a work-existence claim consistent with a REAL outcome verifies consistent — the read is answerable canonically", async () => {
+    await grant();
+    await seedOutcomeRow({ ref: "AB2", title: "Research low-maintenance businesses", status: "queued" });
+    const { outcome, requests } = await turn([
+      // Round 0: request the canonical read first.
+      envelope({ reads_requested: [{ tool: "work.status" }] }),
+      // Round 1: answer from the read result.
+      envelope({ reply: "The business research is queued and waiting to run — nothing has started yet. I'll have results when it finishes." }),
+      VERIFY_CONSISTENT,
+    ], "how's the research going?");
+
+    expect(outcome.replied).toBe(true);
+    // The read executed against real canonical state (not an override).
+    const round1 = requests[1]!.prompt;
+    expect(round1).toContain("[tool work.status");
+    expect(round1).toContain("Research low-maintenance businesses");
+    // The self-brief listed the title + ref (R1.3).
+    expect(requests[0]!.prompt).toContain('"Research low-maintenance businesses" [AB2]');
+    // The WORK TRUTH invariant is in the base prompt.
+    expect(requests[0]!.prompt).toContain("WORK TRUTH");
+    const audits = await auditRows("cognitive.turn");
+    expect(String(audits.at(-1)!["verified"])).toBe("consistent");
+  });
+
+  it("R1 case I: parked outcome_spec narrated as 'underway' is a contradiction — parked ≠ started", async () => {
+    await grant();
+    const { outcome } = await turn([
+      JSON.stringify({
+        reads_requested: [],
+        operations_requested: [{
+          type: "outcome_spec",
+          title: "Research verticals",
+          directive: "their words",
+          criteria: ["a written comparison of 3 verticals"],
+          budget_usd: null,
+          deadline_days: null,
+        }],
+        proposal_resolutions: [],
+        interpretation: "delegation",
+        intent: "delegation",
+        reply: null,
+      }),
+      envelope({ reply: "Research is underway — I'll report as it progresses." }),
+      '{"verdict":"contradicts","finding":"the reply claims research is underway but the outcome only PARKED (offer), it was not accepted or started"}',
+      "Staged, not started: the research is queued as an offer — confirm it and it will actually begin.",
+      VERIFY_CONSISTENT,
+    ], "delegate: research verticals");
+
+    expect(outcome.replied).toBe(true);
+    const reply = await replyContent(outcome);
+    expect(reply).toContain("Staged, not started");
+    const audits = await auditRows("cognitive.turn");
+    expect(String(audits.at(-1)!["verified"])).toBe("regenerated");
+  });
+
+  // ================================================= shell-trust R3: fail-closed
+
+  it("R3.1: a reply that still contradicts after the forced-final NEVER ships — the availability notice replaces the turn", async () => {
+    await grant();
+    const { outcome } = await turn([
+      envelope({ reply: "Done — reminder set for 2 PM." }),
+      VERIFY_CONTRADICTS,
+      "Still done — reminder set!",
+      '{"verdict":"contradicts","finding":"still claims the reminder was set against an empty ledger"}',
+      "FINAL: I set the reminder.", // forced-final text — discarded by design
+    ], "remind me at 2pm");
+
+    expect(outcome.replied).toBe(true);
+    const reply = await replyContent(outcome);
+    expect(reply).toContain("couldn't complete that reply");
+    expect(reply).not.toContain("reminder set");
+    const flagged = await auditRows("cognitive.turn_flagged");
+    expect(String(flagged.at(-1)!["verified"])).toBe("contradicted_unresolved");
+    const audits = await auditRows("cognitive.turn");
+    expect(String(audits.at(-1)!["verified"])).toBe("availability-notice");
+  });
+
+  it("R3.2: an unparseable verdict (twice) never blesses the draft — notice + flag, not a green audit", async () => {
+    await grant();
+    const { outcome } = await turn([
+      envelope({ reply: "All set — I tracked those tasks." }),
+      "I think the reply looks fine overall.", // unparseable verdict
+      "verdict: consistent-ish?", // retry still unparseable
+    ], "track: buy milk, call mom");
+
+    expect(outcome.replied).toBe(true);
+    const reply = await replyContent(outcome);
+    expect(reply).toContain("couldn't complete that reply");
+    expect(reply).not.toContain("tracked");
+    const flagged = await auditRows("cognitive.turn_flagged");
+    expect(String(flagged.at(-1)!["verified"])).toBe("verifier-unparseable");
+    const audits = await auditRows("cognitive.turn");
+    expect(String(audits.at(-1)!["verified"])).toBe("availability-notice");
+  });
+
+  it("R3.3: a transient provider failure is retried inside the call — the turn still ships, the retry is audited", async () => {
+    await grant();
+    // Envelope dispatch fails twice (429-class), succeeds on the 3rd attempt.
+    let envelopeAttempts = 0;
+    const flaky = {
+      id: "scripted",
+      complete: async (): Promise<{ text: string; usage: { inputTokens: number; outputTokens: number; costUsd: number } }> => {
+        envelopeAttempts += 1;
+        if (envelopeAttempts <= 2) throw new Error("429 rate limited");
+        return {
+          text: envelope({ reply: "Hey — what's up?" }),
+          usage: { inputTokens: 100, outputTokens: 40, costUsd: 0.001 },
+        };
+      },
+    };
+    const registry = new ModelEgressPolicyRegistry([
+      {
+        id: "personal-normal-scripted",
+        domainId: "personal",
+        sensitivity: "normal",
+        allowedProviders: ["scripted"],
+        allowRemote: false,
+        requireRedaction: false,
+      },
+    ]);
+    const outcome = await runCognitiveTurn(
+      { db: db.pool, provider: flaky as never, registry, now: () => NOW },
+      { principalId: josctlId, handle: "+15550000001", text: "hey" },
+    );
+    // The verify call also goes through the same flaky provider (succeeds
+    // first try once the counter is past 2).
+    expect(outcome.replied).toBe(true);
+    const retried = await auditRows("model.provider.retried");
+    expect(retried.length).toBeGreaterThanOrEqual(1);
+    expect(String(retried[0]!["attempts"])).toBe("3");
+  });
+
+  it("R3.4: routing single without a complete passes block refuses to load (no silent principal-pin downgrade)", async () => {
+    const { writeFileSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const path = `${tmpdir()}/policy-no-passes-${Date.now()}.yaml`;
+    const base = (await import("node:fs")).readFileSync(FIXTURE_POLICY, "utf8");
+    writeFileSync(path, base.replace(/passes: \{[^\n]*\n/, "").replace("provider_retry: true\n", ""));
+    process.env.POLICY_YAML_PATH = path;
+    resetRepoPolicyCache();
+    const original = console.error;
+    console.error = () => {};
+    try {
+      const { outcome } = await turn([envelope({ reply: "hi" })], "hello");
+      expect(outcome.replied).toBe(false);
+      expect(outcome.reason).toBe("policy-unavailable");
+    } finally {
+      console.error = original;
+      rmSync(path);
+      process.env.POLICY_YAML_PATH = FIXTURE_POLICY;
+      resetRepoPolicyCache();
+    }
+  });
+
+  it("R3.4: the first turn of a principal-day audits gateway.models_resolved exactly once", async () => {
+    await grant();
+    await turn([envelope({ reply: "hi" }), VERIFY_CONSISTENT], "hello");
+    await turn([envelope({ reply: "hi again" }), VERIFY_CONSISTENT], "hello again");
+    const rows = await auditRows("gateway.models_resolved");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!["fast"]).toBe("openai/gpt-4.1");
+    expect(rows[0]!["standard"]).toBe("anthropic/claude-sonnet-4.5");
+    expect(rows[0]!["fallback"]).toBe("google/gemini-3.8-flash");
+  });
 });

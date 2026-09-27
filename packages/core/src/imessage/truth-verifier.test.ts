@@ -112,7 +112,9 @@ describe("buildVerificationPrompt (bounded, action claims only)", () => {
 
   it("scopes the check to ACTION claims only — no style/vocabulary/opinion policing", () => {
     const prompt = buildVerificationPrompt("Done.", TEN_ENTRY_LEDGER);
-    expect(prompt).toContain("Judge ACTION claims only");
+    expect(prompt).toContain("Judge ACTION claims");
+    expect(prompt).toContain("Judge WORK claims");
+    expect(prompt).toContain("Do not judge style");
     expect(prompt).toContain("Do not judge style, vocabulary, tone, opinions");
     expect(prompt).toContain("INCLUDING failed and rejected attempts");
   });

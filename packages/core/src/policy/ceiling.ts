@@ -422,6 +422,10 @@ export interface GatewayPolicyV1 {
   /** §22 turn orchestration flag (gateway.routing); absent → "legacy".
    * "single" = the single-author cognitive loop. */
   readonly routing?: "single" | "legacy";
+  /** Shell-trust R3.3: bounded transient-provider retry for INTERACTIVE
+   * cognition/verifier calls only (never worker/assignment execution).
+   * Absent → true (on). */
+  readonly providerRetry?: boolean;
 }
 
 /**
@@ -539,7 +543,7 @@ export interface GatewayPrincipalPolicy {
 
 /** Valid grounded-read sources (fail-closed parse: unknown names throw).
  *  `gmail` added additively by Phase GMAIL §8.3 (gmail.recent read tool). */
-export const READ_SOURCES = ["calendar", "commitments", "gmail", "state", "memory", "system"] as const;
+export const READ_SOURCES = ["calendar", "commitments", "gmail", "state", "memory", "system", "work"] as const;
 
 /**
  * Phase F capture policy — `gateway.capture` (ig-phase-f-contracts.md §8):
@@ -845,6 +849,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const gatewayInterpret: { value: GatewayInterpretPolicy | null } = { value: null };
   const gatewayPasses: { value: GatewayPassesPolicy | null } = { value: null };
   let gatewayRouting: "single" | "legacy" | null = null;
+  let gatewayProviderRetry: boolean | null = null;
   const sensorsGmail: { value: GmailSensorPolicy | null } = { value: null };
   const calibrationDaily: { value: CalibrationPolicy | null } = { value: null };
   const outcomesPolicy: { value: OutcomesPolicy | null } = { value: null };
@@ -993,6 +998,17 @@ export function parsePolicyV1(text: string): PolicyV1 {
         gatewayRouting = value;
         continue;
       }
+      if (key === "provider_retry") {
+        // The gateway section parses scalar values as strings (same as
+        // routing) — accept the boolean or its string form.
+        const bool = value === true || value === "true";
+        if (!bool && value !== false && value !== "false") {
+          throw new Error(`policy: gateway.provider_retry must be a boolean, got '${String(value)}'`);
+        }
+        if (gatewayProviderRetry !== null) throw new Error("policy: duplicate gateway.provider_retry key");
+        gatewayProviderRetry = bool;
+        continue;
+      }
       throw new Error(`policy: unknown gateway key '${key}'`);
     }
     if (!isActionType(key)) throw new Error(`policy: unknown action type '${key}'`);
@@ -1023,8 +1039,26 @@ export function parsePolicyV1(text: string): PolicyV1 {
       ...(gatewayContext.value !== null ? { context: gatewayContext.value } : {}),
       ...(gatewayInterpret.value !== null ? { interpret: gatewayInterpret.value } : {}),
       ...(gatewayRouting !== null ? { routing: gatewayRouting } : {}),
+      ...(gatewayProviderRetry !== null ? { providerRetry: gatewayProviderRetry } : {}),
       passes: gatewayPasses.value,
     };
+    // Shell-trust R3.4: `routing: single` REQUIRES a complete passes block —
+    // an absent/incomplete block silently routed every envelope round to the
+    // principal pin (the gpt-4o-mini blind-spot class). Fail closed like
+    // every other policy gap.
+    if (gatewayRouting === "single") {
+      const passes = gatewayPasses.value;
+      const complete =
+        passes !== null &&
+        typeof passes.route?.model === "string" &&
+        typeof passes.answer_standard?.model === "string" &&
+        typeof passes.answer_fallback?.model === "string";
+      if (!complete) {
+        throw new Error(
+          "policy: gateway.routing 'single' requires a complete gateway.passes block (route, answer_standard, answer_fallback models)",
+        );
+      }
+    }
   }
   if (sawSensors && sensorsGmail.value !== null) {
     policy.sensors = { gmail: sensorsGmail.value };

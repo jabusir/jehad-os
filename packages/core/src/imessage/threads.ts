@@ -360,6 +360,12 @@ export interface ThreadPendingProposal {
   /** §22.6 inbound-sequence of the parking turn (the thread's
    *  interaction_messages count at park time; refreshed on re-park). */
   readonly parkedAtSeq?: number;
+  /** Shell-trust R2: the system-issued confirmation token for a
+   *  consequential park (outcome_spec) — 5-char Crockford, calendar-grade
+   *  (normalizeConfirmToken shape), resolved by the §22.10.4 shared token
+   *  lane. The park (and token) live until expiresAt regardless of /new:
+   *  /new clears conversational context, never a live approval. */
+  readonly confirmToken?: string;
 }
 
 export interface ThreadMetadata {
@@ -702,7 +708,8 @@ function parsePendingProposal(value: unknown): ThreadPendingProposal | null {
       key !== "offered" &&
       key !== "id" &&
       key !== "expiresAt" &&
-      key !== "parkedAtSeq"
+      key !== "parkedAtSeq" &&
+      key !== "confirmToken"
     ) {
       return null;
     }
@@ -736,6 +743,12 @@ function parsePendingProposal(value: unknown): ThreadPendingProposal | null {
     if (typeof obj.parkedAtSeq !== "number" || !Number.isInteger(obj.parkedAtSeq)) return null;
     if (obj.parkedAtSeq < 0) return null;
   }
+  if (obj.confirmToken !== undefined) {
+    // 5-char Crockford, normalized (calendar-grade shape — R2 amendment 2).
+    if (typeof obj.confirmToken !== "string" || !/^[0-9A-HJKMNP-TV-Z]{5}$/.test(obj.confirmToken)) {
+      return null;
+    }
+  }
   return {
     type: obj.type as ThreadPendingProposalType,
     at: obj.at,
@@ -744,6 +757,7 @@ function parsePendingProposal(value: unknown): ThreadPendingProposal | null {
     ...(obj.id !== undefined ? { id: obj.id } : {}),
     ...(obj.expiresAt !== undefined ? { expiresAt: obj.expiresAt } : {}),
     ...(obj.parkedAtSeq !== undefined ? { parkedAtSeq: obj.parkedAtSeq } : {}),
+    ...(obj.confirmToken !== undefined ? { confirmToken: obj.confirmToken } : {}),
   };
 }
 

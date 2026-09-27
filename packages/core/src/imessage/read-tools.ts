@@ -39,6 +39,11 @@ import {
   renderSystemStateText,
   SYSTEM_STATE_COVERAGE,
 } from "../queries/system-state.js";
+import {
+  collectWorkOutcomeDetail,
+  collectWorkState,
+  WORK_STATUS_COVERAGE,
+} from "../queries/work-state.js";
 
 export type ReadToolCall =
   | { readonly tool: "calendar.day"; readonly day: "today" | "tomorrow" }
@@ -49,9 +54,10 @@ export type ReadToolCall =
   | { readonly tool: "gmail.read"; readonly message_id?: string }
   | { readonly tool: "day.state" }
   | { readonly tool: "memory.recall" }
-  | { readonly tool: "system.state" };
+  | { readonly tool: "system.state" }
+  | { readonly tool: "work.status"; readonly ref?: string };
 
-export type ReadSource = "calendar" | "commitments" | "gmail" | "state" | "memory" | "system";
+export type ReadSource = "calendar" | "commitments" | "gmail" | "state" | "memory" | "system" | "work";
 
 export interface ReadToolResult {
   readonly tool: string;
@@ -116,6 +122,7 @@ export function readToolSource(tool: ReadToolCall["tool"]): ReadSource {
   if (tool === "day.state") return "state";
   if (tool === "memory.recall") return "memory";
   if (tool === "system.state") return "system";
+  if (tool === "work.status") return "work";
   return "calendar";
 }
 
@@ -180,6 +187,20 @@ export function parseRouteJson(text: string): ReadToolCall | null {
     }
     return { tool: "gmail.read", message_id: messageId };
   }
+  if (obj["tool"] === "work.status") {
+    // Shell-trust R1: the canonical work read. Arg-less = the bounded
+    // active list; optional ref (≤8 alphanumerics, normalized upper) =
+    // one outcome's detail. Not-found is DATA (found: false), never an
+    // error — "not returned" must not collapse into "doesn't exist".
+    if (keys.length < 1 || keys.length > 2) return null;
+    const call: { tool: "work.status"; ref?: string } = { tool: "work.status" };
+    const ref = obj["ref"];
+    if (ref !== undefined) {
+      if (typeof ref !== "string" || !/^[0-9a-zA-Z]{1,8}$/.test(ref.trim())) return null;
+      call.ref = ref.trim().toUpperCase();
+    }
+    return call;
+  }
   if (
     obj["tool"] === "calendar.next" ||
     obj["tool"] === "commitments.waiting" ||
@@ -237,6 +258,7 @@ export const READ_SET_TOOLS = [
   "day.state",
   "memory.recall",
   "system.state",
+  "work.status",
 ] as const;
 
 export type ReadSetTool = (typeof READ_SET_TOOLS)[number];
@@ -542,6 +564,9 @@ export async function executeReadTool(
         description: truncate(c.description, CAP_DESCRIPTION),
         counterparty: truncate(c.counterpartyText, CAP_LOCATION),
         due: dueDay(c.dueAt),
+        // Shell-trust R4: the stale-open age — undated to-dos become
+        // visible as "open 6 days" instead of immortal invisible rows.
+        openDays: c.openDays ?? null,
       });
       return {
         tool: call.tool,
@@ -739,6 +764,43 @@ export async function executeReadTool(
         coverage: SYSTEM_STATE_COVERAGE,
         data: {
           text: truncate(renderSystemStateText(state), CAP_DAY_STATE_TEXT),
+        },
+      };
+    }
+    case "work.status": {
+      // Shell-trust R1: the canonical durable-work read. Not-found is data,
+      // never an exception — coverage honesty is the payload's job.
+      if (opts.principalId === undefined) {
+        throw new Error("work.status requires principalId (work is principal-scoped)");
+      }
+      if (call.ref !== undefined) {
+        const detail = await collectWorkOutcomeDetail(db, {
+          principalId: opts.principalId,
+          ref: call.ref,
+          now,
+        });
+        return {
+          tool: call.tool,
+          source: "work",
+          coverage:
+            WORK_STATUS_COVERAGE +
+            (detail.found
+              ? ""
+              : " — no outcome with this ref is visible to you (refs are 3 characters, shown when work is created)"),
+          data: detail,
+        };
+      }
+      const state = await collectWorkState(db, { principalId: opts.principalId, now });
+      return {
+        tool: call.tool,
+        source: "work",
+        coverage: WORK_STATUS_COVERAGE,
+        data: {
+          timezone: state.timezone,
+          activeTotal: state.activeTotal,
+          active: state.active,
+          activeTruncated: state.activeTruncated,
+          completedLast24h: state.completedLast24h,
         },
       };
     }

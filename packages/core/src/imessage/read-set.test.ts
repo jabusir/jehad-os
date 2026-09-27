@@ -120,7 +120,9 @@ describe("parseRouteReadSet (strict)", () => {
       "day.state",
       "memory.recall",
       "system.state",
+      "work.status",
     ]);
+    expect(readToolSource("work.status")).toBe("work");
     expect(readToolSource("memory.recall")).toBe("memory");
     expect(readToolSource("system.state")).toBe("system");
   });

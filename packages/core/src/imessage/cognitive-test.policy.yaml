@@ -23,7 +23,7 @@ gateway:
   context: { enabled: true, max_reads_per_turn: 3, per_block_token_budget: 1500 }
   interpret: { enabled: true }
   principals:
-    josctl: { model: openai/gpt-4o-mini, requests_per_hour: 60, cost_per_day: 5.0, reads: [calendar, commitments, gmail, state, memory, system] }
+    josctl: { model: openai/gpt-4o-mini, requests_per_hour: 60, cost_per_day: 5.0, reads: [calendar, commitments, gmail, state, memory, system, work] }
 personas: { enabled: true, principals: [josctl] }
 calibration:
   daily: { enabled: false, principals: [], prompt_local_hour: 20 }

@@ -234,7 +234,7 @@ describe("policy gateway section (multi-principal Lane P)", () => {
       model: "openai/gpt-4o-mini",
       requestsPerHour: 60, // answer-pass calls only (route/interpret don't count)
       costPerDay: 5,
-      reads: ["calendar", "commitments", "gmail", "state", "memory", "system"], // state/memory/system: W1-W7
+      reads: ["calendar", "commitments", "gmail", "state", "memory", "system", "work"], // state/memory/system: W1-W7; work: shell-trust R1
     });
     expect(policy.gateway?.actions).toEqual({
       enabled: true,
