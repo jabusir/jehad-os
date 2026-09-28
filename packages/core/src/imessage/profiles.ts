@@ -525,6 +525,7 @@ export async function setThreadProfileOverride(
       ? { pendingProposal: existing.pendingProposal }
       : {}),
     ...(existing.pendingProbe !== undefined ? { pendingProbe: existing.pendingProbe } : {}),
+    ...(existing.toolTrajectory !== undefined ? { toolTrajectory: existing.toolTrajectory } : {}),
     ...(opts.override !== null ? { profile_override: opts.override } : {}),
   };
   await db.query(

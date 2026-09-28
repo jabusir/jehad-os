@@ -9,7 +9,15 @@
 // Vendor response types are module-private and never leak past the
 // ModelProvider port (ADR-0002).
 
-import type { ModelProvider, ModelRequest, ModelResult } from "../ports/model-provider.js";
+import type {
+  ChatMessage,
+  ChatRequest,
+  ChatResult,
+  ChatToolCall,
+  ModelProvider,
+  ModelRequest,
+  ModelResult,
+} from "../ports/model-provider.js";
 
 const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -18,7 +26,13 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 interface OpenRouterCompletionResponse {
   readonly id?: string;
   readonly choices?: readonly {
-    readonly message?: { readonly content?: string | null };
+    readonly message?: {
+      readonly content?: string | null;
+      readonly tool_calls?: readonly {
+        readonly id?: unknown;
+        readonly function?: { readonly name?: unknown; readonly arguments?: unknown };
+      }[];
+    };
   }[];
   readonly usage?: {
     readonly prompt_tokens?: number;
@@ -141,5 +155,108 @@ export function createOpenRouterProvider(
         providerRef: body.id,
       };
     },
+
+    async chat(request: ChatRequest): Promise<ChatResult> {
+      const apiKey = resolveApiKey(options.apiKey);
+      // Per-call timeout (the native path's T_native) bounded by the
+      // constructor default — a caller can shorten, never extend.
+      const effectiveTimeoutMs = Math.min(request.timeoutMs ?? timeoutMs, timeoutMs);
+
+      const messages = request.messages.map(chatRequestToWire);
+      const body: Record<string, unknown> = { model: request.model, messages };
+      if (request.tools !== undefined && request.tools.length > 0) {
+        body["tools"] = request.tools.map((tool) => ({
+          type: "function",
+          function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+        }));
+        body["tool_choice"] = "auto";
+      }
+
+      let response: Response;
+      try {
+        response = await doFetch(`${baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(effectiveTimeoutMs),
+        });
+      } catch (err) {
+        if (err instanceof OpenRouterConfigError) throw err;
+        throw new OpenRouterRequestError(
+          `openrouter chat request failed before dispatch: ${err instanceof Error ? err.name : "unknown error"}`,
+          0,
+        );
+      }
+
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => "");
+        const providerMessage = safeProviderMessage(bodyText);
+        throw new OpenRouterRequestError(
+          providerMessage ?? `openrouter chat failed with HTTP ${response.status}`,
+          response.status,
+        );
+      }
+
+      const parsed = (await response.json().catch(() => {
+        throw new OpenRouterRequestError("openrouter returned an unparseable response body", response.status);
+      })) as OpenRouterCompletionResponse;
+
+      const choice = parsed.choices?.[0];
+      const message = choice?.message;
+      const text = message?.content ?? "";
+      const toolCalls: ChatToolCall[] = [];
+      const rawCalls = message?.tool_calls;
+      if (Array.isArray(rawCalls)) {
+        rawCalls.forEach((call, index) => {
+          const name = call.function?.name;
+          const args = call.function?.arguments;
+          if (typeof name !== "string" || name.length === 0) return;
+          if (typeof args !== "string" || args.length === 0) return;
+          // Arguments must be a JSON object — garbage from the provider is
+          // dropped here rather than passed to the gateway (which would
+          // only reject it; this keeps the wire surface honest).
+          try {
+            const parsed: unknown = JSON.parse(args);
+            if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
+          } catch {
+            return;
+          }
+          const id = typeof call.id === "string" && call.id.length > 0 ? call.id : `call_${index}`;
+          toolCalls.push({ id, name, arguments: args });
+        });
+      }
+      return {
+        text,
+        toolCalls,
+        usage: {
+          inputTokens: parsed.usage?.prompt_tokens,
+          outputTokens: parsed.usage?.completion_tokens,
+          costUsd: parsed.usage?.cost,
+        },
+        providerRef: parsed.id,
+      };
+    },
   };
+}
+
+/** Normalized ChatMessage → OpenRouter wire message (vendor shape stays here). */
+function chatRequestToWire(message: ChatMessage): Record<string, unknown> {
+  if (message.role === "system" || message.role === "user") {
+    return { role: message.role, content: message.content };
+  }
+  if (message.role === "tool") {
+    return { role: "tool", tool_call_id: message.toolCallId, content: message.content };
+  }
+  const wire: Record<string, unknown> = { role: "assistant", content: message.content };
+  if (message.toolCalls !== undefined && message.toolCalls.length > 0) {
+    wire["tool_calls"] = message.toolCalls.map((call) => ({
+      id: call.id,
+      type: "function",
+      function: { name: call.name, arguments: call.arguments },
+    }));
+  }
+  return wire;
 }

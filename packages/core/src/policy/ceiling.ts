@@ -422,6 +422,10 @@ export interface GatewayPolicyV1 {
   /** §22 turn orchestration flag (gateway.routing); absent → "legacy".
    * "single" = the single-author cognitive loop. */
   readonly routing?: "single" | "legacy";
+  /** Native-tool cognition flag (native-tool-cognition.md §9); absent →
+   * "envelope". "native" requires routing "single" (the §22.10 shared
+   * lanes still run; only the cognitive engine swaps). */
+  readonly cognition?: "envelope" | "native";
   /** Shell-trust R3.3: bounded transient-provider retry for INTERACTIVE
    * cognition/verifier calls only (never worker/assignment execution).
    * Absent → true (on). */
@@ -849,6 +853,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const gatewayInterpret: { value: GatewayInterpretPolicy | null } = { value: null };
   const gatewayPasses: { value: GatewayPassesPolicy | null } = { value: null };
   let gatewayRouting: "single" | "legacy" | null = null;
+  let gatewayCognition: "envelope" | "native" | null = null;
   let gatewayProviderRetry: boolean | null = null;
   const sensorsGmail: { value: GmailSensorPolicy | null } = { value: null };
   const calibrationDaily: { value: CalibrationPolicy | null } = { value: null };
@@ -998,6 +1003,14 @@ export function parsePolicyV1(text: string): PolicyV1 {
         gatewayRouting = value;
         continue;
       }
+      if (key === "cognition") {
+        if (value !== "envelope" && value !== "native") {
+          throw new Error(`policy: gateway.cognition must be 'envelope' or 'native', got '${value}'`);
+        }
+        if (gatewayCognition !== null) throw new Error("policy: duplicate gateway.cognition key");
+        gatewayCognition = value;
+        continue;
+      }
       if (key === "provider_retry") {
         // The gateway section parses scalar values as strings (same as
         // routing) — accept the boolean or its string form.
@@ -1039,6 +1052,7 @@ export function parsePolicyV1(text: string): PolicyV1 {
       ...(gatewayContext.value !== null ? { context: gatewayContext.value } : {}),
       ...(gatewayInterpret.value !== null ? { interpret: gatewayInterpret.value } : {}),
       ...(gatewayRouting !== null ? { routing: gatewayRouting } : {}),
+      ...(gatewayCognition !== null ? { cognition: gatewayCognition } : {}),
       ...(gatewayProviderRetry !== null ? { providerRetry: gatewayProviderRetry } : {}),
       passes: gatewayPasses.value,
     };
@@ -1058,6 +1072,14 @@ export function parsePolicyV1(text: string): PolicyV1 {
           "policy: gateway.routing 'single' requires a complete gateway.passes block (route, answer_standard, answer_fallback models)",
         );
       }
+    }
+    // Native-tool cognition (native-tool-cognition.md §9): `cognition: native`
+    // runs from the §22 single fork only — with legacy routing it would be
+    // silently inert (the same blind-spot class R3.4 closed). Fail closed.
+    if (gatewayCognition === "native" && gatewayRouting !== "single") {
+      throw new Error(
+        "policy: gateway.cognition 'native' requires gateway.routing 'single'",
+      );
     }
   }
   if (sawSensors && sensorsGmail.value !== null) {

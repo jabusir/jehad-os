@@ -970,17 +970,19 @@ export function parseCognitiveEnvelope(text: string): CognitiveEnvelope | null {
  * The pending types a `proposal_resolutions{action:"apply"}` may resolve.
  * Everything EXCEPT the consequential three — outcome_spec, calendar,
  * cross-principal — which apply exclusively through their §22.10.3/4
- * token lanes. A structural type-set check, not a heuristic.
+ * token lanes. A structural type-set check, not a heuristic. The native
+ * gateway's staged-write slot (`native_write`, native-tool-cognition.md
+ * §6.2) resolves through the same bar: it is a low-risk bounded offer.
  */
-export const CONSENT_CLASS_BAR: ReadonlySet<CognitiveOperationType> = new Set(
-  COGNITIVE_OPERATION_TYPES.filter(
+export const CONSENT_CLASS_BAR: ReadonlySet<string> = new Set(
+  [...COGNITIVE_OPERATION_TYPES, "native_write"].filter(
     (type) => type !== "outcome_spec" && type !== "calendar_action" && type !== "cross_principal_profile",
   ),
 );
 
 /** True when `pendingType` may be `apply`-resolved from an envelope. */
 export function resolutionAllowed(pendingType: CognitiveOperationType | string): boolean {
-  return (CONSENT_CLASS_BAR as ReadonlySet<string>).has(pendingType);
+  return CONSENT_CLASS_BAR.has(pendingType);
 }
 
 // ---------------------------------------------------------------------------
@@ -1069,8 +1071,11 @@ function rollForwardPastTime(
  * deterministic bounded placeholder — under §22 the MODEL authors the
  * offer in its own words next round; this field is legacy pending-slot
  * metadata, kept shape-valid for the shared parser.
+ *
+ * Exported for the native tool gateway (native-tool-cognition.md §6.2):
+ * post-read writes and staging share this exact pending-slot machinery.
  */
-async function parkPendingProposal(
+export async function parkPendingProposal(
   db: OperationsDb,
   ctx: OperationContext,
   type: ThreadPendingProposalType,

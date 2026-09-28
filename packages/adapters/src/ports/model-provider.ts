@@ -41,6 +41,60 @@ export interface ModelRequest {
   readonly runId?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Native tool-calling chat (native-tool-cognition.md §5.1 — additive port).
+// `complete()` stays the text-completion contract for every existing caller;
+// `chat()` is the typed tool-calling surface the native cognition loop uses.
+// ---------------------------------------------------------------------------
+
+/** One provider-normalized tool call inside an assistant turn. */
+export interface ChatToolCall {
+  readonly id: string;
+  readonly name: string;
+  /** Raw JSON string exactly as the provider returned it (parsed by the gateway). */
+  readonly arguments: string;
+}
+
+/** A chat message in provider-normalized shape (vendor types stay inside adapters). */
+export type ChatMessage =
+  | { readonly role: "system"; readonly content: string }
+  | { readonly role: "user"; readonly content: string }
+  | { readonly role: "assistant"; readonly content: string; readonly toolCalls?: readonly ChatToolCall[] }
+  | { readonly role: "tool"; readonly content: string; readonly toolCallId: string };
+
+/** A tool definition (JSON-schema parameters — validated again at the gateway). */
+export interface ChatTool {
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: Record<string, unknown>;
+}
+
+export interface ChatRequest {
+  readonly domainId: string;
+  readonly sensitivity: Sensitivity;
+  readonly provider: string;
+  readonly model: string;
+  readonly messages: readonly ChatMessage[];
+  /** Absent/empty = plain chat (no tool surface offered). */
+  readonly tools?: readonly ChatTool[];
+  /**
+   * Per-call provider timeout (the native path's ratified T_native, 15s).
+   * Providers honor min(this, their own default); omitted = provider default.
+   */
+  readonly timeoutMs?: number;
+  /** Set when the call happens inside a run (model_calls ledger). */
+  readonly runId?: string;
+}
+
+export interface ChatResult {
+  /** Assistant text content ("" when the turn is pure tool calls). */
+  readonly text: string;
+  /** Tool calls requested by the assistant, in provider order. */
+  readonly toolCalls: readonly ChatToolCall[];
+  readonly usage?: ModelResult["usage"];
+  readonly providerRef?: string;
+}
+
 /**
  * TODO(at M5): full result shape (finish reason, raw provider ref, latency).
  * Usage/cost feed the `model_calls` ledger (plan §14).
@@ -77,4 +131,11 @@ export interface ModelResult {
 export interface ModelProvider {
   readonly id: string;
   complete(request: ModelRequest): Promise<ModelResult>;
+  /**
+   * Native tool-calling chat (native-tool-cognition §5.1). OPTIONAL:
+   * providers without the capability simply omit it — callers must treat
+   * its absence as an infrastructure refusal (the native loop refuses to
+   * run on such a provider rather than degrading silently).
+   */
+  chat?(request: ChatRequest): Promise<ChatResult>;
 }

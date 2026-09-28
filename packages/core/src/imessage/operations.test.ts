@@ -664,7 +664,10 @@ describe("parseCognitiveEnvelope (strict single-line JSON)", () => {
 
 describe("CONSENT_CLASS_BAR (§22.6)", () => {
   it("allows every non-consequential type; blocks outcome_spec/calendar/cross-principal", () => {
-    expect(CONSENT_CLASS_BAR.size).toBe(9);
+    // native-tool-cognition.md §6.2 (ratified 2026-09-28): the gateway's
+    // staged-write slot (native_write) resolves through the same bar —
+    // it is a low-risk bounded offer, unlike the token-lane three.
+    expect(CONSENT_CLASS_BAR.size).toBe(10);
     for (const type of COGNITIVE_OPERATION_TYPES) {
       const allowed = resolutionAllowed(type);
       if (type === "outcome_spec" || type === "calendar_action" || type === "cross_principal_profile") {
@@ -673,6 +676,7 @@ describe("CONSENT_CLASS_BAR (§22.6)", () => {
         expect(allowed, type).toBe(true);
       }
     }
+    expect(resolutionAllowed("native_write")).toBe(true);
   });
 
   it("unknown pending types are not resolvable", () => {

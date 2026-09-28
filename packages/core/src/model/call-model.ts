@@ -39,7 +39,13 @@
 // reservation is reconciled. That is the tightest guarantee available
 // without pre-payment or provider cost quotes.
 
-import type { ModelProvider, ModelRequest, ModelResult } from "@jehad/adapters";
+import type {
+  ChatRequest,
+  ChatResult,
+  ModelProvider,
+  ModelRequest,
+  ModelResult,
+} from "@jehad/adapters";
 import { EgressDenialError, EgressPolicyError, ModelEgressPolicyRegistry, egressGatedModelProvider } from "../egress/index.js";
 import type { SqlExecutor } from "../policy/grants.js";
 import { recordAudit } from "../actions/audit.js";
@@ -77,6 +83,17 @@ export interface ModelCallInput extends ModelRequest {
    *  provider flakiness) — INTERACTIVE cognition/verifier calls only.
    *  Worker/assignment execution never sets it. */
   readonly retryOnTransient?: boolean;
+}
+
+/** The native tool-calling chat surface over the same ledger/budget/egress. */
+export type ModelCallChatInput = ChatRequest & Omit<ModelCallInput, keyof ModelRequest>;
+
+export interface ModelCallChatOutcome {
+  readonly result: ChatResult;
+  readonly resultStatus: ModelCallResultStatus;
+  readonly latencyMs: number;
+  readonly costUsd: number;
+  readonly monthSpendUsdBefore: number;
 }
 
 export interface ModelCallDeps {
@@ -134,6 +151,14 @@ export class MissingRunError extends Error {
   }
 }
 
+/** Raised when the native chat surface hits a provider without chat(). */
+export class NativeChatUnsupportedError extends Error {
+  constructor(providerId: string) {
+    super(`provider "${providerId}" does not implement chat() (native tool calling)`);
+    this.name = "NativeChatUnsupportedError";
+  }
+}
+
 /**
  * Fixed advisory-lock key for the model-budget reservation ("modelbud" as
  * eight ASCII bytes). One key for all model calls: the caps police a single
@@ -157,6 +182,9 @@ type BudgetAdmission =
   | { readonly denied: true; readonly spentUsd: number }
   | { readonly denied: false; readonly reservation: Reservation };
 
+/** The ledger fields reserveBudget actually reads (both dispatch surfaces). */
+type ReservationInput = Pick<ModelCallInput, "runId" | "provider" | "model" | "promptVersion" | "principalId" | "surface" | "outcomeId" | "assignmentId">;
+
 /**
  * The race-free admission step: under pg_advisory_xact_lock, SUM the month's
  * spend (finalized + reserved rows) and, under the hard cap, INSERT the
@@ -165,7 +193,7 @@ type BudgetAdmission =
  */
 async function reserveBudget(
   db: ModelCallDb,
-  input: ModelCallInput,
+  input: ReservationInput,
   budget: ModelBudget,
 ): Promise<BudgetAdmission> {
   const client = await db.connect();
@@ -245,6 +273,49 @@ async function releaseReservation(db: SqlExecutor, reservationId: string): Promi
 }
 
 export async function callModel(deps: ModelCallDeps, input: ModelCallInput): Promise<ModelCallOutcome> {
+  const outcome = await runModelCall(deps, input, (gated, request) =>
+    gated.complete(request as ModelRequest), (result) => result as ModelResult);
+  return outcome as ModelCallOutcome;
+}
+
+/**
+ * Native tool-calling chat over the SAME admission → egress → dispatch →
+ * ledger path (native-tool-cognition §5.1): identical reservation, caps,
+ * audit, and result statuses. SINGLE-ATTEMPT unless retryOnTransient is set
+ * (the native loop leaves it unset — its retry is loop-owned). Requires a
+ * provider that implements chat(); the loop treats ChatUnsupportedError as
+ * an infrastructure refusal.
+ */
+export async function callModelChat(
+  deps: ModelCallDeps,
+  input: ModelCallChatInput,
+): Promise<ModelCallChatOutcome> {
+  if (deps.provider.chat === undefined) {
+    // No dispatch, no reservation — a wiring error, not a provider failure.
+    throw new NativeChatUnsupportedError(deps.provider.id);
+  }
+  return runModelCall(
+    deps,
+    input,
+    (gated, request) => gated.chat!(request as ChatRequest),
+    (result) => result as ChatResult,
+  ) as Promise<ModelCallChatOutcome>;
+}
+
+type ModelCallRequest = ModelCallInput | ModelCallChatInput;
+
+/**
+ * THE shared model-call path (both dispatch surfaces): race-free budget
+ * reservation → egress gate → dispatch (opt-in transient retry) →
+ * reservation finalized with actuals. `dispatch` performs the provider
+ * call; `asResult` narrows the dispatch result for usage extraction.
+ */
+async function runModelCall(
+  deps: ModelCallDeps,
+  input: ModelCallRequest,
+  dispatch: (gated: ModelProvider, request: ModelCallRequest) => Promise<unknown>,
+  asResult: (result: unknown) => ModelResult | ChatResult,
+): Promise<ModelCallOutcome | ModelCallChatOutcome> {
   if (input.runId === undefined || input.runId.length === 0) throw new MissingRunError();
 
   const budget = deps.budget ?? modelBudgetFromEnv();
@@ -285,7 +356,7 @@ export async function callModel(deps: ModelCallDeps, input: ModelCallInput): Pro
   const gated = egressGatedModelProvider(deps.provider, deps.registry, deps.db);
 
   const startedAt = Date.now();
-  let result: ModelResult | undefined;
+  let result: unknown;
   // Shell-trust R3.3 (owner amendment 4): INTERACTIVE-ONLY transient retry.
   // The flag is set by the cognitive loop's dispatchModel (cognition +
   // verifier calls) — worker/assignment execution stays single-shot with
@@ -297,8 +368,8 @@ export async function callModel(deps: ModelCallDeps, input: ModelCallInput): Pro
   let lastDispatchError: unknown = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      result = await gated.complete(input);
-      
+      result = await dispatch(gated, input);
+
       if (attempt > 1) {
         await recordAudit(deps.db, {
           actor: "system:model-provider",
@@ -358,7 +429,7 @@ export async function callModel(deps: ModelCallDeps, input: ModelCallInput): Pro
   }
   const latencyMs = Math.max(0, Date.now() - startedAt);
 
-  const finalResult = result as ModelResult;
+  const finalResult = asResult(result);
   const costUsd = finalResult.usage?.costUsd !== undefined && Number.isFinite(finalResult.usage.costUsd) && finalResult.usage.costUsd > 0
     ? finalResult.usage.costUsd
     : 0;
@@ -388,5 +459,5 @@ export async function callModel(deps: ModelCallDeps, input: ModelCallInput): Pro
     });
   }
 
-  return { result: finalResult, resultStatus, latencyMs, costUsd, monthSpendUsdBefore };
+  return { result: finalResult, resultStatus, latencyMs, costUsd, monthSpendUsdBefore } as ModelCallOutcome | ModelCallChatOutcome;
 }

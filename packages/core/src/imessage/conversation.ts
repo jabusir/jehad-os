@@ -104,6 +104,7 @@ import {
 import { setThreadPendingProposals, setThreadPendingProbe } from "./threads.js";
 import { pendingProposalsByType, type ThreadPendingProposal, type ThreadPendingProposalType } from "./threads.js";
 import { runCognitiveTurn } from "./cognitive-turn.js";
+import { runNativeTurn } from "./native/native-turn.js";
 import { redactContent } from "./redact.js";
 import { collectRatifiedLessons, renderLessonsBlock } from "../queries/lessons.js";
 import { resolveProfileBehaviors } from "./profiles.js";
@@ -513,6 +514,8 @@ function pendingProposalHumanName(type: ThreadPendingProposalType): string {
       return "the memory";
     case "outcome_spec":
       return "the delegated outcome";
+    case "native_write":
+      return "the staged action";
   }
 }
 
@@ -879,8 +882,12 @@ async function converseTurn(
   let calibrationNote: string | null = null;
   // §22 turn orchestration flag: "single" routes the turn to the cognitive
   // loop after the shared §22.10 lanes; "legacy" (default) runs the lanes
-  // and two-pass machinery below.
-  const routing = (await loadConversationPolicyFile())?.gateway?.routing ?? "legacy";
+  // and two-pass machinery below. The native-tool cognition flag
+  // (gateway.cognition, native-tool-cognition.md §9) swaps the cognitive
+  // ENGINE under the same shared lanes; absent → the envelope loop.
+  const activeGatewayPolicy = await loadConversationPolicyFile();
+  const routing = activeGatewayPolicy?.gateway?.routing ?? "legacy";
+  const cognition = activeGatewayPolicy?.gateway?.cognition ?? "envelope";
   if (isTextOnlyAttachment(input.text)) {
     return deterministicReply(deps, input, ctx, {
       content: ATTACHMENT_ONLY_REPLY,
@@ -1851,7 +1858,11 @@ async function converseTurn(
   // §22 single-author path: the §22.10 shared lanes above have run; from
   // here the turn belongs to the cognitive loop (which performs its own
   // typing presence, budget checks, run/thread bookkeeping, and shipping).
+  // gateway.cognition "native" (spike W1) swaps in the native tool loop.
   if (routing === "single") {
+    if (cognition === "native") {
+      return runNativeTurn(deps, input);
+    }
     return runCognitiveTurn(deps, input);
   }
   // Phase F: capture is deterministic-first — the imperative pattern

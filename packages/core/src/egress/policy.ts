@@ -253,23 +253,36 @@ export function egressGatedModelProvider(
   registry: ModelEgressPolicyRegistry,
   db: SqlExecutor,
 ): ModelProvider {
-  return {
+  const assertEgress = async (ctx: {
+    domainId: string;
+    sensitivity: string;
+    provider: string;
+    model: string;
+  }): Promise<void> => {
+    if (ctx.provider !== provider.id) {
+      throw new EgressPolicyError(
+        `egress-gated provider "${provider.id}" received a request naming provider "${ctx.provider}"`,
+      );
+    }
+    const storageMode = await requireStorageMode(db, ctx as EgressCheckContext);
+    registry.assertAllowed({ ...ctx, storageMode } as EgressCheckContext);
+  };
+  const gated: ModelProvider = {
     id: provider.id,
     async complete(request: ModelRequest): Promise<ModelResult> {
-      if (request.provider !== provider.id) {
-        throw new EgressPolicyError(
-          `egress-gated provider "${provider.id}" received a request naming provider "${request.provider}"`,
-        );
-      }
-      const ctx: EgressCheckContext = {
-        domainId: request.domainId,
-        sensitivity: request.sensitivity,
-        provider: request.provider,
-        model: request.model,
-      };
-      const storageMode = await requireStorageMode(db, ctx);
-      registry.assertAllowed({ ...ctx, storageMode });
+      await assertEgress(request);
       return provider.complete(request);
     },
   };
+  // Native tool-calling chat composes with the SAME pre-dispatch check
+  // (native-tool-cognition §5.1: a model_calls row must imply the egress
+  // check passed, whatever the dispatch surface).
+  if (provider.chat !== undefined) {
+    const inner = provider.chat.bind(provider);
+    gated.chat = async (request) => {
+      await assertEgress(request);
+      return inner(request);
+    };
+  }
+  return gated;
 }

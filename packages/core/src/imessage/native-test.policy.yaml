@@ -1,0 +1,30 @@
+# Native tool cognition — W1 spike fixture policy
+# (native-tool-cognition.md §9). Same v1 shape as the repo-root policy.yaml;
+# routing single + cognition native so the hermetic suites drive
+# runNativeTurn. Loaded via POLICY_YAML_PATH (the canonical override seam).
+version: 1
+autonomy_ceiling:
+  read: autonomous
+  propose: autonomous
+  write_canonical: gated
+  external_side_effect: approval_required
+  money_and_contracts: prohibited
+notifications:
+  autoApproveKinds: ["brief", "reply", "typing"]
+  escalationMinUrgency: high
+  defaultTtlMinutes: 240
+gateway:
+  routing: single
+  cognition: native
+  passes: { route: { model: openai/gpt-4.1 }, answer_fast: { model: openai/gpt-4.1 }, answer_standard: { model: anthropic/claude-sonnet-4.5 }, answer_fallback: { model: google/gemini-3.8-flash }, route_fallback: { model: google/gemini-3.8-flash } }
+  capture: { enabled: true, principals: [josctl], max_per_hour: 5, dedupe_window_hours: 24 }
+  review: { enabled: true, principals: [josctl], max_bad_refs: 3, snooze_hours: 24, ref_ttl_hours: 168, digest_max_candidates: 10, digest_max_escalations: 5 }
+  actions: { enabled: true, principals: [josctl], max_proposals_per_day: 10, max_dispatches_per_day: 5, confirm_ttl_minutes: 10 }
+  context: { enabled: true, max_reads_per_turn: 3, per_block_token_budget: 1500 }
+  interpret: { enabled: true }
+  principals:
+    josctl: { model: openai/gpt-4o-mini, requests_per_hour: 60, cost_per_day: 5.0, reads: [calendar, commitments, gmail, state, memory, system, work] }
+personas: { enabled: true, principals: [josctl] }
+calibration:
+  daily: { enabled: false, principals: [], prompt_local_hour: 20 }
+outcomes: { enabled: true, max_active_per_principal: 3, default_budget_usd: 5, default_deadline_days: 14 }

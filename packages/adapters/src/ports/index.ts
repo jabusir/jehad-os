@@ -32,6 +32,11 @@ export type {
   HarnessRunStatus,
 } from "./harness-adapter.js";
 export type {
+  ChatMessage,
+  ChatRequest,
+  ChatResult,
+  ChatTool,
+  ChatToolCall,
   ModelEgressPolicy,
   ModelProvider,
   ModelRequest,
