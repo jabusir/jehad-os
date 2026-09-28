@@ -428,11 +428,12 @@ describe("gmail.search + gmail.read execution (no-DB fake executor)", () => {
     const { sql, values } = db.issued[0]!;
     expect(sql.trimStart().toUpperCase().startsWith("SELECT")).toBe(true);
     expect(sql).toMatch(/ORDER BY internal_date DESC NULLS LAST/);
-    // LIKE wildcards escaped — literal substring semantics, lowercased.
+    expect(sql).not.toMatch(/LIKE/); // tokenized ranking ranks in JS, not SQL
+    // Tokenized retrieval (shell-trust bake-off fix): the windowed fetch is
+    // principal-bound with a bounded row cap; ranking happens in JS.
     expect(values[0]).toBe("josctl");
-    expect(values[1]).toBe("%plaid 100\\%\\_done%");
-    expect(values[2]).toBe(new Date(NOW.getTime() - 7 * 86_400_000).toISOString());
-    expect(values[3]).toBe(8);
+    expect(values[1]).toBe(new Date(NOW.getTime() - 7 * 86_400_000).toISOString());
+    expect(values[2]).toBe(24); // 3x the 8-row render cap, newest first
   });
 
   it("gmail.search: max_age_days narrows the window (bounded 1-7)", async () => {
@@ -442,7 +443,7 @@ describe("gmail.search + gmail.read execution (no-DB fake executor)", () => {
       { tool: "gmail.search", query: "x", max_age_days: 2 },
       { now: () => NOW, principalId: "josctl" },
     );
-    expect(db.issued[0]!.values[2]).toBe(new Date(NOW.getTime() - 2 * 86_400_000).toISOString());
+    expect(db.issued[0]!.values[1]).toBe(new Date(NOW.getTime() - 2 * 86_400_000).toISOString());
   });
 
   it("gmail.search falls back to queryText keywords (memory.recall pattern) and throws without any query", async () => {
@@ -453,7 +454,6 @@ describe("gmail.search + gmail.read execution (no-DB fake executor)", () => {
       queryText: "  what did plaid say  ",
     });
     expect((result.data as { query: string }).query).toBe("what did plaid say");
-    expect(db.issued[0]!.values[1]).toBe("%what did plaid say%");
     await expect(
       executeReadTool(db, { tool: "gmail.search" }, { now: () => NOW, principalId: "josctl" }),
     ).rejects.toThrow(/query/);
@@ -482,7 +482,7 @@ describe("gmail.search + gmail.read execution (no-DB fake executor)", () => {
     expect(result.tool).toBe("gmail.search");
     expect(result.source).toBe("gmail");
     expect(result.coverage).toBe(
-      "Gmail (your connected account): keyword match over subject, sender, and body text, last 7 days only; not full mail search (no operators, no attachments); to open a specific result use gmail.read with its messageId",
+      "Gmail (your connected account): each of your words is matched across subject, sender, and body (messages matching more words rank higher), last 7 days only; not full mail search (no operators, no attachments); to open a specific result use gmail.read with its messageId",
     );
     const data = result.data as {
       timezone: string;
@@ -511,7 +511,7 @@ describe("gmail.search + gmail.read execution (no-DB fake executor)", () => {
   });
 
   it("gmail.search caps at 8 rows with an honest truncated flag; empty is honest zero", async () => {
-    const many = Array.from({ length: 12 }, (_, i) => msgRow({ gmail_message_id: `gm-${i}` }));
+    const many = Array.from({ length: 12 }, (_, i) => msgRow({ gmail_message_id: `gm-${i}`, subject: `Statement ${i}` }));
     const db = fakeDb([{ sql: "FROM gmail_messages", rows: many }]);
     const result = await executeReadTool(
       db,

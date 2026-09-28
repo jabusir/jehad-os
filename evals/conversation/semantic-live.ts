@@ -13,7 +13,7 @@
 
 import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createOpenRouterProvider } from "@jehad/adapters";
@@ -21,6 +21,7 @@ import type { ModelProvider, ModelRequest, ModelResult } from "@jehad/adapters";
 import {
   ModelEgressPolicyRegistry,
   buildVerificationPrompt,
+  executeOperation,
   parseVerificationVerdict,
   callModel,
   createReminder,
@@ -163,28 +164,31 @@ async function seedCase(db: { pool: unknown }, domainId: string, c: SemanticCase
     });
   }
   if (c.seed?.pendingOffer !== undefined) {
+    // Bake-off fix (owner directive): park the offer through the REAL
+    // production seam (executeOperation → parkPendingProposal: stamped id,
+    // expiresAt, parkedAtSeq, audited) — the hand-written metadata entry
+    // was not production-faithful and the apply-flow failures it produced
+    // were fixture artifacts, not cognition misses.
     const principalId = await principalIdOf(pool);
     const thread = await resolveActiveThread(pool as never, {
       principalId,
       surface: "imessage",
       now: NOW,
     });
-    await setThreadPendingProposals(pool as never, {
-      threadId: thread.id,
-      principalId,
-      pending: [
-        {
-          type: "task_batch" as never,
-          at: NOW.toISOString(),
-          payload: {
-            type: "task_batch",
-            items: c.seed.pendingOffer.items.map((i) => ({ title: i.title })),
-          },
-          offered: `task_batch (${c.seed.pendingOffer.items.length} items)`,
-        },
-      ],
-      now: NOW,
-    });
+    await executeOperation(
+      pool as never,
+      {
+        type: "task_batch",
+        items: c.seed.pendingOffer.items.map((i) => ({ title: i.title, due: null })),
+      },
+      {
+        principalId,
+        principalName: PRINCIPAL_NAME,
+        threadId: thread.id,
+        now: NOW,
+        calendarPolicy: null,
+      },
+    );
   }
   if (c.seed?.outcome !== undefined) {
     const principalId = await principalIdOf(pool);
@@ -313,7 +317,16 @@ async function main(): Promise<void> {
   }
   const metered: ModelProvider = {
     id: "openrouter",
-    complete: completeWithRetry,
+    complete: async (request: ModelRequest): Promise<ModelResult> => {
+      const result = await completeWithRetry(request);
+      if (process.env.CAPTURE_RAW !== undefined) {
+        appendFileSync(
+          process.env.CAPTURE_RAW,
+          JSON.stringify({ model: request.model, prompt: request.prompt.slice(0, 400), text: result.text }) + "\n",
+        );
+      }
+      return result;
+    },
   };
 
   await migrateUp(db.pool);

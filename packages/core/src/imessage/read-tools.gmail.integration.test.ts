@@ -212,7 +212,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail.search + gmail.read (integration, C4)
 
     const result = await search("sirius");
     expect(result.coverage).toBe(
-      "Gmail (your connected account): keyword match over subject, sender, and body text, last 7 days only; not full mail search (no operators, no attachments); to open a specific result use gmail.read with its messageId",
+      "Gmail (your connected account): each of your words is matched across subject, sender, and body (messages matching more words rank higher), last 7 days only; not full mail search (no operators, no attachments); to open a specific result use gmail.read with its messageId",
     );
     const data = result.data as {
       matchCount: number;
@@ -230,7 +230,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail.search + gmail.read (integration, C4)
       (bySender.data as { matches: { messageId: string }[] }).matches.map((m) => m.messageId),
     ).toEqual(["c4-sender"]);
 
-    const none = await search("qz-no-such-keyword");
+    const none = await search("qqzzxx yywwvv");
     expect(none.data).toMatchObject({ matchCount: 0, matches: [], truncated: false });
   });
 

@@ -897,10 +897,18 @@ export function parseCognitiveEnvelope(text: string): CognitiveEnvelope | null {
   if (obj.operations_requested.length > OPERATIONS_MAX_PER_TURN) return null;
   const operations: CognitiveOperation[] = [];
   const seenTypes = new Set<string>();
+  // Bake-off capture (sol/sonnet-5, 2026-09-27): models express a to-do
+  // LIST as N well-formed reminder_create ops — the blanket one-per-type
+  // rule rejected the DUPLICATE and voided the whole envelope into the
+  // degrade path. Bounded fix: duplicates stay legal ONLY for
+  // apply-immediate ops (no pending slot); slot-class types (task_batch,
+  // outcome_spec, profile_update, selectors, resolutions) remain
+  // one-per-type, and every op still passes the strict shape validator.
+  const IMMEDIATE_TYPES = new Set(["reminder_create", "memory_candidate"]);
   for (const entry of obj.operations_requested) {
     const operation = parseCognitiveOperation(entry);
     if (operation === null) return null;
-    if (seenTypes.has(operation.type)) return null;
+    if (seenTypes.has(operation.type) && !IMMEDIATE_TYPES.has(operation.type)) return null;
     seenTypes.add(operation.type);
     operations.push(operation);
   }

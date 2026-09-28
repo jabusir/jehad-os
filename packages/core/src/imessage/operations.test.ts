@@ -537,11 +537,30 @@ describe("parseCognitiveEnvelope (strict single-line JSON)", () => {
         ],
       }),
     ).toBe(false);
+    // Bake-off fix: duplicate APPLY-IMMEDIATE ops are legal (models express
+    // a to-do list as N reminder_creates — the blanket rule voided the whole
+    // envelope into the degrade path). Slot-class types stay one-per-type.
     expect(
       envelopeParses({
         operations_requested: [
           { type: "memory_candidate", summary: "a" },
           { type: "memory_candidate", summary: "b" },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      envelopeParses({
+        operations_requested: [
+          { type: "reminder_create", title: "t1", dueDate: null, dueTime: null, whenWords: null },
+          { type: "reminder_create", title: "t2", dueDate: null, dueTime: null, whenWords: null },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      envelopeParses({
+        operations_requested: [
+          { type: "commitment_transition", commitmentId: UUID_A, verb: "done", note: null },
+          { type: "commitment_transition", commitmentId: UUID_B, verb: "missed", note: null },
         ],
       }),
     ).toBe(false);

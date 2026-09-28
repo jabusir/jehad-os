@@ -337,16 +337,36 @@ export async function searchGmailContentByKeyword(
   query: GmailContentKeywordSearch,
 ): Promise<readonly GmailContentRecord[]> {
   if (query.text.length === 0) return [];
-  const conditions = [
-    "principal_id = $1",
-    "(lower(coalesce(subject, '')) LIKE $2 ESCAPE '\\' OR lower(coalesce(from_addr, '')) LIKE $2 ESCAPE '\\' OR lower(coalesce(body_text, '')) LIKE $2 ESCAPE '\\')",
-  ];
-  const params: unknown[] = [principalId, likeLiteral(query.text.toLowerCase())];
+  // Shell-trust bake-off fix (owner directive 2026-09-27): the old search
+  // was a literal %whole-query% substring — "plumber invoice" could never
+  // match billing@plumbco.com + "Invoice #4417". Generic retrieval
+  // semantics: tokenize the query, match each TERM across sender, subject,
+  // and body, rank by distinct matched terms then recency. Messages
+  // matching MORE of the user's words rank higher; a message matching any
+  // term is findable. Still principal-scoped, windowed, and capped.
+  let terms = [...new Set(
+    query.text
+      .toLowerCase()
+      .split(/[^a-z0-9@.]+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 2 && !GMAIL_SEARCH_STOPWORDS.has(t)),
+  )].slice(0, 6);
+  if (terms.length === 0) {
+    // Every word filtered (stopwords/1-char): fall back to the raw query as
+    // a single term so a search is still attempted — never a silent empty.
+    terms = [query.text.toLowerCase().trim()].filter((t) => t.length > 0);
+    if (terms.length === 0) return [];
+  }
+  const conditions = ["principal_id = $1"];
+  const params: unknown[] = [principalId];
   if (query.since !== undefined) {
     params.push(query.since);
     conditions.push(`internal_date >= $${params.length}::timestamptz`);
   }
-  params.push(Math.min(Math.max(query.limit ?? 20, 1), 100));
+  // Fetch the windowed slice (bounded: 3x the desired limit, newest first)
+  // and rank in JS — term scoring is deterministic; SQL LIKE-per-term would
+  // need N OR'd conditions with no scoring.
+  params.push(Math.min(Math.max((query.limit ?? 20) * 3, 6), 120));
   const result = await db.query(
     `SELECT ${RECORD_COLUMNS} FROM gmail_messages
      WHERE ${conditions.join(" AND ")}
@@ -354,8 +374,35 @@ export async function searchGmailContentByKeyword(
      LIMIT $${params.length}`,
     params,
   );
-  return (result.rows as RecordRow[]).map(toRecord);
+  const ranked = (result.rows as RecordRow[])
+    .map((row) => {
+      const record = toRecord(row);
+      const subject = (record.subject ?? "").toLowerCase();
+      const from = (record.fromAddr ?? "").toLowerCase();
+      const body = (record.bodyText ?? "").toLowerCase();
+      let matchedTerms = 0;
+      for (const term of terms) {
+        if (subject.includes(term) || from.includes(term) || body.includes(term)) {
+          matchedTerms += 1;
+        }
+      }
+      return { record, matchedTerms };
+    })
+    .filter((entry) => entry.matchedTerms > 0)
+    .sort((a, b) => (b.matchedTerms - a.matchedTerms) || (new Date(b.record.internalDate ?? b.record.ingestedAt).getTime() - new Date(a.record.internalDate ?? a.record.ingestedAt).getTime()));
+  // Return one EXTRA row beyond the limit when more matched, so callers
+  // can set an honest truncated flag before slicing to their render cap.
+  return ranked.slice(0, Math.min(Math.max(query.limit ?? 20, 1), 100) + 1).map((entry) => entry.record);
 }
+
+/** Generic English function words that carry no retrieval signal — a fixed
+ * structural list, never domain vocabulary. */
+const GMAIL_SEARCH_STOPWORDS: ReadonlySet<string> = new Set([
+  "the", "a", "an", "my", "me", "i", "about", "any", "are", "did", "do",
+  "does", "for", "from", "have", "has", "how", "in", "is", "it", "of", "on",
+  "or", "that", "to", "was", "what", "when", "who", "why", "you", "your",
+  "please", "can", "could", "would", "should", "there", "their", "them",
+]);
 
 /** Bounded recent-content read, principal-scoped, oldest-first. */
 export async function searchGmailContent(
