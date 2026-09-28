@@ -1,0 +1,362 @@
+{
+  "label": "w2a-pilot-native",
+  "driver": "native",
+  "expressibleOnly": true,
+  "freezeSha": null,
+  "split": "dev",
+  "generatedAt": "2026-09-28T20:04:09.275Z",
+  "modelPolicy": "repo policy.yaml gateway.passes (route gpt-4.1 / standard sonnet-4.5)",
+  "spendCeilingUsd": 0.35,
+  "totalSpendUsd": 0.1619,
+  "avgLatencyMs": 28978,
+  "casePassRate": 0.5,
+  "commonControlPassRate": 0.5,
+  "judgeUnavailableCount": 0,
+  "metrics": {
+    "envelope_validity": 0.7,
+    "tool_validity": 0.8,
+    "read_selection": 1,
+    "op_type": 1,
+    "op_args": 1,
+    "no_unauthorized_mutation": 1,
+    "e2e_effects": 1,
+    "truthful_ack": 1,
+    "no_phantom_work": 1,
+    "read_content": 1
+  },
+  "byBehavior": {
+    "reminder_create": {
+      "total": 3,
+      "pass": 2
+    },
+    "reminder_datetime": {
+      "total": 3,
+      "pass": 1
+    },
+    "task_capture": {
+      "total": 2,
+      "pass": 0
+    },
+    "commitment_done": {
+      "total": 2,
+      "pass": 2
+    }
+  },
+  "cases": [
+    {
+      "id": "reminder-create-01",
+      "behavior": "reminder_create",
+      "user": "remind me to call mom",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (f1553396-073b-4da0-bf6e-2ebd8fa5ada4) — due 2026-09-26"
+        }
+      ],
+      "reply": "Set a reminder for tomorrow, Saturday, September 26 to call mom, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0202,
+      "latencyMs": 24167
+    },
+    {
+      "id": "reminder-create-02",
+      "behavior": "reminder_create",
+      "user": "set a reminder to water the plants",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (059f069b-012e-4e23-a1e5-e45cfaacabc1) — due 2026-09-26"
+        }
+      ],
+      "reply": "Reminder set for tomorrow, September 26, at 9:00 AM to water the plants, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0147,
+      "latencyMs": 18881
+    },
+    {
+      "id": "reminder-create-03",
+      "behavior": "reminder_create",
+      "user": "don't let me forget to charge the camera batteries",
+      "shipped": true,
+      "degraded": true,
+      "verified": "availability-notice",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (5f6c4548-768e-4c23-bdbf-fd2203450f1c) — due 2026-09-26"
+        }
+      ],
+      "reply": "I couldn't complete that reply — the failure is recorded and nothing further changed.",
+      "checks": {
+        "envelope_validity": false,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true
+      },
+      "failures": [
+        "flagged: contradicted_unresolved (draft lied twice): I've set a reminder for tomorrow at 9:00 AM, Chief.",
+        "shipped=true verified=availability-notice"
+      ],
+      "commonControl": true,
+      "costUsd": 0.0111,
+      "latencyMs": 23767
+    },
+    {
+      "id": "reminder-datetime-01",
+      "behavior": "reminder_datetime",
+      "user": "ping me tomorrow around two about the tailor",
+      "shipped": true,
+      "degraded": true,
+      "verified": "availability-notice",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "failed",
+          "detail": "OPERATION RESULT reminder_create: failed — unsupported-when: tomorrow around two"
+        },
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (598d7887-ecf6-41e8-99e2-731859a8f247) — due 2026-09-26"
+        }
+      ],
+      "reply": "I couldn't complete that reply — the failure is recorded and nothing further changed.",
+      "checks": {
+        "envelope_validity": false,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true
+      },
+      "failures": [
+        "flagged: contradicted_unresolved (draft lied twice): Set a reminder for tomorrow, Saturday, September 26, Chief. I couldn't capture the specific 2:00 PM time, so you'll want",
+        "shipped=true verified=availability-notice"
+      ],
+      "commonControl": true,
+      "costUsd": 0.0147,
+      "latencyMs": 43436
+    },
+    {
+      "id": "reminder-datetime-02",
+      "behavior": "reminder_datetime",
+      "user": "remind me to bring the marriage certificate tomorrow at 2PM",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (c522fc87-0fae-42d1-8fcd-4121f216c208) — due 2026-09-26"
+        }
+      ],
+      "reply": "Set for tomorrow, Saturday, September 26, at 2:00 PM, Chief: bring the marriage certificate.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0149,
+      "latencyMs": 20532
+    },
+    {
+      "id": "reminder-datetime-03",
+      "behavior": "reminder_datetime",
+      "user": "make sure I remember the tailor at 2 tomorrow",
+      "shipped": true,
+      "degraded": true,
+      "verified": "availability-notice",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (cfcd9338-b400-4529-bed5-8182b98e989d) — due 2026-09-26"
+        }
+      ],
+      "reply": "I couldn't complete that reply — the failure is recorded and nothing further changed.",
+      "checks": {
+        "envelope_validity": false,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true
+      },
+      "failures": [
+        "flagged: contradicted_unresolved (draft lied twice): Set for tomorrow, Saturday, September 26, Chief. I've got the reminder down for the tailor at 2, but didn't lock in AM o",
+        "shipped=true verified=availability-notice"
+      ],
+      "commonControl": true,
+      "costUsd": 0.0124,
+      "latencyMs": 26818
+    },
+    {
+      "id": "task-capture-01",
+      "behavior": "task_capture",
+      "user": "track these for me: book the barber, buy cufflinks",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [],
+      "ops": [
+        {
+          "type": "task_batch",
+          "status": "failed",
+          "detail": "invalid: commitments.create arguments failed the schema — re-read the tool's parameter shape and retry once with corrected arguments"
+        },
+        {
+          "type": "task_batch",
+          "status": "parked",
+          "detail": "OPERATION RESULT task_batch: parked (task_batch:6e7e)"
+        }
+      ],
+      "reply": "I wasn't able to capture those — nothing was set. Want me to try adding them again?",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": false,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [
+        "invalid tool calls: 1"
+      ],
+      "commonControl": true,
+      "costUsd": 0.0224,
+      "latencyMs": 44160
+    },
+    {
+      "id": "task-capture-02",
+      "behavior": "task_capture",
+      "user": "add to my list — email the venue, confirm the sound guy",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [],
+      "ops": [
+        {
+          "type": "task_batch",
+          "status": "failed",
+          "detail": "invalid: commitments.create arguments failed the schema — re-read the tool's parameter shape and retry once with corrected arguments"
+        },
+        {
+          "type": "task_batch",
+          "status": "parked",
+          "detail": "OPERATION RESULT task_batch: parked (task_batch:6e7e)"
+        }
+      ],
+      "reply": "That didn't land — nothing was set. Want me to try again, or would you like to add those items a different way?",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": false,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [
+        "invalid tool calls: 1"
+      ],
+      "commonControl": true,
+      "costUsd": 0.0226,
+      "latencyMs": 43563
+    },
+    {
+      "id": "commitment-done-01",
+      "behavior": "commitment_done",
+      "user": "seating chart is done",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "commitment_transition",
+          "status": "applied",
+          "detail": "OPERATION RESULT commitment_transition: applied (624b06bf-75f2-4b99-b6a6-39a42511e8fa) — commitment \"seating chart\" → done (met)"
+        }
+      ],
+      "reply": "Marked the seating chart as done, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0144,
+      "latencyMs": 18348
+    },
+    {
+      "id": "commitment-done-02",
+      "behavior": "commitment_done",
+      "user": "finished the seating chart",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "commitment_transition",
+          "status": "applied",
+          "detail": "OPERATION RESULT commitment_transition: applied (533443a1-1862-45f0-afbb-12ef8d8fcd34) — commitment \"seating chart\" → done (met)"
+        }
+      ],
+      "reply": "Marked \"seating chart\" as done, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0145,
+      "latencyMs": 26112
+    }
+  ]
+}

@@ -1125,7 +1125,9 @@ export async function parkPendingProposal(
       detail: `staged, NOT started — confirm token ${confirmToken} (quote it verbatim in your ask)`,
     };
   }
-  return { status: "parked", id };
+  // Park read-back: the verifier grounds "ready to add / say the word"
+  // drafts against WHAT is staged (nothing canonical changed until the yes).
+  return { status: "parked", id, detail: `staged as an offer, awaiting the user's yes — nothing added yet: ${offered}` };
 }
 
 // ------------------------------------------------------------- profile_update
@@ -1227,7 +1229,13 @@ async function executeReminderCreate(
     firstTouchKind: safeFirstTouch.kind,
     ...(ctx.threadId !== null ? { threadId: ctx.threadId } : {}),
   });
-  return { status: "applied", id: reminder.id, detail: `due ${target.dueDate}` };
+  // Read-back (native-tool-cognition §7.2): the canonical row's date AND
+  // time — the verifier must be able to ground a "set for 2 PM" claim.
+  const dueTimeText =
+    target.dueTime !== null
+      ? ` ${String(target.dueTime.hour).padStart(2, "0")}:${String(target.dueTime.minute).padStart(2, "0")}`
+      : "";
+  return { status: "applied", id: reminder.id, detail: `due ${target.dueDate}${dueTimeText}` };
 }
 
 // -------------------------------------------------------------- reminder_reply

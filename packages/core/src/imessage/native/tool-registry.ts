@@ -44,14 +44,14 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "commitments.list",
     kind: "read",
     description:
-      "List the user's open to-dos/commitments — overdue, due soon, and undated open items with titles. Use for any 'what's on my list' question.",
+      "List the user's open to-dos/commitments — overdue, due soon, and undated open items with titles. If the user asks anything about their to-dos/list/tasks, call this FIRST and answer from the result — never claim the list is empty without it.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "gmail.search",
     kind: "read",
     description:
-      "Keyword search over the user's Gmail (subject, sender, body), last 7 days. Pass a short keyword phrase, not a sentence. Returns messageIds for gmail.read.",
+      "Keyword search over the user's Gmail (subject, sender, body), last 7 days. Pass a short keyword phrase, not a sentence. If the user asks whether/about any email, sender, or message — search FIRST and answer from results; never claim the inbox has nothing without searching. Returns messageIds for gmail.read.",
     parameters: {
       type: "object",
       properties: {
@@ -89,7 +89,7 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "commitments.transition",
     kind: "write",
     description:
-      "Mark one of the user's open to-dos done / missed / renegotiated. selector = the user's own words naming it ('seating chart'); ambiguous matches are refused with candidates, never guessed.",
+      "Execute directly: mark one of the user's open to-dos done / missed / renegotiated. selector = the user's own words naming it ('seating chart'); ambiguous matches are refused with candidates, never guessed.",
     parameters: {
       type: "object",
       properties: {
@@ -105,7 +105,7 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "commitments.create",
     kind: "write",
     description:
-      "Capture one or more new to-dos (items with optional due words like 'by wednesday'). Multiple items stage as one offer the user confirms with a yes.",
+      "Execute directly (low-risk): capture one or more new to-dos (items with optional due words like 'by wednesday'). Multiple items land as one offer the user confirms with a single yes — say what you captured and ask.",
     parameters: {
       type: "object",
       properties: {
@@ -132,7 +132,7 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "reminders.create",
     kind: "write",
     description:
-      "Create a time-based reminder ('remind me to X'). Pass whenWords (the user's time words verbatim) and/or a concrete dueDate/dueTime you can derive. Fuzzy times are definite — pick the concrete time.",
+      "Execute directly (low-risk, reversible — never confirm, never 'stage'): create a time-based reminder ('remind me to X'). Pass whenWords (the user's time words verbatim) and/or a concrete dueDate/dueTime you can derive. Fuzzy times are DEFINITE — 'around 2' means 2:00; schedule it and state the concrete time. If the user gave NO time at all, create it for tomorrow and say so — never ask which time they meant.",
     parameters: {
       type: "object",
       properties: {
@@ -154,24 +154,23 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "profile.update",
     kind: "write",
     description:
-      "Update how you address/talk to the user: exactly ONE change — addressOwnerName, removeAddress, toneNote, brevityMaxSentences (1-10), or extraDirective. These are changes, not chat.",
+      "Execute directly (low-risk): update how you address/talk to the user — exactly ONE change per call (repeat the tool for a second change). Changes, not chat.",
     parameters: {
-      type: "object",
-      properties: {
-        addressOwnerName: { type: "string", maxLength: 60 },
-        removeAddress: { type: "boolean" },
-        toneNote: { type: "string", maxLength: 120 },
-        brevityMaxSentences: { type: "integer", minimum: 1, maximum: 10 },
-        extraDirective: { type: "string", maxLength: 120 },
-      },
-      additionalProperties: false,
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      oneOf: [
+        { type: "object", properties: { addressOwnerName: { type: "string", maxLength: 60 } }, required: ["addressOwnerName"], additionalProperties: false },
+        { type: "object", properties: { removeAddress: { type: "boolean", enum: [true] } }, required: ["removeAddress"], additionalProperties: false },
+        { type: "object", properties: { toneNote: { type: "string", maxLength: 120 } }, required: ["toneNote"], additionalProperties: false },
+        { type: "object", properties: { brevityMaxSentences: { type: "integer", minimum: 1, maximum: 10 } }, required: ["brevityMaxSentences"], additionalProperties: false },
+        { type: "object", properties: { extraDirective: { type: "string", maxLength: 120 } }, required: ["extraDirective"], additionalProperties: false },
+      ],
     },
   },
   {
     name: "outcomes.delegate",
     kind: "write",
     description:
-      "Delegate durable work to a worker (research/projects). Stages an offer with a confirm token — the work does NOT start until the user confirms. Never say work is running before that.",
+      "Call this IMMEDIATELY when the user's message asks you/workers to research, investigate, or handle a project — staging IS the consent gate, so never ask 'shall I?' first. It stages an offer with a confirm token; the work does NOT start until the user confirms with the token. Never say work is running before that.",
     parameters: {
       type: "object",
       properties: {
@@ -271,31 +270,57 @@ export function coerceNativeToolCall(invocation: NativeToolInvocation): CoercedN
       return call !== null && call.tool === "work.status" ? { kind: "read", read: call } : null;
     }
     case "commitments.transition": {
+      const note = typeof args["note"] === "string" && args["note"].trim().length === 0 ? null : args["note"] ?? null;
       const op = parseCognitiveOperation({
         type: "commitment_transition",
         target: { text: args["selector"] },
         verb: args["verb"],
-        note: args["note"] ?? null,
+        note,
       });
       return op !== null && op.type === "commitment_transition" ? { kind: "write", op } : null;
     }
     case "commitments.create": {
-      const items = args["items"];
+      // Empty-string dues are the providers' "absent" — drop them before
+      // the strict item validator (a "" due would reject the whole batch).
+      const rawItems = Array.isArray(args["items"]) ? args["items"] : [];
+      const items = (rawItems as Record<string, unknown>[]).map((item) => {
+        if (typeof item !== "object" || item === null) return item;
+        const clone = { ...item } as Record<string, unknown>;
+        if (typeof clone["due"] === "string" && clone["due"].trim().length === 0) {
+          delete clone["due"];
+        }
+        return clone;
+      });
       const op = parseCognitiveOperation({ type: "task_batch", items });
       return op !== null && op.type === "task_batch" ? { kind: "write", op } : null;
     }
     case "reminders.create": {
+      // Providers habitually send empty strings for absent optionals and
+      // omit keys entirely — the strict op validator requires every key
+      // PRESENT (null when absent), so normalize both failures here.
+      const normalize = (value: unknown): unknown =>
+        typeof value === "string" && value.trim().length === 0 ? null : value;
       const op = parseCognitiveOperation({
         type: "reminder_create",
         title: args["title"],
-        dueDate: args["dueDate"] ?? null,
-        dueTime: args["dueTime"] ?? null,
-        whenWords: args["whenWords"] ?? null,
+        dueDate: (normalize(args["dueDate"]) as string | null | undefined) ?? null,
+        dueTime: (args["dueTime"] ?? null) as { hour: number; minute: number } | null,
+        whenWords: (normalize(args["whenWords"]) as string | null | undefined) ?? null,
       });
       return op !== null && op.type === "reminder_create" ? { kind: "write", op } : null;
     }
     case "profile.update": {
-      const op = parseCognitiveOperation({ type: "profile_update", ...args });
+      // Providers pad absent changes with empty strings / removeAddress:
+      // false — strip them so the ONE-change op semantics sees the real edit.
+      const change: Record<string, unknown> = {};
+      for (const key of ["addressOwnerName", "toneNote", "extraDirective"] as const) {
+        const value = args[key];
+        if (typeof value === "string" && value.trim().length > 0) change[key] = value;
+      }
+      if (args["removeAddress"] === true) change["removeAddress"] = true;
+      if (typeof args["brevityMaxSentences"] === "number") change["brevityMaxSentences"] = args["brevityMaxSentences"];
+      if (Object.keys(change).length === 0) return null;
+      const op = parseCognitiveOperation({ type: "profile_update", ...change });
       return op !== null && op.type === "profile_update" ? { kind: "write", op } : null;
     }
     case "outcomes.delegate": {

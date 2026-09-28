@@ -1,0 +1,136 @@
+{
+  "label": "w2a-pilot-native",
+  "driver": "native",
+  "expressibleOnly": true,
+  "freezeSha": null,
+  "split": "dev",
+  "generatedAt": "2026-09-28T19:49:43.691Z",
+  "modelPolicy": "repo policy.yaml gateway.passes (route gpt-4.1 / standard sonnet-4.5)",
+  "spendCeilingUsd": 0.2,
+  "totalSpendUsd": 0.0597,
+  "avgLatencyMs": 33922,
+  "casePassRate": 0,
+  "commonControlPassRate": 0,
+  "judgeUnavailableCount": 0,
+  "metrics": {
+    "envelope_validity": 1,
+    "tool_validity": 0.3333333333333333,
+    "read_selection": 1,
+    "op_type": 0.6666666666666666,
+    "op_args": 0,
+    "no_unauthorized_mutation": 1,
+    "e2e_effects": 0.6666666666666666,
+    "truthful_ack": 1,
+    "no_phantom_work": 1,
+    "read_content": 1
+  },
+  "byBehavior": {
+    "reminder_create": {
+      "total": 3,
+      "pass": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "reminder-create-01",
+      "behavior": "reminder_create",
+      "user": "remind me to call mom",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "failed",
+          "detail": "invalid: reminders.create arguments failed the schema — re-read the tool's parameter shape and retry once with corrected arguments"
+        },
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (b3a67465-046e-4d75-a5fe-c4548741d285) — due 2026-09-26"
+        }
+      ],
+      "reply": "I've set a reminder to call mom for tomorrow, September 26, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": false,
+        "op_type": true,
+        "op_args": false,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [
+        "invalid tool calls: 1",
+        "op args/verb/title mismatch"
+      ],
+      "commonControl": true,
+      "costUsd": 0.0255,
+      "latencyMs": 53623
+    },
+    {
+      "id": "reminder-create-02",
+      "behavior": "reminder_create",
+      "user": "set a reminder to water the plants",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "failed",
+          "detail": "invalid: reminders.create arguments failed the schema — re-read the tool's parameter shape and retry once with corrected arguments"
+        },
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (78acb831-b926-4dc0-aa19-d67a5645fa9e) — due 2026-09-26"
+        }
+      ],
+      "reply": "Set a reminder to water the plants for tomorrow, Saturday, September 26, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": false,
+        "op_type": true,
+        "op_args": false,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [
+        "invalid tool calls: 1",
+        "op args/verb/title mismatch"
+      ],
+      "commonControl": true,
+      "costUsd": 0.0164,
+      "latencyMs": 38214
+    },
+    {
+      "id": "reminder-create-03",
+      "behavior": "reminder_create",
+      "user": "don't let me forget to charge the camera batteries",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [],
+      "ops": [],
+      "reply": "I didn't set anything — you asked me not to let you forget to charge the camera batteries, but no reminder was created. Would you like me to set one now? If so, let me know when you'd like to be reminded.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": false,
+        "op_args": false,
+        "e2e_effects": false,
+        "truthful_ack": true
+      },
+      "failures": [
+        "ops missing: reminder_create",
+        "op args/verb/title mismatch",
+        "remindersArmed 0≠1"
+      ],
+      "commonControl": true,
+      "costUsd": 0.0178,
+      "latencyMs": 9930
+    }
+  ]
+}

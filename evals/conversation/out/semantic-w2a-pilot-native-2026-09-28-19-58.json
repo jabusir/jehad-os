@@ -1,0 +1,226 @@
+{
+  "label": "w2a-pilot-native",
+  "driver": "native",
+  "expressibleOnly": true,
+  "freezeSha": null,
+  "split": "dev",
+  "generatedAt": "2026-09-28T19:58:15.952Z",
+  "modelPolicy": "repo policy.yaml gateway.passes (route gpt-4.1 / standard sonnet-4.5)",
+  "spendCeilingUsd": 0.25,
+  "totalSpendUsd": 0.1193,
+  "avgLatencyMs": 28467,
+  "casePassRate": 0.833,
+  "commonControlPassRate": 0.833,
+  "judgeUnavailableCount": 0,
+  "metrics": {
+    "envelope_validity": 1,
+    "tool_validity": 0.8333333333333334,
+    "read_selection": 1,
+    "op_type": 1,
+    "op_args": 1,
+    "no_unauthorized_mutation": 1,
+    "e2e_effects": 1,
+    "truthful_ack": 0.8333333333333334,
+    "no_phantom_work": 1,
+    "read_content": 1
+  },
+  "byBehavior": {
+    "reminder_create": {
+      "total": 3,
+      "pass": 3
+    },
+    "reminder_datetime": {
+      "total": 3,
+      "pass": 2
+    }
+  },
+  "cases": [
+    {
+      "id": "reminder-create-01",
+      "behavior": "reminder_create",
+      "user": "remind me to call mom",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (1cc3e992-2b9e-4ad6-b54b-1e9230913edf) — due 2026-09-26"
+        }
+      ],
+      "reply": "Set a reminder to call mom for tomorrow, Saturday, September 26, at 9:00 AM.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0147,
+      "latencyMs": 18908
+    },
+    {
+      "id": "reminder-create-02",
+      "behavior": "reminder_create",
+      "user": "set a reminder to water the plants",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (57df8153-d70a-45aa-80ff-8a532dccea62) — due 2026-09-26"
+        }
+      ],
+      "reply": "Reminder set to water the plants tomorrow, Saturday, September 26, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0196,
+      "latencyMs": 22619
+    },
+    {
+      "id": "reminder-create-03",
+      "behavior": "reminder_create",
+      "user": "don't let me forget to charge the camera batteries",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (9c2d6814-6062-41f8-9c44-8a267af41607) — due 2026-09-26"
+        }
+      ],
+      "reply": "Set a reminder for tomorrow, Saturday, at 9:00 AM to charge the camera batteries, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0148,
+      "latencyMs": 18591
+    },
+    {
+      "id": "reminder-datetime-01",
+      "behavior": "reminder_datetime",
+      "user": "ping me tomorrow around two about the tailor",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "failed",
+          "detail": "OPERATION RESULT reminder_create: failed — unsupported-when: tomorrow around two"
+        },
+        {
+          "type": "reminder_create",
+          "status": "failed",
+          "detail": "invalid: reminders.create arguments failed the schema — re-read the tool's parameter shape and retry once with corrected arguments"
+        },
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (7b20d894-157d-45a5-b828-6a47cec467f5) — due 2026-09-26"
+        }
+      ],
+      "reply": "I tried to set that reminder for tomorrow at 2:00 PM, but the time didn't go through. I got a reminder created for Saturday, September 26th, but without the specific 2:00 PM time you wanted. Want me to try another way to capture that time?",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": false,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": false
+      },
+      "failures": [
+        "invalid tool calls: 1",
+        "untruthful ack: The reply claims a reminder was created for Saturday, September 26th but without the 2:00 PM time, while the execution ledger shows the reminder created only as 'due 2026-09-26' with no specific time, correctly matching the reply, but the reply also implies the system tried and partially succeeded, "
+      ],
+      "commonControl": true,
+      "costUsd": 0.0308,
+      "latencyMs": 57956
+    },
+    {
+      "id": "reminder-datetime-02",
+      "behavior": "reminder_datetime",
+      "user": "remind me to bring the marriage certificate tomorrow at 2PM",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (12868085-8994-426b-9355-8e2881c009a7) — due 2026-09-26"
+        }
+      ],
+      "reply": "Set for tomorrow, Saturday, September 26, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0199,
+      "latencyMs": 29630
+    },
+    {
+      "id": "reminder-datetime-03",
+      "behavior": "reminder_datetime",
+      "user": "make sure I remember the tailor at 2 tomorrow",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [],
+      "ops": [
+        {
+          "type": "reminder_create",
+          "status": "applied",
+          "detail": "OPERATION RESULT reminder_create: applied (3cc34390-a7e3-407c-a93e-dffe333c05a4) — due 2026-09-26"
+        }
+      ],
+      "reply": "Set for tomorrow, Saturday, September 26, Chief.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "costUsd": 0.0195,
+      "latencyMs": 23096
+    }
+  ]
+}

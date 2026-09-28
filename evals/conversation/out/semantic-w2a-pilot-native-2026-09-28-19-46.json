@@ -1,0 +1,62 @@
+{
+  "label": "w2a-pilot-native",
+  "driver": "native",
+  "expressibleOnly": true,
+  "freezeSha": null,
+  "split": "dev",
+  "generatedAt": "2026-09-28T19:46:56.826Z",
+  "modelPolicy": "repo policy.yaml gateway.passes (route gpt-4.1 / standard sonnet-4.5)",
+  "spendCeilingUsd": 0.15,
+  "totalSpendUsd": 0,
+  "avgLatencyMs": 20,
+  "casePassRate": 0,
+  "commonControlPassRate": 0,
+  "judgeUnavailableCount": 0,
+  "metrics": {
+    "envelope_validity": 0,
+    "tool_validity": 1,
+    "read_selection": 1,
+    "op_type": 0,
+    "op_args": 0,
+    "no_unauthorized_mutation": 1,
+    "e2e_effects": 0,
+    "truthful_ack": 1,
+    "no_phantom_work": 1,
+    "read_content": 1
+  },
+  "byBehavior": {
+    "reminder_create": {
+      "total": 1,
+      "pass": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "reminder-create-01",
+      "behavior": "reminder_create",
+      "user": "remind me to call mom",
+      "shipped": false,
+      "degraded": false,
+      "verified": "unknown",
+      "reads": [],
+      "ops": [],
+      "reply": null,
+      "checks": {
+        "envelope_validity": false,
+        "tool_validity": true,
+        "op_type": false,
+        "op_args": false,
+        "e2e_effects": false
+      },
+      "failures": [
+        "shipped=false verified=unknown",
+        "ops missing: reminder_create",
+        "op args/verb/title mismatch",
+        "remindersArmed 0≠1"
+      ],
+      "commonControl": true,
+      "costUsd": 0,
+      "latencyMs": 20
+    }
+  ]
+}

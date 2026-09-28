@@ -226,7 +226,15 @@ function renderPendingOffers(metadata: ReturnType<typeof pendingWithDerivedIds>)
   const lines = ["PENDING OFFERS (yours, from earlier turns — apply/decline by id when the user's CURRENT message confirms or declines):"];
   for (const proposal of metadata.pendingProposals) {
     const expired = proposal.expiresAt !== undefined && isPendingExpired(proposal, new Date());
-    lines.push(`- ${proposal.id ?? `${proposal.type}:????`} (${proposal.type}${expired ? ", EXPIRED" : ""}): ${proposal.offered.slice(0, 160)}`);
+    let label = proposal.offered.slice(0, 160);
+    // R5 parity: a confirmable batch must SHOW its items — the model cannot
+    // ground "yes, track both" against an offer it cannot see.
+    if (proposal.type === "task_batch") {
+      const items = (proposal.payload as { items?: { title?: string }[] } | null)?.items ?? [];
+      const titles = items.slice(0, 3).map((i) => String(i.title ?? "")).filter((t) => t.length > 0);
+      if (titles.length > 0) label = `${label} — items: ${titles.join("; ").slice(0, 160)}`;
+    }
+    lines.push(`- ${proposal.id ?? `${proposal.type}:????`} (${proposal.type}${expired ? ", EXPIRED" : ""}): ${label}`);
   }
   return lines;
 }
@@ -251,13 +259,18 @@ async function renderLiveCheckIns(db: SqlExecutor, principalName: string): Promi
 
 function toolCatalogLine(): string {
   return [
+    "ACTION RULES (how this conversation works — follow exactly):",
+    "- If the user's message asks to set, remember, add, create, complete, mark, or change ANYTHING, call the write tool in THIS reply — never reply with only words. After the tool result lands, confirm what actually happened in your final text.",
+    "- If the user confirms something you offered earlier ('yes, do that', 'track both', 'go ahead'), call offers.apply with that offer's id immediately — do not ask follow-up questions first.",
+    "- When the user asks you (or workers) to research, investigate, or handle a project, call outcomes.delegate IMMEDIATELY — staging is the confirmation gate; do not ask 'shall I?'.",
+    "- If the user asks about their data (email, to-dos, work), call the read tool FIRST, then answer from its result. If a read already ran earlier in this conversation, its result is in your context — use it; never say nothing was pulled.",
     "TOOL RULES:",
-    "- Reads are how you check facts about the user's life — check, don't guess; a read that returns data is ground truth over any summary.",
+    "- Reads are how you check facts about the user's life — check, don't guess. When the user asks about their own data (email, to-dos, work status), ALWAYS call the read tool first and answer from its result; never assert absence or answer from memory.",
     "- gmail.read opens a search result by its messageId; message ids also survive in PRIOR TOOL ACTIVITY for 'open that one' on later messages.",
-    "- Writes change the user's world. Execute them only when the user's CURRENT message asks for them.",
+    "- WRITE POLICY: the ordinary write tools (reminders, to-dos, completing/marking things, profile changes) are LOW-RISK and reversible — when the user's CURRENT message asks for one, call the tool and DO IT; never ask for confirmation, never 'stage' it. Only expensive, external, or consequential actions wait for an explicit yes (outcomes.delegate stages with a confirm token).",
     "- offers.apply/decline resolve YOUR pending offers by id when the user's current message confirms or declines ('yes do that').",
-    "- outcomes.delegate STAGES work with a confirm token — the work is NOT running until the user confirms; say so honestly.",
-    "- If a write comes back staged/parked, tell the user exactly what is staged and ask for their yes. A staged offer is NOT a done action.",
+    "- outcomes.delegate STAGES durable work with a confirm token — the work is NOT running until the user confirms; say so honestly.",
+    "- If a tool result says staged/parked, tell the user exactly what is staged and ask for their yes. A staged offer is NOT a done action.",
     "TRUTH RULE: never state that you created, set, completed, scheduled, or changed ANYTHING unless the tool result showing it landed is in this conversation. Staged ≠ done. No result ≠ happened.",
     "No internal jargon: never mention tool names, ids (except quoting a confirm token or offer when the user must act on it), rounds, ledgers, or system internals — speak like a person.",
   ].join("\n");

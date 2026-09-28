@@ -59,6 +59,37 @@ export const COMMON_CONTROL_BEHAVIORS: readonly string[] = [
   "delegate_confirm",
 ];
 
+/**
+ * W2a A/B expressibility filter (native-tool-cognition.md §10, amendment
+ * A2): behaviors the W1 spike tool set can express AT ALL. The A/B scores
+ * BOTH drivers on exactly this subset — same corpus, same classes — and
+ * defers the rest to W3 (reminders.update/checkins, calendar reads/writes,
+ * memory.recall, gmail.recent, occurrence updates are deferred tool
+ * surface, not scored here for either driver).
+ */
+export const W2A_EXPRESSIBLE_BEHAVIORS: readonly string[] = [
+  "reminder_create",
+  "reminder_datetime",
+  "task_capture",
+  "commitment_done",
+  "commitment_missed",
+  "profile_address",
+  "profile_tone_brevity",
+  "list_commitments",
+  "gmail_search",
+  "gmail_read_chain",
+  "offer_apply",
+  "offer_decline",
+  "delegate_intent",
+  "delegate_confirm",
+  "status_query",
+  "phantom_work",
+  "referent_chain",
+  "new_thread_survival",
+  "chat_nomutate",
+  "injection_nomutate",
+];
+
 export interface SemanticSeedCalendar {
   readonly summary: string;
   /** "HH:MM" local (PT) today. */

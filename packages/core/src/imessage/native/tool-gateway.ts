@@ -136,10 +136,10 @@ function argsDigestOf(invocation: NativeToolInvocation): string | null {
   const parts: string[] = [];
   for (const key of ["selector", "query", "message_id", "ref", "title", "verb", "id"]) {
     const value = args[key];
-    if (typeof value === "string" && value.length > 0) parts.push(`${key}=${clip(value, 40)}`);
+    if (typeof value === "string" && value.length > 0) parts.push(`${key}=${value.replace(/\|/g, "/")}`);
   }
   if (Array.isArray(args["items"])) parts.push(`items=${args["items"].length}`);
-  return parts.length > 0 ? clip(parts.join(" "), 120) : null;
+  return parts.length > 0 ? clip(parts.join("|"), 120) : null;
 }
 
 /** Extract structured result refs from a read payload (A4: the model's

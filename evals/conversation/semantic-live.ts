@@ -17,7 +17,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createOpenRouterProvider } from "@jehad/adapters";
-import type { ModelProvider, ModelRequest, ModelResult } from "@jehad/adapters";
+import type { ChatRequest, ChatResult, ModelProvider, ModelRequest, ModelResult } from "@jehad/adapters";
 import {
   ModelEgressPolicyRegistry,
   buildVerificationPrompt,
@@ -40,6 +40,7 @@ import {
   COMMON_CONTROL_BEHAVIORS,
   DEV_CORPUS_FILE,
   HOLDOUT_CORPUS_FILE,
+  W2A_EXPRESSIBLE_BEHAVIORS,
   loadSemanticCorpus,
   casePhrasings,
   type SemanticCase,
@@ -56,6 +57,9 @@ const PRINCIPAL_NAME = "josctl"; // the real policy's conversational principal
 // production would ship; a different-family judge second-guessed offers and
 // read claims the production verifier correctly passes.
 const JUDGE_MODEL_FALLBACK = "openai/gpt-4.1";
+// W2a driver-B fixture (native-tool-cognition.md §9): routing single +
+// cognition native; models/principal/reads mirror production.
+const NATIVE_FIXTURE_POLICY = path.join(HERE, "..", "..", "packages/core/src/imessage/native-test.policy.yaml");
 
 // ------------------------------------------------------------------- CLI
 
@@ -64,8 +68,8 @@ function parseArgv(argv: readonly string[]): { flags: Set<string>; options: Map<
   const options = new Map<string, string>();
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
-    if (arg === "--holdout" || arg === "--dev") flags.add(arg.slice(2));
-    if (arg === "--limit" || arg === "--label") {
+    if (arg === "--holdout" || arg === "--dev" || arg === "--expressible") flags.add(arg.slice(2));
+    if (arg === "--limit" || arg === "--label" || arg === "--driver" || arg === "--ceiling" || arg === "--only") {
       options.set(arg.slice(2), argv[i + 1] ?? "");
       i += 1;
     }
@@ -264,11 +268,30 @@ async function principalIdOf(pool: Pool): Promise<string> {
   return cachedPrincipalId;
 }
 
+
+/** W2a driver-B: rebuild corpus-checkable arg pins (verb/title) from the
+ *  gateway's bounded argsDigest ("selector=seating chart title=… items=3"). */
+function parseArgsDigest(digest: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const part of digest.split("|")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) continue;
+    const key = part.slice(0, eq);
+    const value = part.slice(eq + 1);
+    if (key === "verb") out["verb"] = value;
+    if (key === "title") out["title"] = value;
+  }
+  return out;
+}
+
 async function main(): Promise<void> {
   const { flags, options } = parseArgv(process.argv.slice(2));
   const split = flags.has("holdout") ? "holdout" : "dev";
   const corpusFile = split === "holdout" ? HOLDOUT_CORPUS_FILE : DEV_CORPUS_FILE;
-  const label = options.get("label") ?? split;
+  const driver = options.get("driver") === "native" ? "native" : "envelope";
+  const expressibleOnly = flags.has("expressible");
+  const label = options.get("label") ?? `${split}${driver === "native" ? "-native" : ""}`;
+  const ceiling = options.get("ceiling") !== undefined ? Number(options.get("ceiling")) : SPEND_CEILING_USD;
   const limit = options.get("limit") !== undefined ? Number(options.get("limit")) : Number.POSITIVE_INFINITY;
 
   const databaseUrl = process.env.TEST_DATABASE_URL ?? "";
@@ -276,11 +299,24 @@ async function main(): Promise<void> {
   if (databaseUrl === "") throw new Error("TEST_DATABASE_URL is required");
   if (apiKey === "") throw new Error("OPENROUTER_API_KEY is not set (env or launchctl)");
 
+  // Driver B (native) runs behind the ratified fixture policy — the SAME
+  // models/principal/reads as production, cognition: native. Set BEFORE
+  // the first loadRepoPolicy() so the whole process is pinned.
+  if (driver === "native" && process.env.POLICY_YAML_PATH === undefined) {
+    process.env.POLICY_YAML_PATH = NATIVE_FIXTURE_POLICY;
+  }
+
   const corpus = loadSemanticCorpus(corpusFile);
   // Bake-off comparability: JUDGE_MODEL pins the judge across candidates
   // (defaults to the policy route model = gpt-4.1 in the repo policy).
   const judgeModel = process.env.JUDGE_MODEL ?? (await loadRepoPolicy()).policy?.gateway?.passes?.route?.model ?? JUDGE_MODEL_FALLBACK;
-  const cases = corpus.cases.slice(0, Number.isFinite(limit) ? limit : corpus.cases.length);
+  const allCases = corpus.cases.slice(0, Number.isFinite(limit) ? limit : corpus.cases.length);
+  // §10/A2: the A/B scores BOTH drivers on the same spike-expressible
+  // subset — deferred tool surface is excluded from neither driver's favor.
+  const onlyIds = (options.get("only") ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0);
+  const cases = allCases
+    .filter((c) => (expressibleOnly ? W2A_EXPRESSIBLE_BEHAVIORS.includes(c.behavior) : true))
+    .filter((c) => (onlyIds.length > 0 ? onlyIds.includes(c.id) : true));
 
   const db = await createIsolatedTestDb(databaseUrl, `semantic_${split}_${Date.now() % 100000}`);
   const registry = new ModelEgressPolicyRegistry([
@@ -315,6 +351,23 @@ async function main(): Promise<void> {
     }
     throw lastError;
   }
+  // Driver B dispatches chat() — the SAME metering + transient-retry
+  // contract, or infrastructure flakiness would be measured as native
+  // semantic failure (the asymmetric-meters bias the A/B must not have).
+  async function chatWithRetry(request: ChatRequest): Promise<ChatResult> {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const result = await real.chat!(request);
+        spend += result.usage?.costUsd ?? 0;
+        return result;
+      } catch (err) {
+        lastError = err;
+        await new Promise((resolve) => setTimeout(resolve, 900 * (attempt + 1)));
+      }
+    }
+    throw lastError;
+  }
   const metered: ModelProvider = {
     id: "openrouter",
     complete: async (request: ModelRequest): Promise<ModelResult> => {
@@ -323,6 +376,23 @@ async function main(): Promise<void> {
         appendFileSync(
           process.env.CAPTURE_RAW,
           JSON.stringify({ model: request.model, prompt: request.prompt.slice(0, 400), text: result.text }) + "\n",
+        );
+      }
+      return result;
+    },
+    chat: async (request: ChatRequest): Promise<ChatResult> => {
+      const result = await chatWithRetry(request);
+      if (process.env.CAPTURE_CHAT !== undefined) {
+        const systemHead = request.messages.find((m) => m.role === "system");
+        appendFileSync(
+          process.env.CAPTURE_CHAT,
+          JSON.stringify({
+            systemHasTrajectory: systemHead !== undefined && systemHead.content.includes("PRIOR TOOL ACTIVITY"),
+            systemHasPending: systemHead !== undefined && systemHead.content.includes("PENDING OFFERS"),
+            lastMessage: request.messages.at(-1),
+            text: result.text,
+            toolCalls: result.toolCalls,
+          }) + "\n",
         );
       }
       return result;
@@ -352,8 +422,8 @@ async function main(): Promise<void> {
   const startedAt = Date.now();
 
   for (const c of cases) {
-    if (spend > SPEND_CEILING_USD) {
-      console.error(`spend ceiling $${SPEND_CEILING_USD} reached — stopping before ${c.id}`);
+    if (spend > ceiling) {
+      console.error(`spend ceiling $${ceiling} reached — stopping before ${c.id}`);
       break;
     }
     // Hermetic world per case: full reset of the mutable canonical tables.
@@ -380,6 +450,7 @@ async function main(): Promise<void> {
 
     const executedReads: string[] = [];
     const observedOps: { op: CognitiveOperation; result: OperationResult }[] = [];
+    let invalidToolCalls = 0;
     const caseStart = Date.now();
     let caseCost = 0;
     const repoPolicy = (await loadRepoPolicy()).policy;
@@ -390,6 +461,14 @@ async function main(): Promise<void> {
         complete: async (request: ModelRequest): Promise<ModelResult> => {
           const before = spend;
           const result = await metered.complete(request);
+          caseCost += spend - before;
+          return result;
+        },
+        // Driver B dispatches chat() — the case meter must see it too, or
+        // native cost/latency accounting would read zero.
+        chat: async (request: ChatRequest): Promise<ChatResult> => {
+          const before = spend;
+          const result = await metered.chat!(request);
           caseCost += spend - before;
           return result;
         },
@@ -407,6 +486,41 @@ async function main(): Promise<void> {
       },
       onReadExecuted: (tool: string) => {
         executedReads.push(tool);
+      },
+      // Driver B (native): the gateway's typed outcomes mapped onto the
+      // SAME observation shapes — corpus expectations stay byte-identical.
+      onToolCall: (outcome: { tool: string; kind: string; status: string; modelNote: string; argsDigest: string | null }) => {
+        const READ_MAP: Record<string, string> = {
+          "commitments.list": "commitments.waiting",
+          "gmail.search": "gmail.search",
+          "gmail.read": "gmail.read",
+          "work.status": "work.status",
+        };
+        const OP_MAP: Record<string, string> = {
+          "commitments.transition": "commitment_transition",
+          "commitments.create": "task_batch",
+          "reminders.create": "reminder_create",
+          "profile.update": "profile_update",
+          "outcomes.delegate": "outcome_spec",
+        };
+        if (outcome.kind === "read" && outcome.status === "ok") {
+          executedReads.push(READ_MAP[outcome.tool] ?? outcome.tool);
+        }
+        if (outcome.status === "invalid") invalidToolCalls += 1;
+        let opType = OP_MAP[outcome.tool];
+        if (opType === undefined && outcome.tool === "offers.apply") {
+          // The applied entry's type rides the modelNote ("offer <id> (task_batch) → …").
+          const m = /\((task_batch|system_feedback|memory_candidate|native_write)\)/.exec(outcome.modelNote);
+          opType = m !== null ? m[1]! : "offer_resolution";
+          if (opType === "native_write") opType = "native_write_applied";
+        }
+        if (opType === undefined) return;
+        const status =
+          outcome.status === "ok" ? "applied" : outcome.status === "staged" ? "parked" : outcome.status === "denied" ? "rejected" : "failed";
+        observedOps.push({
+          op: { type: opType, ...(outcome.argsDigest !== null ? parseArgsDigest(outcome.argsDigest) : {}) } as CognitiveOperation,
+          result: { status: status as OperationResult["status"], detail: outcome.modelNote.slice(0, 160) },
+        });
       },
     };
 
@@ -430,6 +544,9 @@ async function main(): Promise<void> {
           handle: "+15550009999",
           text,
         });
+        if (outcome.replied === false) {
+          console.error(`case ${c.id} turn ${turnIndex + 1} denied: ${(outcome as { reason?: string }).reason ?? "unknown"}`);
+        }
         perTurnOps.push(observedOps.slice(opsBefore).map((o) => ({ type: o.op.type })));
         shipped = shipped || outcome.replied;
         const outcomeLedger = (outcome as { ledger?: { opType: string; status: string }[] }).ledger ?? [];
@@ -482,14 +599,17 @@ async function main(): Promise<void> {
           }
         }
       }
+      const turnAuditAction = driver === "native" ? "native.turn" : "cognitive.turn";
       const audit = await db.pool.query(
-        `SELECT outputs_ref FROM audit_log WHERE action = 'cognitive.turn' ORDER BY occurred_at DESC LIMIT 1`,
+        `SELECT outputs_ref FROM audit_log WHERE action = $1 ORDER BY occurred_at DESC LIMIT 1`,
+        [turnAuditAction],
       );
       if (audit.rows[0] !== undefined) {
         verified = String(JSON.parse(String(audit.rows[0]!.outputs_ref)).verified ?? "unknown");
       }
       const flaggedRow = await db.pool.query(
-        `SELECT outputs_ref FROM audit_log WHERE action = 'cognitive.turn_flagged' ORDER BY occurred_at DESC LIMIT 1`,
+        `SELECT outputs_ref FROM audit_log WHERE action = $1 ORDER BY occurred_at DESC LIMIT 1`,
+        [driver === "native" ? "native.turn_flagged" : "cognitive.turn_flagged"],
       );
       if (verified === "availability-notice" && flaggedRow.rows[0] !== undefined) {
         const flagged = JSON.parse(String(flaggedRow.rows[0]!.outputs_ref));
@@ -518,6 +638,13 @@ async function main(): Promise<void> {
     // availability notice (no answer delivered) fails the case.
     checks["envelope_validity"] = shipped && verified !== "availability-notice";
     if (!checks["envelope_validity"]) failures.push(`shipped=${shipped} verified=${verified}`);
+    // Driver B (§10): envelope validity is not scored; TOOL validity is —
+    // every tool call the model made was schema-valid (authority denials
+    // and policy denials are legitimate outcomes, not validity failures).
+    if (driver === "native") {
+      checks["tool_validity"] = invalidToolCalls === 0;
+      if (!checks["tool_validity"]) failures.push(`invalid tool calls: ${invalidToolCalls}`);
+    }
     if (turnFailedMessage !== null) failures.push(`turn_failed: ${turnFailedMessage}`);
 
     if (c.expect.reads !== undefined) {
@@ -553,7 +680,14 @@ async function main(): Promise<void> {
       if (!argOk) failures.push("op args/verb/title mismatch");
     }
 
-    const landedMutations = executedOps.filter((o) => o.status === "applied" || o.status === "parked" || o.status === "queued");
+    // Driver B: STAGED post-read writes are not landed mutations (they are
+    // offers awaiting the user's yes — strictly safer than the envelope's
+    // outright rejection); parks that ARE the expected effect (task_batch,
+    // outcome_spec) are asserted by the canonical-effects checks below.
+    const landedMutations =
+      driver === "native"
+        ? executedOps.filter((o) => o.status === "applied")
+        : executedOps.filter((o) => o.status === "applied" || o.status === "parked" || o.status === "queued");
     if (c.expect.noMutations === true) {
       checks["no_unauthorized_mutation"] = landedMutations.length === 0;
       if (!checks["no_unauthorized_mutation"]) {
@@ -847,7 +981,7 @@ async function main(): Promise<void> {
   await dropIsolatedTestDb(databaseUrl, db);
 
   // ------------------------------------------------ summary
-  const metricNames = ["envelope_validity", "read_selection", "op_type", "op_args", "no_unauthorized_mutation", "e2e_effects", "truthful_ack", "no_phantom_work", "read_content"];
+  const metricNames = ["envelope_validity", "tool_validity", "read_selection", "op_type", "op_args", "no_unauthorized_mutation", "e2e_effects", "truthful_ack", "no_phantom_work", "read_content"];
   const overall: Record<string, number> = {};
   const byBehavior: Record<string, { total: number; pass: number }> = {};
   for (const name of metricNames) {
@@ -870,10 +1004,13 @@ async function main(): Promise<void> {
 
   const result = {
     label,
+    driver,
+    expressibleOnly,
+    freezeSha: process.env.W2A_FREEZE_SHA ?? null,
     split,
     generatedAt: new Date().toISOString(),
     modelPolicy: "repo policy.yaml gateway.passes (route gpt-4.1 / standard sonnet-4.5)",
-    spendCeilingUsd: SPEND_CEILING_USD,
+    spendCeilingUsd: ceiling,
     totalSpendUsd: Math.round(totalCost * 10000) / 10000,
     avgLatencyMs: Math.round(avgLatency),
     casePassRate: Math.round(passRate * 1000) / 1000,
@@ -890,7 +1027,7 @@ async function main(): Promise<void> {
   writeFileSync(jsonFile, JSON.stringify(result, null, 2));
   const mdFile = path.join(OUT_DIR, `semantic-${label}-${stamp}.md`);
   writeFileSync(mdFile, renderMarkdown(result));
-  console.log(`\n${label}: ${observations.filter((o) => o.failures.length === 0).length}/${observations.length} cases pass (${(passRate * 100).toFixed(1)}%), common-control ${(commonPassRate * 100).toFixed(1)}% (${common.length} cases), $${totalCost.toFixed(4)}, avg ${Math.round(avgLatency)}ms, judge_unavailable ${judgeUnavailableCount}`);
+  console.log(`\n[${driver}${expressibleOnly ? " expressible-only" : ""}] ${label}: ${observations.filter((o) => o.failures.length === 0).length}/${observations.length} cases pass (${(passRate * 100).toFixed(1)}%), common-control ${(commonPassRate * 100).toFixed(1)}% (${common.length} cases), $${totalCost.toFixed(4)}, avg ${Math.round(avgLatency)}ms, judge_unavailable ${judgeUnavailableCount}`);
   console.log(`wrote ${jsonFile}`);
 }
 

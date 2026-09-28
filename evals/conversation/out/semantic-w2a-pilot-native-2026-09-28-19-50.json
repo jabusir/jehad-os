@@ -1,0 +1,62 @@
+{
+  "label": "w2a-pilot-native",
+  "driver": "native",
+  "expressibleOnly": true,
+  "freezeSha": null,
+  "split": "dev",
+  "generatedAt": "2026-09-28T19:50:10.531Z",
+  "modelPolicy": "repo policy.yaml gateway.passes (route gpt-4.1 / standard sonnet-4.5)",
+  "spendCeilingUsd": 0.1,
+  "totalSpendUsd": 0.017,
+  "avgLatencyMs": 7635,
+  "casePassRate": 0,
+  "commonControlPassRate": 0,
+  "judgeUnavailableCount": 0,
+  "metrics": {
+    "envelope_validity": 1,
+    "tool_validity": 1,
+    "read_selection": 1,
+    "op_type": 0,
+    "op_args": 0,
+    "no_unauthorized_mutation": 1,
+    "e2e_effects": 0,
+    "truthful_ack": 1,
+    "no_phantom_work": 1,
+    "read_content": 1
+  },
+  "byBehavior": {
+    "reminder_create": {
+      "total": 1,
+      "pass": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "reminder-create-01",
+      "behavior": "reminder_create",
+      "user": "remind me to call mom",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [],
+      "ops": [],
+      "reply": "I can help you set a reminder to call your mom. When would you like to be reminded?",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": false,
+        "op_args": false,
+        "e2e_effects": false,
+        "truthful_ack": true
+      },
+      "failures": [
+        "ops missing: reminder_create",
+        "op args/verb/title mismatch",
+        "remindersArmed 0≠1"
+      ],
+      "commonControl": true,
+      "costUsd": 0.017,
+      "latencyMs": 7635
+    }
+  ]
+}

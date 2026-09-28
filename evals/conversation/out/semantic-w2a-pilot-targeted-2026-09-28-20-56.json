@@ -1,0 +1,254 @@
+{
+  "label": "w2a-pilot-targeted",
+  "driver": "native",
+  "expressibleOnly": true,
+  "freezeSha": null,
+  "split": "dev",
+  "generatedAt": "2026-09-28T20:56:05.037Z",
+  "modelPolicy": "repo policy.yaml gateway.passes (route gpt-4.1 / standard sonnet-4.5)",
+  "spendCeilingUsd": 0.45,
+  "totalSpendUsd": 0.134,
+  "avgLatencyMs": 24157,
+  "casePassRate": 0.143,
+  "commonControlPassRate": 0,
+  "judgeUnavailableCount": 0,
+  "metrics": {
+    "envelope_validity": 1,
+    "tool_validity": 0.7142857142857143,
+    "read_selection": 1,
+    "op_type": 0.6666666666666666,
+    "op_args": 0.6666666666666666,
+    "no_unauthorized_mutation": 1,
+    "e2e_effects": 0.5714285714285714,
+    "truthful_ack": 1,
+    "no_phantom_work": 1,
+    "read_content": 1
+  },
+  "byBehavior": {
+    "profile_address": {
+      "total": 1,
+      "pass": 0
+    },
+    "profile_tone_brevity": {
+      "total": 1,
+      "pass": 0
+    },
+    "offer_apply": {
+      "total": 1,
+      "pass": 0
+    },
+    "delegate_intent": {
+      "total": 1,
+      "pass": 0
+    },
+    "status_query": {
+      "total": 1,
+      "pass": 1
+    },
+    "new_thread_survival": {
+      "total": 1,
+      "pass": 0
+    },
+    "gmail_read_chain": {
+      "total": 1,
+      "pass": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "profile-address-01",
+      "behavior": "profile_address",
+      "user": "call me Ustadh from now on",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "profile_update",
+          "status": "failed",
+          "detail": "invalid: profile.update arguments failed the schema — re-read the tool's parameter shape and retry once with corrected arguments"
+        },
+        {
+          "type": "profile_update",
+          "status": "applied",
+          "detail": "OPERATION RESULT profile_update: applied (profile:v2) — profile version 2"
+        }
+      ],
+      "reply": "Understood, Ustadh. I'll address you as Ustadh going forward.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": false,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [
+        "invalid tool calls: 1"
+      ],
+      "costUsd": 0.0163,
+      "latencyMs": 33977
+    },
+    {
+      "id": "profile-tone-01",
+      "behavior": "profile_tone_brevity",
+      "user": "keep your replies to one sentence, I'm busy today",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "profile_update",
+          "status": "failed",
+          "detail": "invalid: profile.update arguments failed the schema — re-read the tool's parameter shape and retry once with corrected arguments"
+        },
+        {
+          "type": "profile_update",
+          "status": "applied",
+          "detail": "OPERATION RESULT profile_update: applied (profile:v2) — profile version 2"
+        }
+      ],
+      "reply": "Understood, Chief; keeping replies to one sentence.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": false,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [
+        "invalid tool calls: 1"
+      ],
+      "costUsd": 0.0166,
+      "latencyMs": 34537
+    },
+    {
+      "id": "offer-apply-01",
+      "behavior": "offer_apply",
+      "user": "yes, track both",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [],
+      "ops": [],
+      "reply": "I'm ready to track both tasks — what would you like me to add?",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "e2e_effects": false,
+        "truthful_ack": true
+      },
+      "failures": [
+        "commitmentsOpen 0≠2"
+      ],
+      "costUsd": 0.0168,
+      "latencyMs": 6608
+    },
+    {
+      "id": "delegate-intent-01",
+      "behavior": "delegate_intent",
+      "user": "have one of your workers research caterers near San Jose and draft a shortlist with prices",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [],
+      "reply": "I can stage a research request for caterers near San Jose with a shortlist and prices. Once staged, you’ll need to confirm before the work starts. Shall I proceed to stage this task?",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": false,
+        "op_args": false,
+        "e2e_effects": false,
+        "truthful_ack": true
+      },
+      "failures": [
+        "ops missing: outcome_spec",
+        "op args/verb/title mismatch",
+        "no parked outcome_spec"
+      ],
+      "commonControl": true,
+      "costUsd": 0.0127,
+      "latencyMs": 3155
+    },
+    {
+      "id": "status-query-02",
+      "behavior": "status_query",
+      "user": "any word on the vacuum comparison work?",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [
+        "work.status"
+      ],
+      "ops": [],
+      "reply": "Chief, the vacuum comparison outcome (P2T) is accepted and active. No worker assignments are currently queued or running, so there's no progress or output to report yet.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "read_selection": true,
+        "no_unauthorized_mutation": true,
+        "e2e_effects": true,
+        "truthful_ack": true,
+        "read_content": true
+      },
+      "failures": [],
+      "costUsd": 0.0238,
+      "latencyMs": 24446
+    },
+    {
+      "id": "new-thread-survival-01",
+      "behavior": "new_thread_survival",
+      "user": "delegate: research print-on-demand margins for me ⏎ /new ⏎ confirm {{confirm_token}}",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [],
+      "ops": [],
+      "reply": "Nothing is waiting for confirmation right now.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "e2e_effects": false,
+        "truthful_ack": true
+      },
+      "failures": [
+        "turn 1 ops missing: outcome_spec",
+        "outcomesActive 0≠1"
+      ],
+      "costUsd": 0.018,
+      "latencyMs": 8123
+    },
+    {
+      "id": "gmail-read-chain-01",
+      "behavior": "gmail_read_chain",
+      "user": "has the plumber said anything about my invoice? ⏎ open that one — what does it actually say?",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [
+        "gmail.search",
+        "gmail.search",
+        "gmail.search"
+      ],
+      "ops": [],
+      "reply": "Chief, there are no emails from or about a plumber or an invoice in your inbox over the past 7 days. If you have the sender's specific name or email address, give me that and I will check again.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "no_unauthorized_mutation": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [
+        "turn 1 reads missing: gmail.search",
+        "turn 2 reads missing: gmail.read"
+      ],
+      "costUsd": 0.0298,
+      "latencyMs": 58253
+    }
+  ]
+}
