@@ -154,16 +154,17 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "profile.update",
     kind: "write",
     description:
-      "Execute directly (low-risk): update how you address/talk to the user — exactly ONE change per call (repeat the tool for a second change). Changes, not chat.",
+      "Call this whenever the user asks you to change how they address/talk ('call me X', 'be more brief', 'one sentence replies') — do not just acknowledge in words. Exactly ONE change per call: addressOwnerName | removeAddress:true | toneNote | brevityMaxSentences (1-10) | extraDirective. Omit every other field entirely.",
     parameters: {
-      $schema: "https://json-schema.org/draft/2020-12/schema",
-      oneOf: [
-        { type: "object", properties: { addressOwnerName: { type: "string", maxLength: 60 } }, required: ["addressOwnerName"], additionalProperties: false },
-        { type: "object", properties: { removeAddress: { type: "boolean", enum: [true] } }, required: ["removeAddress"], additionalProperties: false },
-        { type: "object", properties: { toneNote: { type: "string", maxLength: 120 } }, required: ["toneNote"], additionalProperties: false },
-        { type: "object", properties: { brevityMaxSentences: { type: "integer", minimum: 1, maximum: 10 } }, required: ["brevityMaxSentences"], additionalProperties: false },
-        { type: "object", properties: { extraDirective: { type: "string", maxLength: 120 } }, required: ["extraDirective"], additionalProperties: false },
-      ],
+      type: "object",
+      properties: {
+        addressOwnerName: { type: "string", maxLength: 60 },
+        removeAddress: { type: "boolean", enum: [true] },
+        toneNote: { type: "string", maxLength: 120 },
+        brevityMaxSentences: { type: "integer", minimum: 1, maximum: 10 },
+        extraDirective: { type: "string", maxLength: 120 },
+      },
+      additionalProperties: false,
     },
   },
   {

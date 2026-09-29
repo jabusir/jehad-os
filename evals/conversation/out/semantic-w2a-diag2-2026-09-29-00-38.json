@@ -1,0 +1,109 @@
+{
+  "label": "w2a-diag2",
+  "driver": "native",
+  "expressibleOnly": true,
+  "freezeSha": null,
+  "split": "dev",
+  "generatedAt": "2026-09-29T00:38:51.274Z",
+  "modelPolicy": "repo policy.yaml gateway.passes (route gpt-4.1 / standard sonnet-4.5)",
+  "spendCeilingUsd": 0.1,
+  "totalSpendUsd": 0.0375,
+  "avgLatencyMs": 35831,
+  "casePassRate": 0,
+  "commonControlPassRate": 0,
+  "judgeUnavailableCount": 0,
+  "metrics": {
+    "envelope_validity": 1,
+    "tool_validity": 0,
+    "read_selection": 1,
+    "op_type": 1,
+    "op_args": 1,
+    "no_unauthorized_mutation": 1,
+    "e2e_effects": 1,
+    "truthful_ack": 1,
+    "no_phantom_work": 1,
+    "read_content": 1
+  },
+  "byBehavior": {
+    "profile_address": {
+      "total": 1,
+      "pass": 0
+    },
+    "profile_tone_brevity": {
+      "total": 1,
+      "pass": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "profile-address-01",
+      "behavior": "profile_address",
+      "user": "call me Ustadh from now on",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "profile_update",
+          "status": "failed",
+          "detail": "invalid: profile.update arguments failed the schema — re-read the tool's parameter shape and retry once with corrected arguments"
+        },
+        {
+          "type": "profile_update",
+          "status": "applied",
+          "detail": "OPERATION RESULT profile_update: applied (profile:v2) — profile version 2"
+        }
+      ],
+      "reply": "Understood, Ustadh. Updated.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": false,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [
+        "invalid tool calls: 1"
+      ],
+      "costUsd": 0.0205,
+      "latencyMs": 36580
+    },
+    {
+      "id": "profile-tone-01",
+      "behavior": "profile_tone_brevity",
+      "user": "keep your replies to one sentence, I'm busy today",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "profile_update",
+          "status": "failed",
+          "detail": "invalid: profile.update arguments failed the schema — re-read the tool's parameter shape and retry once with corrected arguments"
+        },
+        {
+          "type": "profile_update",
+          "status": "applied",
+          "detail": "OPERATION RESULT profile_update: applied (profile:v2) — profile version 2"
+        }
+      ],
+      "reply": "Understood, Chief; keeping replies to a single sentence.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": false,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [
+        "invalid tool calls: 1"
+      ],
+      "costUsd": 0.017,
+      "latencyMs": 35082
+    }
+  ]
+}

@@ -1,0 +1,122 @@
+{
+  "label": "w2a-diag",
+  "driver": "native",
+  "expressibleOnly": true,
+  "freezeSha": null,
+  "split": "dev",
+  "generatedAt": "2026-09-29T00:36:43.074Z",
+  "modelPolicy": "repo policy.yaml gateway.passes (route gpt-4.1 / standard sonnet-4.5)",
+  "spendCeilingUsd": 0.15,
+  "totalSpendUsd": 0.0185,
+  "avgLatencyMs": 61360,
+  "casePassRate": 0,
+  "commonControlPassRate": 0,
+  "judgeUnavailableCount": 0,
+  "metrics": {
+    "envelope_validity": 0.3333333333333333,
+    "tool_validity": 1,
+    "read_selection": 1,
+    "op_type": 0,
+    "op_args": 0,
+    "no_unauthorized_mutation": 1,
+    "e2e_effects": 0.3333333333333333,
+    "truthful_ack": 1,
+    "no_phantom_work": 1,
+    "read_content": 1
+  },
+  "byBehavior": {
+    "profile_address": {
+      "total": 1,
+      "pass": 0
+    },
+    "profile_tone_brevity": {
+      "total": 1,
+      "pass": 0
+    },
+    "gmail_search": {
+      "total": 1,
+      "pass": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "profile-address-01",
+      "behavior": "profile_address",
+      "user": "call me Ustadh from now on",
+      "shipped": true,
+      "degraded": true,
+      "verified": "availability-notice",
+      "reads": [],
+      "ops": [],
+      "reply": "I hit an internal failure before I could finish — nothing was changed. It's logged; try me again.",
+      "checks": {
+        "envelope_validity": false,
+        "tool_validity": true,
+        "op_type": false,
+        "op_args": false,
+        "e2e_effects": false
+      },
+      "failures": [
+        "shipped=true verified=availability-notice",
+        "ops missing: profile_update",
+        "op args/verb/title mismatch",
+        "profileVersion 1<2"
+      ],
+      "costUsd": 0,
+      "latencyMs": 65052
+    },
+    {
+      "id": "profile-tone-01",
+      "behavior": "profile_tone_brevity",
+      "user": "keep your replies to one sentence, I'm busy today",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [],
+      "reply": "Understood, Chief; I will keep every reply to a single sentence.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": false,
+        "op_args": false,
+        "e2e_effects": false,
+        "truthful_ack": true
+      },
+      "failures": [
+        "ops missing: profile_update",
+        "op args/verb/title mismatch",
+        "profileVersion 1<2"
+      ],
+      "costUsd": 0.0133,
+      "latencyMs": 53211
+    },
+    {
+      "id": "gmail-search-02",
+      "behavior": "gmail_search",
+      "user": "is there anything in my mail about the venue deposit?",
+      "shipped": true,
+      "degraded": true,
+      "verified": "availability-notice",
+      "reads": [
+        "gmail.search",
+        "gmail.search",
+        "gmail.search"
+      ],
+      "ops": [],
+      "reply": "I hit an internal failure before I could finish. Actions already completed stand as recorded; the failure is logged.",
+      "checks": {
+        "envelope_validity": false,
+        "tool_validity": true,
+        "no_unauthorized_mutation": true,
+        "e2e_effects": true
+      },
+      "failures": [
+        "shipped=true verified=availability-notice"
+      ],
+      "commonControl": true,
+      "costUsd": 0.0052,
+      "latencyMs": 65818
+    }
+  ]
+}
