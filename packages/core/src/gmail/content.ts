@@ -94,7 +94,17 @@ export async function persistGmailContent(
     if (body === null || body.length === 0) return { status: "empty" };
     const sha256 = createHash("sha256").update(body, "utf8").digest("hex");
     const id = randomUUID();
-    const principalId = opts.principalId ?? "josctl";
+    // Canonical row idiom: principal_id holds the principal UUID (every
+    // reader — search/read/thread — filters by the caller's UUID). The
+    // sensor is single-owner in v1: when the sync lane omits the principal,
+    // resolve the account owner ONCE here; a name default here is what
+    // made content reads silently return zero rows (2026-09-29 cleanup).
+    const principalId =
+      opts.principalId ??
+      (await db
+        .query(`SELECT id::text AS id FROM principals WHERE name = 'josctl' LIMIT 1`)
+        .then((r) => String(r.rows[0]?.id ?? ""))
+        .catch(() => ""));
     const domainId = opts.domainId ?? "personal";
     const result = await db.query(
       `INSERT INTO gmail_messages (

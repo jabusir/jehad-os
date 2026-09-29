@@ -94,3 +94,46 @@ architectural. W2b (owner-authored blind Holdout v2) is the confirmation gate.
 - Historical envelope baselines on the FULL 60-case corpus: 80/80 cc
   (`semantic-bo-gpt41-1/2`) — NOT comparable to this subset; the A baseline
   here is the same-subset 44-case run.
+
+---
+
+## Addendum — bounded pre-holdout cleanup (owner-approved, 2026-09-29)
+
+Four bounded items, then stop. Results on the SAME subset/corpus/judge:
+
+1. **Kernel bug found and fixed (gmail content principal idiom).** The chain
+   was never a native problem: `persistGmailContent` defaulted
+   `principal_id` to the principal NAME ('josctl') while every reader filters
+   by principal UUID — gmail content search/read returned zero rows in
+   production, making `gmail_search` passes vacuous (honest-absence replies)
+   and `gmail_read_chain` impossible (0/18 across both drivers). Fix:
+   persist resolves the owner UUID (`content.ts`), migration `028`
+   rewrites existing rows (tested down path), eval seed aligned. This bug
+   predates native and equally suppressed the envelope.
+2. **profile.update: resource-idiom reduction + bundle execution.** The
+   gateway now deterministically reduces padded full-resource calls
+   (drop empties/explicit-false, set-wins-removeAddress, drop
+   equal-to-canonical no-ops), executes single changes directly, and
+   executes multiple REAL changes as sequential single-change ops.
+   Profile classes: 0/18 → **4/4 in validation, 6/6 in the post-fix run.**
+3. **offer_apply:** diagnosed — mechanics sound (hermetic 17/17 incl. the
+   full apply flow); the w2a B-class variance (6/9 → 1/9 → fixed seed era)
+   is model semantic variance on "yes, track both" phrasings. Left alone
+   per the owner's rule. Post-fix run: 1/2 (expired-offer honest ack judged
+   untruthful — verifier strictness, preserved).
+4. **Latency instrumented.** `runNativeTurn` now reports user-facing phase
+   latency (cognition / tools / verify) on the outcome + `native.turn`
+   audit, on REAL time (the injected clock never advances — the wall is
+   production-true now). Post-fix full run: **turn-only p50 20.0s, p90
+   43.9s** (excludes eval judging). Phase averages: cognition 4.2s,
+   tools ~5ms, verify 6.7s — the cost is round-trip count (multi-dispatch
+   turns) plus the verification ladder. Still above the ≤8s interactive
+   target — flagged, unchanged by these fixes.
+
+**Post-fix full run** (`semantic-w2a-postfix-full`): **38/44 = 86.4% case,
+95.2% common-control, $0.69**, zeros held (unauthorized 45/45-equivalent,
+phantom 100%), tool_validity 97.7%, truthful_ack 95.1%. Residual failures:
+2 verifier-unavailable (provider legs — infra class, preserved), selector
+miss (commitment-missed-02, both drivers), expired-offer honest-ack
+judged untruthful, one judge-sensitivity on a capability explanation.
+Freeze: `pre-holdout-cleanup` = commit carrying this addendum.

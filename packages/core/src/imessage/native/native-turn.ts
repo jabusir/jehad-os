@@ -145,6 +145,25 @@ export interface NativeTurnOutcome extends ConverseOutcome {
   readonly turns?: number;
   readonly toolCalls?: number;
   readonly verified?: string;
+  /** User-facing phase latency (ms) — cognition dispatches + tool
+   *  execution + verification, EXCLUDING eval judging. */
+  readonly latency?: {
+    readonly totalMs: number;
+    readonly cognitionMs: number;
+    readonly toolsMs: number;
+    readonly verifyMs: number;
+  };
+}
+
+/** Mutable phase clock threaded through the turn (ms accumulated). */
+interface PhaseClock {
+  cognitionMs: number;
+  toolsMs: number;
+  verifyMs: number;
+}
+
+function elapsedSince(start: number): number {
+  return Math.max(0, Date.now() - start);
 }
 
 export interface NativeLedgerEntry {
@@ -472,7 +491,11 @@ export async function runNativeTurn(
   }
 
   const models = modelsFor(ctx.gatewayFile, ctx.policy.model);
-  const startMs = ctx.now().getTime();
+  // Wall + phase latency run on REAL time (Date.now), never the injected
+  // clock: the 45s interactive wall must bind in production, and the
+  // latency metric must be user-facing. The injected now() stays for
+  // everything canonical (dates, seeds, retention).
+  const startMs = Date.now();
 
   // R3.4-style greppability: one models_resolved audit per principal-day.
   {
@@ -572,13 +595,16 @@ export async function runNativeTurn(
   let reasks = 0;
   let cost = 0;
   let workToolRan = false;
+  const phases: PhaseClock = { cognitionMs: 0, toolsMs: 0, verifyMs: 0 };
 
   const admissionOpen = (): boolean =>
     ctx.now().getTime() - startMs + NATIVE_T_MS <= NATIVE_WALL_MS &&
     cost + NATIVE_VERIFY_COST_ESTIMATE_USD <= NATIVE_COST_CAP_USD;
 
   const shipNotice = async (content: string): Promise<NativeTurnOutcome> =>
-    shipReply(ctx, content, turnsUsed, toolCallsExecuted, cost, "availability-notice", [], trajectoryEntries);
+    shipReply(ctx, content, turnsUsed, toolCallsExecuted, cost, "availability-notice", [], trajectoryEntries, {
+      totalMs: elapsedSince(startMs), ...phases,
+    });
 
   while (true) {
     // Admission (§5.5): a dispatch starts only if the wall and cost budget
@@ -599,20 +625,24 @@ export async function runNativeTurn(
           "FINAL: this turn's limit is reached. Write your final reply NOW from the evidence already in this conversation. Anything you did not actually execute: say it is not done and offer the next step plainly.",
       });
       try {
+        const tFinal = Date.now();
         const dispatched = await dispatchChatFinal(ctx, messages, models.primary);
+        phases.cognitionMs += elapsedSince(tFinal);
         turnsUsed += 1;
         cost += dispatched.costUsd;
         if (dispatched.text.trim().length === 0) {
           await persistTrajectory(ctx, trajectoryEntries);
           return shipNotice(NOTICE_TURN_COMPLETION);
         }
+        const tVerify = Date.now();
         const verified = await verifyLadder(ctx, dispatched.text, ledger, readEvidence, models, workSnapshot, workActiveTotal, workToolRan, (c) => { cost += c; });
+        phases.verifyMs += elapsedSince(tVerify);
         await persistTrajectory(ctx, trajectoryEntries);
         if (verified.verified === "contradicted_unresolved" || verified.verified.startsWith("verifier-")) {
           await audit(ctx.db, "native.turn_flagged", { principalId: ctx.input.principalId, verified: verified.verified, draft: redactContent(verified.reply.slice(0, 400)) });
           return shipNotice(NOTICE_TURN_COMPLETION);
         }
-        return shipReply(ctx, verified.reply, turnsUsed, toolCallsExecuted, cost, verified.verified, referents, trajectoryEntries);
+        return shipReply(ctx, verified.reply, turnsUsed, toolCallsExecuted, cost, verified.verified, referents, trajectoryEntries, { totalMs: elapsedSince(startMs), ...phases });
       } catch {
         await persistTrajectory(ctx, trajectoryEntries);
         return shipNotice(ledger.length === 0 ? NOTICE_EMPTY_LEDGER : NOTICE_PARTIAL_LEDGER);
@@ -621,7 +651,9 @@ export async function runNativeTurn(
 
     let dispatched: { text: string; toolCalls: readonly ChatToolCall[]; costUsd: number };
     try {
+      const t0 = Date.now();
       dispatched = await dispatchChat(ctx, messages, models.primary);
+      phases.cognitionMs += elapsedSince(t0);
       cost += dispatched.costUsd;
     } catch (err) {
       if (err instanceof ModelBudgetExceededError || err instanceof EgressDenialError || err instanceof EgressPolicyError || err instanceof NativeChatUnsupportedError) {
@@ -632,11 +664,15 @@ export async function runNativeTurn(
       let recovered: { text: string; toolCalls: readonly ChatToolCall[]; costUsd: number } | null = null;
       if (turnsUsed + 1 < NATIVE_MAX_TURNS && admissionOpen()) {
         try {
+          const tRetry = Date.now();
           recovered = await dispatchChat(ctx, messages, models.primary);
+          phases.cognitionMs += elapsedSince(tRetry);
         } catch {
           if (turnsUsed + 2 < NATIVE_MAX_TURNS && admissionOpen()) {
             try {
+              const tFallback = Date.now();
               recovered = await dispatchChat(ctx, messages, models.fallback);
+              phases.cognitionMs += elapsedSince(tFallback);
             } catch {
               recovered = null;
             }
@@ -670,6 +706,7 @@ export async function runNativeTurn(
           messages.push({ role: "tool", toolCallId: call.id, content: "denied: tool-call cap reached for this turn — no further tools will run; answer from your evidence." });
           continue;
         }
+        const tTool = Date.now();
         const outcome = await executeNativeTool(
           {
             db: ctx.db,
@@ -684,6 +721,7 @@ export async function runNativeTurn(
           gatewayState,
           call,
         );
+        phases.toolsMs += elapsedSince(tTool);
         toolCallsExecuted += 1;
         messages.push({ role: "tool", toolCallId: call.id, content: outcome.modelNote });
         ledger.push(outcome.ledger);
@@ -719,7 +757,9 @@ export async function runNativeTurn(
     }
 
     // Final model-authored reply — the fail-closed verification ladder.
+    const tVerify = Date.now();
     const verified = await verifyLadder(ctx, replyText, ledger, readEvidence, models, workSnapshot, workActiveTotal, workToolRan, (c) => { cost += c; });
+    phases.verifyMs += elapsedSince(tVerify);
     if (verified.verified === "contradicted_unresolved" || verified.verified.startsWith("verifier-")) {
       await audit(ctx.db, "native.turn_flagged", {
         principalId: ctx.input.principalId,
@@ -730,7 +770,7 @@ export async function runNativeTurn(
       return shipNotice(NOTICE_TURN_COMPLETION);
     }
     await persistTrajectory(ctx, trajectoryEntries);
-    return shipReply(ctx, verified.reply, turnsUsed, toolCallsExecuted, cost, verified.verified, referents, trajectoryEntries);
+    return shipReply(ctx, verified.reply, turnsUsed, toolCallsExecuted, cost, verified.verified, referents, trajectoryEntries, { totalMs: elapsedSince(startMs), ...phases });
   }
 }
 
@@ -891,6 +931,7 @@ async function shipReply(
   verified: string,
   referents: readonly TurnReferentArtifact[],
   trajectoryEntries: readonly ToolTrajectoryEntry[],
+  latency?: { totalMs: number; cognitionMs: number; toolsMs: number; verifyMs: number },
 ): Promise<NativeTurnOutcome> {
   const handle = canonicalizeHandle(ctx.input.handle);
   const createdBy = await resolveGatewayServicePrincipal(ctx.db);
@@ -934,8 +975,9 @@ async function shipReply(
     toolCalls,
     verified,
     costUsd,
+    ...(latency !== undefined ? { latency } : {}),
     notificationId: notification.id,
   });
   void trajectoryEntries;
-  return { replied: true, notificationId: notification.id, turns, toolCalls, verified };
+  return { replied: true, notificationId: notification.id, turns, toolCalls, verified, ...(latency !== undefined ? { latency } : {}) };
 }

@@ -118,6 +118,10 @@ interface CaseObservation {
   readonly commonControl?: boolean;
   readonly costUsd: number;
   readonly latencyMs: number;
+  /** Driver B: USER-FACING turn latency (cognition+tools+verify) — the
+   *  harness case latency above includes runner-side judging. */
+  readonly turnLatencyMs?: number;
+  readonly turnLatencyPhases?: { cognitionMs: number; toolsMs: number; verifyMs: number };
 }
 
 type Pool = { query: (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> };
@@ -248,7 +252,8 @@ async function seedCase(db: { pool: unknown }, domainId: string, c: SemanticCase
         randomUUID(),
         `semantic-${index}`,
         `semantic-thread-${index}`,
-        PRINCIPAL_NAME,
+        // Reader idiom (028): content rows carry the principal UUID.
+        cachedPrincipalId,
         message.from,
         message.subject,
         message.body.slice(0, 120),
@@ -389,6 +394,9 @@ async function main(): Promise<void> {
           JSON.stringify({
             systemHasTrajectory: systemHead !== undefined && systemHead.content.includes("PRIOR TOOL ACTIVITY"),
             systemHasPending: systemHead !== undefined && systemHead.content.includes("PENDING OFFERS"),
+            systemTrajectoryBlock: systemHead !== undefined && systemHead.content.includes("PRIOR TOOL ACTIVITY")
+              ? systemHead.content.slice(systemHead.content.indexOf("PRIOR TOOL ACTIVITY"), systemHead.content.indexOf("PRIOR TOOL ACTIVITY") + 700)
+              : null,
             lastMessage: request.messages.at(-1),
             text: result.text,
             toolCalls: result.toolCalls,
@@ -534,6 +542,7 @@ async function main(): Promise<void> {
     const perTurnOps: { type: string }[][] = [];
     let confirmToken: string | null = null;
     let laneDispatchObserved = false;
+    let lastOutcome: unknown = null;
     const turns = c.turns !== undefined ? c.turns : [{ user: c.user! }];
     try {
       for (const [turnIndex, turn] of turns.entries()) {
@@ -544,6 +553,7 @@ async function main(): Promise<void> {
           handle: "+15550009999",
           text,
         });
+        lastOutcome = outcome;
         if (outcome.replied === false) {
           console.error(`case ${c.id} turn ${turnIndex + 1} denied: ${(outcome as { reason?: string }).reason ?? "unknown"}`);
         }
@@ -957,6 +967,7 @@ async function main(): Promise<void> {
     }
     failures.unshift(...turnFailures);
 
+    const nativeLatency = (lastOutcome as { latency?: { totalMs: number; cognitionMs: number; toolsMs: number; verifyMs: number } | undefined }).latency;
     observations.push({
       id: c.id,
       behavior: c.behavior,
@@ -971,6 +982,16 @@ async function main(): Promise<void> {
       failures,
       ...(judgeUnavailable ? { judgeUnavailable: true } : {}),
       ...(COMMON_CONTROL_BEHAVIORS.includes(c.behavior) ? { commonControl: true } : {}),
+      ...(nativeLatency !== undefined
+        ? {
+            turnLatencyMs: Math.round(nativeLatency.totalMs),
+            turnLatencyPhases: {
+              cognitionMs: Math.round(nativeLatency.cognitionMs),
+              toolsMs: Math.round(nativeLatency.toolsMs),
+              verifyMs: Math.round(nativeLatency.verifyMs),
+            },
+          }
+        : {}),
       costUsd: Math.round(caseCost * 10000) / 10000,
       latencyMs,
     });
@@ -1001,6 +1022,12 @@ async function main(): Promise<void> {
   const judgeUnavailableCount = observations.filter((o) => o.judgeUnavailable === true).length;
   const totalCost = observations.reduce((sum, o) => sum + o.costUsd, 0);
   const avgLatency = observations.reduce((sum, o) => sum + o.latencyMs, 0) / Math.max(1, observations.length);
+  const turnLats = observations.map((o) => o.turnLatencyMs).filter((v): v is number => v !== undefined).sort((a, b) => a - b);
+  const pct = (arr: number[], p: number): number | null =>
+    arr.length === 0 ? null : arr[Math.min(arr.length - 1, Math.floor((p / 100) * arr.length))]!;
+  const turnLatency = turnLats.length > 0
+    ? { n: turnLats.length, p50Ms: pct(turnLats, 50), p90Ms: pct(turnLats, 90), maxMs: turnLats[turnLats.length - 1]! }
+    : null;
 
   const result = {
     label,
@@ -1013,6 +1040,7 @@ async function main(): Promise<void> {
     spendCeilingUsd: ceiling,
     totalSpendUsd: Math.round(totalCost * 10000) / 10000,
     avgLatencyMs: Math.round(avgLatency),
+    ...(turnLatency !== null ? { turnLatency } : {}),
     casePassRate: Math.round(passRate * 1000) / 1000,
     commonControlPassRate: Math.round(commonPassRate * 1000) / 1000,
     judgeUnavailableCount,

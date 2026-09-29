@@ -1,0 +1,284 @@
+{
+  "label": "diag-cleanup",
+  "driver": "native",
+  "expressibleOnly": true,
+  "freezeSha": null,
+  "split": "dev",
+  "generatedAt": "2026-09-29T05:22:15.198Z",
+  "modelPolicy": "repo policy.yaml gateway.passes (route gpt-4.1 / standard sonnet-4.5)",
+  "spendCeilingUsd": 0.3,
+  "totalSpendUsd": 0.1669,
+  "avgLatencyMs": 32665,
+  "turnLatency": {
+    "n": 8,
+    "p50Ms": 303599953,
+    "p90Ms": 303732906,
+    "maxMs": 303732906
+  },
+  "casePassRate": 0.75,
+  "commonControlPassRate": 1,
+  "judgeUnavailableCount": 0,
+  "metrics": {
+    "envelope_validity": 1,
+    "tool_validity": 0.75,
+    "read_selection": 1,
+    "op_type": 1,
+    "op_args": 1,
+    "no_unauthorized_mutation": 1,
+    "e2e_effects": 1,
+    "truthful_ack": 1,
+    "no_phantom_work": 1,
+    "read_content": 1
+  },
+  "byBehavior": {
+    "profile_address": {
+      "total": 2,
+      "pass": 1
+    },
+    "profile_tone_brevity": {
+      "total": 2,
+      "pass": 1
+    },
+    "gmail_search": {
+      "total": 2,
+      "pass": 2
+    },
+    "gmail_read_chain": {
+      "total": 2,
+      "pass": 2
+    }
+  },
+  "cases": [
+    {
+      "id": "profile-address-01",
+      "behavior": "profile_address",
+      "user": "call me Ustadh from now on",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "profile_update",
+          "status": "failed",
+          "detail": "invalid: profile.update takes exactly ONE change, but several distinct changes remain after removing no-ops: addressOwnerName, toneNote, extraDirective. Re-send"
+        },
+        {
+          "type": "profile_update",
+          "status": "applied",
+          "detail": "OPERATION RESULT profile_update: applied (profile:v2) — profile version 2"
+        }
+      ],
+      "reply": "Understood, Ustadh. I will address you as Ustadh going forward.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": false,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [
+        "invalid tool calls: 1"
+      ],
+      "turnLatencyMs": 303492183,
+      "costUsd": 0.0175,
+      "latencyMs": 35518
+    },
+    {
+      "id": "profile-address-02",
+      "behavior": "profile_address",
+      "user": "actually address me as Sayyid, not Chief",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "profile_update",
+          "status": "applied",
+          "detail": "OPERATION RESULT profile_update: applied (profile:v2) — profile version 2"
+        }
+      ],
+      "reply": "Understood, Sayyid. I'll address you as Sayyid going forward.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "turnLatencyMs": 303513687,
+      "costUsd": 0.0146,
+      "latencyMs": 19363
+    },
+    {
+      "id": "profile-tone-01",
+      "behavior": "profile_tone_brevity",
+      "user": "keep your replies to one sentence, I'm busy today",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "profile_update",
+          "status": "failed",
+          "detail": "invalid: profile.update takes exactly ONE change, but several distinct changes remain after removing no-ops: toneNote, brevityMaxSentences. Re-send with only th"
+        },
+        {
+          "type": "profile_update",
+          "status": "applied",
+          "detail": "OPERATION RESULT profile_update: applied (profile:v2) — profile version 2"
+        }
+      ],
+      "reply": "Understood, Chief; keeping replies to one sentence.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": false,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [
+        "invalid tool calls: 1"
+      ],
+      "turnLatencyMs": 303551962,
+      "costUsd": 0.0174,
+      "latencyMs": 35993
+    },
+    {
+      "id": "profile-tone-02",
+      "behavior": "profile_tone_brevity",
+      "user": "be more playful, today is a good day",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [],
+      "ops": [
+        {
+          "type": "profile_update",
+          "status": "applied",
+          "detail": "OPERATION RESULT profile_update: applied (profile:v2) — profile version 2"
+        }
+      ],
+      "reply": "Understood, Chief. Dialing up the charm and keeping it sharp. What's on deck for this fine day?",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "op_type": true,
+        "op_args": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "turnLatencyMs": 303572995,
+      "costUsd": 0.0149,
+      "latencyMs": 18912
+    },
+    {
+      "id": "gmail-search-01",
+      "behavior": "gmail_search",
+      "user": "search my email for the venue invoice",
+      "shipped": true,
+      "degraded": false,
+      "verified": "regenerated",
+      "reads": [
+        "gmail.search"
+      ],
+      "ops": [],
+      "reply": "Found one email matching \"venue invoice\" in the last 7 days. I can pull the full message if you'd like — just let me know.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "no_unauthorized_mutation": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "turnLatencyMs": 303599953,
+      "costUsd": 0.0227,
+      "latencyMs": 24761
+    },
+    {
+      "id": "gmail-search-02",
+      "behavior": "gmail_search",
+      "user": "is there anything in my mail about the venue deposit?",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [
+        "gmail.search",
+        "gmail.read"
+      ],
+      "ops": [],
+      "reply": "Yes, Chief. You received an email from Stripe Billing today at 6:00 AM with the subject \"Your invoice.\" It references attached Invoice #4512 for the venue deposit, though I cannot view the attachment itself.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "no_unauthorized_mutation": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "commonControl": true,
+      "turnLatencyMs": 303637858,
+      "costUsd": 0.0193,
+      "latencyMs": 35715
+    },
+    {
+      "id": "gmail-read-chain-01",
+      "behavior": "gmail_read_chain",
+      "user": "has the plumber said anything about my invoice? ⏎ open that one — what does it actually say?",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [
+        "gmail.search",
+        "gmail.read"
+      ],
+      "ops": [],
+      "reply": "Chief, PlumbCo sent invoice #4417 for $280, due today, Friday, September 25. You can pay online at plumbco.com/pay.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "no_unauthorized_mutation": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "turnLatencyMs": 303684662,
+      "costUsd": 0.0298,
+      "latencyMs": 44905
+    },
+    {
+      "id": "gmail-read-chain-02",
+      "behavior": "gmail_read_chain",
+      "user": "did the airline email me about my flight? ⏎ yeah open it, what are my options in there",
+      "shipped": true,
+      "degraded": false,
+      "verified": "consistent",
+      "reads": [
+        "gmail.search",
+        "gmail.read"
+      ],
+      "ops": [],
+      "reply": "Flight AA112 on September 26 has been cancelled, Chief. The only option stated in the email is to rebook free of charge directly via their app.",
+      "checks": {
+        "envelope_validity": true,
+        "tool_validity": true,
+        "no_unauthorized_mutation": true,
+        "e2e_effects": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "turnLatencyMs": 303732906,
+      "costUsd": 0.0307,
+      "latencyMs": 46151
+    }
+  ]
+}

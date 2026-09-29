@@ -50,6 +50,78 @@ import {
   nativeToolDef,
   type NativeToolInvocation,
 } from "./tool-registry.js";
+import { activeProfile } from "../profiles.js";
+
+/**
+ * Profile.update arrives as a PADDED FULL RESOURCE (gpt-4.1 habit: the
+ * intended change plus empty strings, `removeAddress` noise, and echoed
+ * current values). Reduce it deterministically BEFORE the strict
+ * one-change validator — the interface, not the model, absorbs the
+ * resource idiom:
+ *   1. drop empty strings and explicit-false removeAddress;
+ *   2. set-remove conflict: addressOwnerName present ⇒ removeAddress was
+ *      padding (set wins; a destructive removal is never inferred);
+ *   3. drop fields EQUAL to the current canonical profile (a change that
+ *      is not a change);
+ *   4. one surviving change ⇒ coerce it; zero ⇒ honest no-change;
+ *      several ⇒ structured rejection NAMING them (the model reliably
+ *      self-corrects against the named survivors).
+ */
+async function reduceProfileResourceCall(
+  ctx: NativeToolContext,
+  invocation: NativeToolInvocation,
+): Promise<NativeToolInvocation> {
+  let args: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(invocation.arguments);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return invocation;
+    args = parsed as Record<string, unknown>;
+  } catch {
+    return invocation;
+  }
+  const changes: Record<string, unknown> = {};
+  for (const key of ["addressOwnerName", "toneNote", "extraDirective"] as const) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim().length > 0) changes[key] = value.trim();
+  }
+  if (typeof args["brevityMaxSentences"] === "number") changes["brevityMaxSentences"] = args["brevityMaxSentences"];
+  if (args["removeAddress"] === true) changes["removeAddress"] = true;
+  if (changes["addressOwnerName"] !== undefined) delete changes["removeAddress"]; // rule 2
+
+  let canonical: { ownerName: string | null; maxSentences: number | null } | null = null;
+  try {
+    const profile = await activeProfile(ctx.db, { principalId: ctx.principalId, surface: "imessage" });
+    if (profile !== null) {
+      canonical = {
+        ownerName: profile.definition.address?.ownerName ?? null,
+        maxSentences: profile.definition.brevity?.maxSentences ?? null,
+      };
+    }
+  } catch {
+    canonical = null; // canonical unavailable — only the deterministic drops apply
+  }
+  if (canonical !== null) {
+    if (typeof changes["addressOwnerName"] === "string" && canonical.ownerName !== null && changes["addressOwnerName"] === canonical.ownerName) {
+      delete changes["addressOwnerName"]; // rule 3 — echoed current value
+    }
+    if (canonical.maxSentences !== null && changes["brevityMaxSentences"] === canonical.maxSentences) {
+      delete changes["brevityMaxSentences"]; // rule 3
+    }
+  }
+
+  const count = Object.keys(changes).length;
+  if (count === 0) {
+    return { ...invocation, arguments: JSON.stringify({ noChange: true }) };
+  }
+  if (count > 1) {
+    // Structured rejection: name the survivors so the model's retry is exact.
+    return {
+      ...invocation,
+      arguments: JSON.stringify({ ambiguousChanges: Object.keys(changes) }),
+    };
+  }
+  return { ...invocation, arguments: JSON.stringify(changes) };
+}
 
 /** Per-tool repeat caps (§5.5; gmail.read gets its drill-down headroom). */
 const TOOL_REPEAT_CAPS: Readonly<Record<string, number>> = {
@@ -242,7 +314,75 @@ export async function executeNativeTool(
   }
   state.perTool.set(invocation.name, repeats + 1);
 
-  const coerced = coerceNativeToolCall(invocation);
+  let effectiveInvocation = invocation;
+  if (invocation.name === "profile.update") {
+    const reduced = await reduceProfileResourceCall(ctx, invocation);
+    const reducedArgs = (() => {
+      try {
+        return JSON.parse(reduced.arguments) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    })();
+    if (reducedArgs !== null && reducedArgs["noChange"] === true) {
+      return outcome(ctx, invocation, "write", {
+        status: "ok", authority: "current_authenticated_turn",
+        modelNote: "no change — the profile already says that; answer the user plainly",
+        ledger: { kind: "operation", opType: "profile_update", status: "applied", detail: "no-change (already current)" },
+      }, { argsDigest: null });
+    }
+    if (reducedArgs !== null && Array.isArray(reducedArgs["ambiguousChanges"])) {
+      // Several REAL changes in one call — the resource idiom applied
+      // literally. Profile fields are low-risk, reversible, and grounded
+      // in the current turn's instruction: execute them as sequential
+      // single-change ops (each through the same strict validator), one
+      // user-facing action.
+      const changes = reducedArgs["ambiguousChanges"] as string[];
+      const canonicalArgs = argsDigestOf(invocation);
+      const results: string[] = [];
+      let applied = 0;
+      for (const key of changes) {
+        const single: NativeToolInvocation = {
+          id: `${invocation.id}-${key}`,
+          name: "profile.update",
+          arguments: JSON.stringify({ [key]: (() => {
+            try {
+              return JSON.parse(invocation.arguments)[key];
+            } catch {
+              return undefined;
+            }
+          })() }),
+        };
+        const op = coerceNativeToolCall(single);
+        if (op === null || op.kind !== "write") {
+          results.push(`${key}: rejected`);
+          continue;
+        }
+        const r = await executeOperation(ctx.db, op.op, {
+          principalId: ctx.principalId,
+          principalName: ctx.principalName,
+          threadId: ctx.threadId,
+          now: ctx.now(),
+          calendarPolicy: null,
+        });
+        results.push(`${key}: ${r.status}`);
+        if (r.status === "applied") applied += 1;
+      }
+      const okAll = applied === changes.length && applied > 0;
+      return outcome(ctx, invocation, "write", {
+        status: okAll ? "ok" : applied > 0 ? "staged" : "error",
+        authority: "current_authenticated_turn",
+        modelNote: `OPERATION RESULT profile_update: ${applied}/${changes.length} applied — ${results.join("; ")}`,
+        ledger: {
+          kind: "operation", opType: "profile_update",
+          status: okAll ? "applied" : applied > 0 ? "queued" : "failed",
+          detail: results.join("; ").slice(0, 200),
+        },
+      }, { argsDigest: canonicalArgs });
+    }
+    effectiveInvocation = reduced;
+  }
+  const coerced = coerceNativeToolCall(effectiveInvocation);
   if (coerced === null) {
     return outcome(ctx, invocation, def.kind, {
       status: "invalid", authority: "current_authenticated_turn",
@@ -356,6 +496,7 @@ async function executeNativeWrite(
     principalName: ctx.principalName,
     threadId: ctx.threadId,
     now: ctx.now(),
+    calendarPolicy: null,
   });
   return outcome(ctx, invocation, "write", {
     status: result.status === "applied" ? "ok" : result.status === "parked" || result.status === "queued" ? "staged" : "error",
