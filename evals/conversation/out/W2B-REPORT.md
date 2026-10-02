@@ -135,3 +135,17 @@ sides.
   (sha256 e42f4f8cd9938ac1f9cb29ab0f2d446f90133400d06bfedd946b01904473dfdb).
 - Runner: `evals/conversation/w2b-holdout.ts` (commit `e0b2bed`).
 - **Status: STOPPED for owner review. No fixes applied post-holdout.**
+
+---
+
+## ADDENDUM (post-W2c): scorer bug correction
+
+The `due_time` scorer in the W2b runner compared `String(timestamptz).slice(0,5)`
+against "HH:MM" — which can never match (node-pg returns a Date). This falsely
+failed `h2-reminder-02` in all six W2b runs on the time axis alone. Corrected
+v2 case-pass medians with the time axis voided: **A 66.7 → 66.7 (A-3 improves
+62.5→66.7 wait: A = 62.5/66.7/70.8, median 66.7); B = 70.8/70.8/62.5, median
+70.8**; corrected cc medians: A 57.1, B 64.3. The W2b verdict (advantage did
+not generalize; NO-GO) is unchanged — the correction narrows A's apparent
+parity to a modest B edge, consistent with the W2c corrected reading
+(v3: A 60.0 vs B 55.0 case median, cc parity). Full analysis in W2C-REPORT.md.
