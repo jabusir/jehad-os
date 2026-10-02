@@ -40,8 +40,9 @@ import { createIsolatedTestDb, dropIsolatedTestDb } from "../../packages/db/test
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.join(HERE, "out");
-const HOLDOUT_FILE = path.join(HERE, "holdout-v2.yaml");
-const HOLDOUT_SHA256 = "e42f4f8cd9938ac1f9cb29ab0f2d446f90133400d06bfedd946b01904473dfdb";
+// W2c: holdout v3 (owner-authored; v2 is seen/burned — never rerun).
+const HOLDOUT_FILE = path.join(HERE, "holdout-v3.yaml");
+const HOLDOUT_SHA256 = "7d41df470ddeb293e0be49f3b4959e6341f1f1e1c97240cf1ca48e49d5420ff6";
 const NATIVE_FIXTURE_POLICY = path.join(HERE, "..", "..", "packages/core/src/imessage/native-test.policy.yaml");
 const SPEND_CEILING_USD = 1.2;
 const MIN_BALANCE_USD = 2.5;
@@ -114,7 +115,7 @@ interface V2Case {
 
 function loadHoldout(): V2Case[] {
   const raw = parse(readFileSync(HOLDOUT_FILE, "utf8")) as { version: number; cases: V2Case[] };
-  if (raw.version !== 2) throw new Error(`holdout: version must be 2, got ${String(raw.version)}`);
+  if (raw.version !== 3) throw new Error(`holdout: version must be 3, got ${String(raw.version)}`);
   return raw.cases;
 }
 
