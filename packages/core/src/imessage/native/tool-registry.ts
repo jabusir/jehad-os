@@ -44,14 +44,14 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "commitments.list",
     kind: "read",
     description:
-      "List the user's open to-dos/commitments — overdue, due soon, and undated open items with titles. If the user asks anything about their to-dos/list/tasks, call this FIRST and answer from the result — never claim the list is empty without it.",
+      "The user's open to-dos/commitments: overdue, due soon, and undated, each with its title. Read this whenever the answer depends on what the user currently owes or is carrying — never assert the list is empty or guess its contents without reading it. Colloquial acknowledgments that a to-do is finished are handled by commitments.transition, not this.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "gmail.search",
     kind: "read",
     description:
-      "Keyword search over the user's Gmail (subject, sender, body), last 7 days. Pass a short keyword phrase, not a sentence. If the user asks whether/about any email, sender, or message — search FIRST and answer from results; never claim the inbox has nothing without searching. Returns messageIds for gmail.read.",
+      "Keyword search over the user's Gmail (subject, sender, body), last 7 days. Read this whenever the answer depends on what email exists or what a message says — never assert an inbox is empty or guess its contents without searching. Pass a short keyword phrase, not a sentence. Returns messageIds for gmail.read.",
     parameters: {
       type: "object",
       properties: {
@@ -66,7 +66,7 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "gmail.read",
     kind: "read",
     description:
-      "Read one Gmail message by messageId (from a gmail.search result). Use to open 'that one' after a search.",
+      "Read one Gmail message in full by messageId (from a gmail.search result or prior tool activity). Use whenever the substance of a known message matters — its body, amounts, dates, or requests.",
     parameters: {
       type: "object",
       properties: { message_id: { type: "string", maxLength: 200 } },
@@ -78,7 +78,7 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "work.status",
     kind: "read",
     description:
-      "Canonical delegated-work state — what research/outcomes exist and their status. The ONLY source for 'how is that going'. Optional ref for one outcome's detail.",
+      "Canonical delegated-work state: what research/outcomes exist, their status, and progress. The ONLY truthful source about delegated work — read it whenever a reply would state or imply work exists, is underway, or has finished. Optional ref for one outcome's detail.",
     parameters: {
       type: "object",
       properties: { ref: { type: "string", maxLength: 8 } },
@@ -89,7 +89,7 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "commitments.transition",
     kind: "write",
     description:
-      "Execute directly: mark one of the user's open to-dos done / missed / renegotiated. selector = the user's own words naming it ('seating chart'); ambiguous matches are refused with candidates, never guessed.",
+      "Record the outcome of one of the user's open to-dos: done, missed, or renegotiated. Use it whenever the user conveys — in any phrasing — that an existing commitment is finished, fell through, or moved. selector = the words that identify it; resolution is exact-or-ambiguous, never guessed.",
     parameters: {
       type: "object",
       properties: {
@@ -105,7 +105,7 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "commitments.create",
     kind: "write",
     description:
-      "Execute directly (low-risk): capture one or more new to-dos (items with optional due words like 'by wednesday'). Multiple items land as one offer the user confirms with a single yes — say what you captured and ask.",
+      "Capture one or more new to-dos the user wants tracked (each with optional due words). Multiple items land as one offer the user confirms with a single yes — say what you captured and ask.",
     parameters: {
       type: "object",
       properties: {
@@ -132,7 +132,7 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "reminders.create",
     kind: "write",
     description:
-      "Execute directly (low-risk, reversible — never confirm, never 'stage'): create a time-based reminder ('remind me to X'). Pass whenWords (the user's time words verbatim) and/or a concrete dueDate/dueTime you can derive. Fuzzy times are DEFINITE — 'around 2' means 2:00; schedule it and state the concrete time. If the user gave NO time at all, create it for tomorrow and say so — never ask which time they meant.",
+      "Create a time-based reminder — a promise that the user is prompted at a specific moment. Use whenever the user wants to be nudged about something later, however the request is phrased. Pass whenWords (the user's time words verbatim) and/or a concrete dueDate/dueTime you can derive; a named clock time without am/pm means the nearer sensible daytime hour. Fuzzy times are definite — schedule the concrete time and state it. With no time given at all, use tomorrow and say so.",
     parameters: {
       type: "object",
       properties: {
@@ -154,7 +154,7 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "profile.update",
     kind: "write",
     description:
-      "Call this whenever the user asks you to change how they address/talk ('call me X', 'be more brief', 'one sentence replies') — do not just acknowledge in words. Exactly ONE change per call: addressOwnerName | removeAddress:true | toneNote | brevityMaxSentences (1-10) | extraDirective. Omit every other field entirely.",
+      "Persist a change to how you address or talk to the user — name, register, verbosity. Acknowledging in words does not persist anything: whenever the user conveys a preference about your address or voice, record it here. Exactly ONE change per call; omit every other field entirely.",
     parameters: {
       type: "object",
       properties: {
@@ -171,7 +171,7 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "outcomes.delegate",
     kind: "write",
     description:
-      "Call this IMMEDIATELY when the user's message asks you/workers to research, investigate, or handle a project — staging IS the consent gate, so never ask 'shall I?' first. It stages an offer with a confirm token; the work does NOT start until the user confirms with the token. Never say work is running before that.",
+      "Stage durable delegated work (research, investigation, multi-step projects) for a worker. Staging IS the consent gate: stage as soon as the user hands off work, before asking anything — the user then confirms with the token, and only then does the work start. Never say work is running before that.",
     parameters: {
       type: "object",
       properties: {
@@ -189,7 +189,7 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "offers.apply",
     kind: "resolution",
     description:
-      "Apply one of your pending offers (from PENDING OFFERS) when the user's CURRENT message confirms it ('yes do that'). Id format: <type>:<4hex>.",
+      "Apply one of your pending offers (from PENDING OFFERS) — converts the staged action into canonical state. Use when the user's current message clearly accepts the staged thing, in any phrasing. Id format: <type>:<4hex>.",
     parameters: {
       type: "object",
       properties: { id: { type: "string", pattern: "^[a-z_]+:[0-9a-f]{4}$" } },
@@ -200,7 +200,7 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
   {
     name: "offers.decline",
     kind: "resolution",
-    description: "Drop one of your pending offers when the user's CURRENT message declines it.",
+    description: "Drop one of your pending offers without applying it. Use when the user's current message clearly rejects or dismisses the staged thing, in any phrasing.",
     parameters: {
       type: "object",
       properties: { id: { type: "string", pattern: "^[a-z_]+:[0-9a-f]{4}$" } },

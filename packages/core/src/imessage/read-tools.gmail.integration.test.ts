@@ -145,10 +145,16 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail.search + gmail.read (integration, C4)
   const ACTOR = "system:gmail-sync";
   const POLICY = { ...DEFAULT_GMAIL_CONTENT_POLICY, enabled: true };
 
+  let ownerPrincipalId: string;
   beforeAll(async () => {
     db = await createIsolatedTestDb(TEST_DATABASE_URL!, "gmailc4");
     await migrateUp(db.pool);
     await seedDomains(db.pool);
+    const row = await db.pool.query(
+      `INSERT INTO principals (type, name) VALUES ('user', 'josctl')
+       ON CONFLICT (name) DO UPDATE SET name = 'josctl' RETURNING id`,
+    );
+    ownerPrincipalId = String(row.rows[0]!.id);
   });
 
   afterAll(async () => {
@@ -187,7 +193,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail.search + gmail.read (integration, C4)
         observedHistoryId: null,
         now: NOW,
         actor: ACTOR,
-        principalId: args.principalId,
+        principalId: args.principalId ?? ownerPrincipalId,
       },
     );
     expect(outcome.status).toBe("stored");
@@ -199,7 +205,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail.search + gmail.read (integration, C4)
       maxAgeDays === undefined
         ? { tool: "gmail.search", query }
         : { tool: "gmail.search", query, max_age_days: maxAgeDays },
-      { now: () => NOW, principalId: "josctl" },
+      { now: () => NOW, principalId: ownerPrincipalId },
     );
   }
 
@@ -294,7 +300,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail.search + gmail.read (integration, C4)
     const result = await executeReadTool(
       db.pool,
       { tool: "gmail.read", message_id: "c4-read" },
-      { now: () => NOW, principalId: "josctl" },
+      { now: () => NOW, principalId: ownerPrincipalId },
     );
     expect(result.coverage).toBe(
       "Gmail (your connected account): one message by id, last 7 days only; body is sanitized untrusted content",
@@ -322,7 +328,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail.search + gmail.read (integration, C4)
     const expired = await executeReadTool(
       db.pool,
       { tool: "gmail.read", message_id: "c4-old" },
-      { now: () => NOW, principalId: "josctl" },
+      { now: () => NOW, principalId: ownerPrincipalId },
     );
     expect(expired.data).toEqual({ found: false });
     expect(expired.coverage).toContain("7 days");
@@ -330,7 +336,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gmail.search + gmail.read (integration, C4)
     const unknown = await executeReadTool(
       db.pool,
       { tool: "gmail.read", message_id: "no-such-message" },
-      { now: () => NOW, principalId: "josctl" },
+      { now: () => NOW, principalId: ownerPrincipalId },
     );
     expect(unknown.data).toEqual({ found: false });
 

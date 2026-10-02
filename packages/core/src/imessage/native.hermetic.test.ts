@@ -777,6 +777,73 @@ describe.skipIf(!TEST_DATABASE_URL)("native tool cognition (W1 spike, hermetic i
     expect(await pendingProposals()).toHaveLength(0);
   });
 
+  it("execution bias: colloquial completion phrasings drive commitments.transition (W2b under-acting class, new phrasings)", async () => {
+    await grant();
+    await seedProfile(db.pool, { principalId: josctlId, surface: "imessage", definition: JOSCTL_PROFILE_DEFINITION });
+    await seedCommitment("order the flowers");
+    await seedCommitment("book the DJ");
+    // "sorted" phrasing — done class, no trigger verb present.
+    const done = await nativeTurn(
+      [
+        chatTools([{ name: "commitments.transition", args: { selector: "order the flowers", verb: "done" } }]),
+        chatText("Sorted — the flowers are marked done."),
+      ],
+      [VERIFY_CONSISTENT],
+      "the flower situation is sorted",
+    );
+    expect(done.outcome.replied).toBe(true);
+    expect(done.outcome.toolCalls).toBeGreaterThanOrEqual(1);
+    const flowers = await db.pool.query(`SELECT status FROM commitments WHERE description = 'order the flowers'`);
+    expect(String(flowers.rows[0]!.status)).toBe("met");
+    // "fell through" phrasing — missed class.
+    const missed = await nativeTurn(
+      [
+        chatTools([{ name: "commitments.transition", args: { selector: "book the DJ", verb: "missed" } }]),
+        chatText("Noted — the DJ booking is marked as missed. Want me to line up another one?"),
+      ],
+      [VERIFY_CONSISTENT],
+      "the DJ thing fell through, by the way",
+    );
+    expect(missed.outcome.replied).toBe(true);
+    const dj = await db.pool.query(`SELECT status FROM commitments WHERE description = 'book the DJ'`);
+    expect(String(dj.rows[0]!.status)).toBe("missed");
+  });
+
+  it("execution bias: colloquial offer acceptance drives offers.apply (new phrasings)", async () => {
+    await grant();
+    await seedProfile(db.pool, { principalId: josctlId, surface: "imessage", definition: JOSCTL_PROFILE_DEFINITION });
+    // Stage a batch through the real gateway seam, then accept it colloquially.
+    const threadId = (
+      await db.pool.query(
+        `INSERT INTO interaction_threads (id, principal_id, surface, created_at, last_activity_at, active_context_expires_at, raw_retention_expires_at)
+         VALUES (gen_random_uuid(), $1::uuid, 'imessage', now(), now(), now() + interval '72 hours', now() + interval '7 days') RETURNING id`,
+        [josctlId],
+      )
+    ).rows[0]!.id as string;
+    const gatewayCtx = {
+      db: db.pool, principalId: josctlId, principalName: "josctl", threadId,
+      now: () => NOW, policyReads: ["commitments"],
+    };
+    const staged = await executeNativeTool(gatewayCtx, newNativeToolTurnState(), {
+      id: "s0", name: "commitments.create",
+      arguments: JSON.stringify({ items: [{ title: "return the ladder" }, { title: "book the photographer" }] }),
+    });
+    expect(staged.status).toBe("staged");
+    const pending = await pendingProposals();
+    const stagedId = pending.find((x) => x.type === "task_batch")?.id ?? "";
+    const accepted = await nativeTurn(
+      [
+        chatTools([{ name: "offers.apply", args: { id: stagedId } }]),
+        chatText("Both are on your list now — return the ladder and book the photographer."),
+      ],
+      [VERIFY_CONSISTENT],
+      "yep let's do those",
+    );
+    expect(accepted.outcome.replied).toBe(true);
+    const n = await db.pool.query(`SELECT count(*)::int AS n FROM commitments WHERE status='open'`);
+    expect(Number(n.rows[0]!.n)).toBe(2);
+  });
+
   it("reminder creation: inline reminders.create applies and the reply quotes the concrete time", async () => {
     await grant();
     await seedProfile(db.pool, { principalId: josctlId, surface: "imessage", definition: JOSCTL_PROFILE_DEFINITION });

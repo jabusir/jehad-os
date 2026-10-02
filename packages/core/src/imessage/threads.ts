@@ -416,14 +416,14 @@ export interface ToolTrajectoryTurn {
   readonly entries: readonly ToolTrajectoryEntry[];
 }
 
-export const TOOL_TRAJECTORY_TURNS_KEPT = 3;
+export const TOOL_TRAJECTORY_TURNS_KEPT = 5;
 export const TOOL_TRAJECTORY_ENTRIES_MAX = 12;
 export const TOOL_TRAJECTORY_SUMMARY_MAX_CHARS = 200;
 export const TOOL_TRAJECTORY_ARGS_MAX_CHARS = 120;
 export const TOOL_TRAJECTORY_REFS_MAX = 8;
 export const TOOL_TRAJECTORY_REF_MAX_CHARS = 64;
 export const TOOL_TRAJECTORY_REF_LABEL_MAX_CHARS = 120;
-export const TOOL_TRAJECTORY_SERIALIZED_MAX_CHARS = 4000;
+export const TOOL_TRAJECTORY_SERIALIZED_MAX_CHARS = 8000;
 
 /**
  * Amendment 5 salience view: pending proposals keyed by type (at most one

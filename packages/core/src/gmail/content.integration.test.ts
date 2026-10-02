@@ -43,10 +43,18 @@ const ENABLED = { ...DEFAULT_GMAIL_CONTENT_POLICY, enabled: true };
 describe.skipIf(TEST_DATABASE_URL === undefined)("gmail content (GC0, ADR-0016)", () => {
   let db: IsolatedDb;
 
+  let ownerPrincipalId: string;
   beforeAll(async () => {
     db = await createIsolatedTestDb(TEST_DATABASE_URL!, "gmailcontent");
     await migrateUp(db.pool);
     await seedDomains(db.pool);
+    // Content rows carry the principal UUID (migration 028 idiom) — the
+    // same idiom the production readers (search/read by UUID) use.
+    const row = await db.pool.query(
+      `INSERT INTO principals (type, name) VALUES ('user', 'josctl')
+       ON CONFLICT (name) DO UPDATE SET name = 'josctl' RETURNING id`,
+    );
+    ownerPrincipalId = String(row.rows[0]!.id);
   });
 
   afterAll(async () => {
@@ -64,6 +72,7 @@ describe.skipIf(TEST_DATABASE_URL === undefined)("gmail content (GC0, ADR-0016)"
 
   it("persists a source record: untrusted label, body, sha, provenance; audit carries ids only", async () => {
     const result = await persistGmailContent(exec, content({ id: "m1" }), {
+      principalId: ownerPrincipalId,
       policy: ENABLED,
       observedHistoryId: 7001,
       now: NOW,
@@ -71,7 +80,7 @@ describe.skipIf(TEST_DATABASE_URL === undefined)("gmail content (GC0, ADR-0016)"
     });
     expect(result.status).toBe("stored");
 
-    const record = await getGmailMessageContent(exec, "josctl", "m1");
+    const record = await getGmailMessageContent(exec, ownerPrincipalId, "m1");
     expect(record).not.toBeNull();
     expect(record!.sourceTrustClass).toBe("untrusted_external");
     expect(record!.bodyText).toContain(MARKER);
@@ -90,6 +99,7 @@ describe.skipIf(TEST_DATABASE_URL === undefined)("gmail content (GC0, ADR-0016)"
 
   it("is idempotent (same sha → unchanged) and refreshes on content change", async () => {
     const again = await persistGmailContent(exec, content({ id: "m1" }), {
+      principalId: ownerPrincipalId,
       policy: ENABLED,
       observedHistoryId: 7001,
       now: NOW,
@@ -98,19 +108,21 @@ describe.skipIf(TEST_DATABASE_URL === undefined)("gmail content (GC0, ADR-0016)"
     expect(again.status).toBe("unchanged");
 
     const revised = await persistGmailContent(exec, content({ id: "m1", textPlain: `${MARKER} rev2` }), {
+      principalId: ownerPrincipalId,
       policy: ENABLED,
       observedHistoryId: 7002,
       now: NOW,
       actor: ACTOR,
     });
     expect(revised.status).toBe("stored");
-    expect((await getGmailMessageContent(exec, "josctl", "m1"))!.bodyText).toContain("rev2");
+    expect((await getGmailMessageContent(exec, ownerPrincipalId, "m1"))!.bodyText).toContain("rev2");
   });
 
   it("an empty/disabled body class never creates a row (honest absence)", async () => {
     expect(
       (await persistGmailContent(exec, content({ id: "m2", textPlain: null }), {
-        policy: ENABLED, observedHistoryId: null, now: NOW, actor: ACTOR,
+        principalId: ownerPrincipalId,
+      policy: ENABLED, observedHistoryId: null, now: NOW, actor: ACTOR,
       })).status,
     ).toBe("empty");
     expect(
@@ -118,8 +130,8 @@ describe.skipIf(TEST_DATABASE_URL === undefined)("gmail content (GC0, ADR-0016)"
         policy: { ...ENABLED, enabled: false }, observedHistoryId: null, now: NOW, actor: ACTOR,
       })).status,
     ).toBe("empty");
-    expect(await getGmailMessageContent(exec, "josctl", "m2")).toBeNull();
-    expect(await getGmailMessageContent(exec, "josctl", "m3")).toBeNull();
+    expect(await getGmailMessageContent(exec, ownerPrincipalId, "m2")).toBeNull();
+    expect(await getGmailMessageContent(exec, ownerPrincipalId, "m3")).toBeNull();
   });
 
   it("truncates bodies to the byte cap without splitting a code point", async () => {
@@ -130,7 +142,7 @@ describe.skipIf(TEST_DATABASE_URL === undefined)("gmail content (GC0, ADR-0016)"
       now: NOW,
       actor: ACTOR,
     });
-    const record = await getGmailMessageContent(exec, "josctl", "m4");
+    const record = await getGmailMessageContent(exec, ownerPrincipalId, "m4");
     expect(record!.bodyTruncated).toBe(true);
     expect(Buffer.byteLength(record!.bodyText!, "utf8")).toBeLessThanOrEqual(1000);
     expect(record!.bodyText!.endsWith("é")).toBe(true); // no mojibake tail
@@ -138,22 +150,25 @@ describe.skipIf(TEST_DATABASE_URL === undefined)("gmail content (GC0, ADR-0016)"
 
   it("principal isolation: foreign principal / unknown id → null and empty sets", async () => {
     await persistGmailContent(exec, content({ id: "m1", threadId: "thr-iso" }), {
+      principalId: ownerPrincipalId,
       policy: ENABLED, observedHistoryId: null, now: NOW, actor: ACTOR,
     });
     expect(await getGmailMessageContent(exec, "yusra", "m1")).toBeNull();
-    expect(await getGmailMessageContent(exec, "josctl", "foreign-msg-id")).toBeNull();
+    expect(await getGmailMessageContent(exec, ownerPrincipalId, "foreign-msg-id")).toBeNull();
     expect(await listGmailThreadContent(exec, "yusra", "thr-iso")).toEqual([]);
     expect(await searchGmailContent(exec, "yusra", { fromContains: "acme.com" })).toEqual([]);
     // The owner still sees the row (control, not over-blocking).
-    expect((await searchGmailContent(exec, "josctl", { fromContains: "acme.com" })).length).toBeGreaterThan(0);
+    expect((await searchGmailContent(exec, ownerPrincipalId, { fromContains: "acme.com" })).length).toBeGreaterThan(0);
   });
 
   it("retention sweep deletes past-window unpinned rows only (pinned survives)", async () => {
     await persistGmailContent(exec, content({ id: "old-1", threadId: "thr-old" }), {
+      principalId: ownerPrincipalId,
       policy: ENABLED, observedHistoryId: null,
       now: new Date(NOW.getTime() - 30 * 86_400_000), actor: ACTOR,
     });
     await persistGmailContent(exec, content({ id: "new-1", threadId: "thr-new" }), {
+      principalId: ownerPrincipalId,
       policy: ENABLED, observedHistoryId: null, now: NOW, actor: ACTOR,
     });
     await q(`UPDATE gmail_messages SET pinned = true WHERE gmail_message_id = 'old-1'`);
@@ -163,8 +178,8 @@ describe.skipIf(TEST_DATABASE_URL === undefined)("gmail content (GC0, ADR-0016)"
     });
     // old-1 pinned survives; other aged rows (from prior tests) may also
     // delete — assert the invariants, not the raw count.
-    expect(await getGmailMessageContent(exec, "josctl", "old-1")).not.toBeNull();
-    expect(await getGmailMessageContent(exec, "josctl", "new-1")).not.toBeNull();
+    expect(await getGmailMessageContent(exec, ownerPrincipalId, "old-1")).not.toBeNull();
+    expect(await getGmailMessageContent(exec, ownerPrincipalId, "new-1")).not.toBeNull();
 
     // Unpin → now the sweep takes it (and only the audit count records it).
     await q(`UPDATE gmail_messages SET pinned = false WHERE gmail_message_id = 'old-1'`);
@@ -172,12 +187,13 @@ describe.skipIf(TEST_DATABASE_URL === undefined)("gmail content (GC0, ADR-0016)"
       retentionDays: 14, now: NOW, actor: ACTOR,
     });
     expect(deleted2).toBeGreaterThanOrEqual(1);
-    expect(await getGmailMessageContent(exec, "josctl", "old-1")).toBeNull();
+    expect(await getGmailMessageContent(exec, ownerPrincipalId, "old-1")).toBeNull();
     expect(deleted).toBeGreaterThanOrEqual(0);
   });
 
   it("no-leak scan: bodies appear in NO audit_log.outputs_ref and NO events.payload", async () => {
     await persistGmailContent(exec, content({ id: "leak-check" }), {
+      principalId: ownerPrincipalId,
       policy: ENABLED, observedHistoryId: null, now: NOW, actor: ACTOR,
     });
     for (const [table, column] of [

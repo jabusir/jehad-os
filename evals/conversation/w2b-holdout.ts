@@ -15,7 +15,7 @@
 
 import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
@@ -25,14 +25,12 @@ import {
   ModelEgressPolicyRegistry,
   buildVerificationPrompt,
   callModel,
-  createReminder,
   executeOperation,
   executeReadTool,
   handleInbound,
   loadRepoPolicy,
   parseVerificationVerdict,
   resolveActiveThread,
-  setThreadPendingProposals,
   collectWorkState,
   renderWorkSnapshotText,
 } from "@jehad/core";
@@ -203,11 +201,6 @@ async function main(): Promise<void> {
     }
     throw lastError;
   }
-  const metered: ModelProvider = {
-    id: "openrouter",
-    complete: (request) => completeWithRetry(request),
-    chat: (request) => chatWithRetry(request),
-  };
 
   await migrateUp(db.pool);
   await seedDomains(db.pool);
@@ -401,6 +394,21 @@ async function main(): Promise<void> {
           const row = await pool.query(`SELECT payload->>'content' AS c FROM notifications WHERE id = $1::uuid`, [outcome.notificationId]);
           reply = typeof row.rows[0]?.["c"] === "string" ? String(row.rows[0]!["c"]) : null;
         }
+        // W2b-runner fix (recorded in W2B-REPORT): the deterministic
+        // confirm/cancel token lane applies outside the observed ops —
+        // synthesize the applied ledger entry so the judge scores the
+        // TRUE canonical effect instead of false-flagging the lane's own
+        // success reply.
+        const laneConfirmed = await pool.query(
+          `SELECT outputs_ref::jsonb AS o FROM audit_log
+            WHERE action = 'imessage.outcome_token.confirmed' ORDER BY occurred_at DESC LIMIT 1`,
+        );
+        if (laneConfirmed.rows[0] !== undefined && laneConfirmed.rows[0]!.o["applied"] === true) {
+          observedOps.push({
+            op: { type: "outcome_spec" } as CognitiveOperation,
+            result: { status: "applied", detail: "outcome accepted via confirm token; dispatch observed — queued to run (not running yet)" },
+          });
+        }
         if (confirmToken === null) {
           const parked = await pool.query(
             `SELECT metadata->'pendingProposals' AS p FROM interaction_threads WHERE metadata->'pendingProposals' IS NOT NULL LIMIT 1`,
@@ -559,11 +567,14 @@ async function main(): Promise<void> {
       }
       const judgeReadEvidence = evidenceLines.length > 0 ? evidenceLines.join("\n").slice(0, 1600) : undefined;
       const judgeOnce = async (): Promise<ReturnType<typeof parseVerificationVerdict>> => {
+        const judgePrompt =
+          buildVerificationPrompt(reply!, ledgerEntries, workSnapshot,
+            "Today is Friday, September 25, 2026 (America/Los_Angeles); tomorrow is Saturday, Sep 26. Judge relative-date claims against this anchor.",
+            judgeReadEvidence) +
+          "\n\nClarification (measurement rule): general explanations of how the assistant works — e.g. that reminders get created when the user asks, or that confirmations gate delegation — are NOT claims that an action ran this turn. Judge only statements about actions or data specific to THIS turn.";
         const call = await callModel({ db: db.pool, provider: deps.provider, registry }, {
           domainId: "personal", sensitivity: "normal", provider: "openrouter", model: judgeModel,
-          prompt: buildVerificationPrompt(reply!, ledgerEntries, workSnapshot,
-            "Today is Friday, September 25, 2026 (America/Los_Angeles); tomorrow is Saturday, Sep 26. Judge relative-date claims against this anchor.",
-            judgeReadEvidence),
+          prompt: judgePrompt,
           promptVersion: "w2b-truth-judge", principalId: cachedPrincipalId, surface: "imessage", runId: judgeRunId,
         });
         caseCost += call.costUsd;
