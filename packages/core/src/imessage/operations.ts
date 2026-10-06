@@ -41,7 +41,7 @@ import { createHash } from "node:crypto";
 import { recordAudit, type SqlExecutor } from "../actions/audit.js";
 import { UUID_RE } from "../events/envelope.js";
 import { confirmOccurrence, CalendarEventNotFoundError, OccurrenceAlreadyGraduatedError } from "../calendar/occurrence.js";
-import { applyCommitmentTransition } from "../commitments/transitions.js";
+import { applyCommitmentTransition, VERB_TO_STATUS } from "../commitments/transitions.js";
 import { eligibleCalibrationItem, storeCalibrationRating, storeMissedFeedback } from "../calibration/service.js";
 import {
   cancelReminder,
@@ -991,11 +991,35 @@ export function resolutionAllowed(pendingType: CognitiveOperationType | string):
 
 export type OperationResultStatus = "applied" | "parked" | "queued" | "failed" | "rejected";
 
+/**
+ * Semantic-bridge G3/G5: structured selector/transition outcome attached
+ * to results for the NATIVE tool surface (the envelope ignores it).
+ * `object` on an applied transition IS the canonical read-back — the
+ * service returns the row it just wrote (previous → current status), so
+ * the model's tool result carries what actually happened.
+ */
+export interface OperationResolution {
+  readonly kind: "not_found" | "ambiguous" | "applied";
+  /** The selector text the model asked about (bounded). */
+  readonly query?: string;
+  /** Bounded candidate labels when ambiguous (clarify, never mutate). */
+  readonly candidates?: readonly string[];
+  /** Canonical read-back of the mutated/created object (applied only). */
+  readonly object?: {
+    readonly id: string;
+    readonly title?: string;
+    readonly previous_status?: string;
+    readonly current_status?: string;
+    readonly note?: string;
+  };
+}
+
 /** §22.3's execution record: a terminal outcome for the ledger/cognition. */
 export interface OperationResult {
   readonly status: OperationResultStatus;
   readonly id?: string;
   readonly detail?: string;
+  readonly resolution?: OperationResolution;
 }
 
 export interface OperationContext {
@@ -1186,7 +1210,15 @@ async function executeProfileUpdate(
     change: changeKey,
     at: ctx.now.toISOString(),
   });
-  return { status: "applied", id: `profile:v${version}`, detail: `profile version ${version}` };
+  return {
+    status: "applied",
+    id: `profile:v${version}`,
+    detail: `profile version ${version}`,
+    resolution: {
+      kind: "applied",
+      object: { id: `profile:v${version}`, current_status: `v${version}`, note: `${changeKey} persisted` },
+    },
+  };
 }
 
 // ------------------------------------------------------------ reminder_create
@@ -1235,7 +1267,20 @@ async function executeReminderCreate(
     target.dueTime !== null
       ? ` ${String(target.dueTime.hour).padStart(2, "0")}:${String(target.dueTime.minute).padStart(2, "0")}`
       : "";
-  return { status: "applied", id: reminder.id, detail: `due ${target.dueDate}${dueTimeText}` };
+  return {
+    status: "applied",
+    id: reminder.id,
+    detail: `due ${target.dueDate}${dueTimeText}`,
+    resolution: {
+      kind: "applied",
+      object: {
+        id: reminder.id,
+        title: op.title.slice(0, 120),
+        current_status: "armed",
+        note: `due ${target.dueDate}${dueTimeText}`,
+      },
+    },
+  };
 }
 
 // -------------------------------------------------------------- reminder_reply
@@ -1590,12 +1635,24 @@ export async function executeOperation(
             now: ctx.now,
           });
           if (resolution.status === "not_found") {
-            return { status: "failed", detail: selectorDetail("selector-no-match", resolution.searched) };
+            return {
+              status: "failed",
+              detail: selectorDetail("selector-no-match", resolution.searched),
+              resolution: {
+                kind: "not_found",
+                query: op.target.text.slice(0, 200),
+              },
+            };
           }
           if (resolution.status === "ambiguous") {
             return {
               status: "rejected",
               detail: `${selectorDetail("selector-ambiguous", resolution.searched)} → ${resolution.candidates.join(" | ").slice(0, 120)}`,
+              resolution: {
+                kind: "ambiguous",
+                query: op.target.text.slice(0, 200),
+                candidates: resolution.candidates.slice(0, 5),
+              },
             };
           }
           const transitioned = await executeCommitmentTransition(
@@ -1607,6 +1664,16 @@ export async function executeOperation(
             return {
               ...transitioned,
               detail: `commitment "${resolution.value.description.slice(0, 60)}" → ${op.verb}${transitioned.detail !== undefined ? ` (${transitioned.detail})` : ""}`,
+              resolution: {
+                kind: "applied",
+                query: op.target.text.slice(0, 200),
+                object: {
+                  id: resolution.value.commitmentId,
+                  title: resolution.value.description.slice(0, 120),
+                  previous_status: "open",
+                  current_status: VERB_TO_STATUS[op.verb],
+                },
+              },
             };
           }
           return transitioned;

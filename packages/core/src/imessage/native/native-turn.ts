@@ -45,10 +45,12 @@ import { canonicalizeHandle } from "../pairing.js";
 import {
   appendInteractionMessage,
   buildWorkingContext,
-  isPendingExpired,
   parseThreadMetadata,
+  pendingActionObjects,
   pendingWithDerivedIds,
+  renderPendingActions,
   renderTrajectoryHistory,
+  renderTrajectoryReplay,
   resolveActiveThread,
   setThreadToolTrajectory,
   type ToolTrajectoryEntry,
@@ -134,6 +136,49 @@ const WORK_MARKER_NONE = "NO DELEGATED WORK EXISTS (never claim delegated work f
 const WORK_CLAIM_RE =
   /\b(research|assignment|outcome|delegat\w*|project|worker|verifier|report|in progress|running)\b/i;
 
+/**
+ * G5 experiment flag (native-only, default OFF): when set, a turn whose
+ * ledger consists ENTIRELY of fully verified low-risk internal state
+ * changes may skip the second-model verifier and ship on the canonical
+ * read-back alone. The reference agent runs no per-reply truth LLM for
+ * ordinary verified writes; this measures that lane without touching any
+ * other truth class.
+ */
+export function nativeReadbackVerifySkipEnabled(): boolean {
+  return process.env["JEHAD_NATIVE_READBACK_VERIFY_SKIP"] === "1";
+}
+
+const READBACK_SKIP_OPS: ReadonlySet<string> = new Set([
+  "commitment_transition",
+  "reminder_create",
+  "profile_update",
+]);
+
+/**
+ * The narrow dispatch condition (deterministic — never interpretation):
+ *   flag on ∧ ledger non-empty ∧ EVERY entry applied + canonical read-back
+ *   ∧ every op is a low-risk internal state change or a resolution
+ *   ∧ zero reads this turn (world-data claims keep the verifier)
+ *   ∧ no delegated-work claims in the reply (A3 dispatch policy regex).
+ * Failures, staging, denial, ambiguity, reads, work claims → ladder runs.
+ */
+function readbackSkipEligible(
+  replyText: string,
+  ledger: readonly NativeLedgerEntry[],
+  readEvidence: readonly string[],
+): boolean {
+  if (!nativeReadbackVerifySkipEnabled()) return false;
+  if (ledger.length === 0) return false;
+  for (const entry of ledger) {
+    if (entry.verifiedReadback !== true) return false;
+    if (entry.status !== "applied") return false;
+    if (entry.kind !== "resolution" && !READBACK_SKIP_OPS.has(entry.opType)) return false;
+  }
+  if (readEvidence.length > 0) return false;
+  if (WORK_CLAIM_RE.test(replyText)) return false;
+  return true;
+}
+
 export interface NativeTurnDeps extends ConversationDeps {
   /** Eval-only seam: typed observation of every gateway execution. */
   readonly onToolCall?: (outcome: NativeToolOutcome) => void;
@@ -171,6 +216,9 @@ export interface NativeLedgerEntry {
   readonly opType: string;
   readonly status: string;
   readonly detail?: string;
+  /** G5: the result carried canonical read-back (service returned the row
+   *  it wrote). Gates the narrow verifier-skip experiment. */
+  readonly verifiedReadback?: boolean;
 }
 
 function capReplyText(text: string): string {
@@ -240,24 +288,6 @@ function renderHistoryBlock(history: WorkingContext | null): string[] {
   return lines;
 }
 
-function renderPendingOffers(metadata: ReturnType<typeof pendingWithDerivedIds>): string[] {
-  if (metadata === null || metadata.pendingProposals === undefined) return [];
-  const lines = ["PENDING OFFERS (yours, from earlier turns — apply/decline by id when the user's CURRENT message confirms or declines):"];
-  for (const proposal of metadata.pendingProposals) {
-    const expired = proposal.expiresAt !== undefined && isPendingExpired(proposal, new Date());
-    let label = proposal.offered.slice(0, 160);
-    // R5 parity: a confirmable batch must SHOW its items — the model cannot
-    // ground "yes, track both" against an offer it cannot see.
-    if (proposal.type === "task_batch") {
-      const items = (proposal.payload as { items?: { title?: string }[] } | null)?.items ?? [];
-      const titles = items.slice(0, 3).map((i) => String(i.title ?? "")).filter((t) => t.length > 0);
-      if (titles.length > 0) label = `${label} — items: ${titles.join("; ").slice(0, 160)}`;
-    }
-    lines.push(`- ${proposal.id ?? `${proposal.type}:????`} (${proposal.type}${expired ? ", EXPIRED" : ""}): ${label}`);
-  }
-  return lines;
-}
-
 const CHECK_IN_PROJECTION_MAX = 3;
 async function renderLiveCheckIns(db: SqlExecutor, principalName: string): Promise<string[]> {
   try {
@@ -286,8 +316,9 @@ function toolCatalogLine(): string {
     "- Ask only when ambiguity, authorization, or safety genuinely blocks action.",
     "INTERNAL vs EXTERNAL (mental model, not a rule override): work inside Jehad OS — to-dos, reminders, offers, delegated work, your own profile — is normal work: keep it truthful with tools and act on requests directly. Anything that leaves this machine (third parties, money, publishing) is gated territory: offer, and let the confirmation machinery run. Either way, the tool results you receive are what actually happened — the gates decide, never your framing of them.",
     "TOOL NOTES:",
-    "- gmail.read opens a search result by its messageId; message ids also survive in PRIOR TOOL ACTIVITY for 'open that one' on later messages.",
-    "- offers.apply/decline resolve YOUR pending offers by id when the user's current message confirms or declines.",
+    "- Your own recent tool calls and their results appear in this conversation as real tool messages — a messageId from an earlier gmail.search can be passed straight to gmail.read.",
+    "- commitments.transition records the outcome of an existing to-do whenever the user reports it finished, failed, missed, moved, or otherwise changed — including when they state it as a plain fact rather than an instruction. Its result tells you exactly what changed; a not_found or ambiguous result means NOTHING was changed — ask which one.",
+    "- PENDING ACTIONS are real canonical objects shown in your context: resolve one through offers.apply / offers.decline by its id only when the user's current message clearly accepts or rejects it; multiple pending actions stay ambiguous until the user picks one.",
     "- outcomes.delegate STAGES durable work with a confirm token — the work is NOT running until the user confirms; say so honestly.",
     "- If a tool result says staged/parked, tell the user exactly what is staged and ask for their yes. A staged offer is NOT a done action.",
     "TRUTH RULE: never state that you created, set, completed, scheduled, or changed ANYTHING unless the tool result showing it landed is in this conversation. Staged ≠ done. No result ≠ happened.",
@@ -561,9 +592,15 @@ export async function runNativeTurn(
   }
   const meta0 = await ctx.db.query("SELECT metadata FROM interaction_threads WHERE id = $1::uuid", [ctx.threadId]);
   const parsedMeta0 = parseThreadMetadata(meta0.rows[0]?.metadata ?? null);
-  const pendingOffers = renderPendingOffers(pendingWithDerivedIds(parsedMeta0));
+  const derivedMeta0 = pendingWithDerivedIds(parsedMeta0);
+  // G2: live canonical pending state as typed model-visible objects.
+  const pendingActions = renderPendingActions(pendingActionObjects(derivedMeta0, ctx.now()));
   const checkIns = await renderLiveCheckIns(ctx.db, ctx.principalName);
-  const priorTrajectory = renderTrajectoryHistory(pendingWithDerivedIds(parsedMeta0));
+  // G1: the recent bounded window replays as NATIVE tool_call/tool_result
+  // messages (never prose); turns covered by the replay drop out of the
+  // legacy prose block.
+  const replay = renderTrajectoryReplay(derivedMeta0);
+  const priorTrajectory = renderTrajectoryHistory(derivedMeta0, new Set(replay.turnIds));
 
   const systemLines: string[] = [
     identity.text,
@@ -576,14 +613,14 @@ export async function runNativeTurn(
     selfBrief,
     workActiveTotal > 0 ? WORK_MARKER_ACTIVE(workActiveTotal) : WORK_MARKER_NONE,
   );
-  if (pendingOffers.length > 0) systemLines.push(...pendingOffers);
+  if (pendingActions.length > 0) systemLines.push(...pendingActions);
   if (checkIns.length > 0) systemLines.push(...checkIns);
   if (priorTrajectory.length > 0) systemLines.push(...priorTrajectory);
   systemLines.push(...renderHistoryBlock(ctx.history));
 
   const systemMessage: ChatMessage = { role: "system", content: systemLines.join("\n") };
   const userMessage: ChatMessage = { role: "user", content: input.text };
-  const messages: ChatMessage[] = [systemMessage, userMessage];
+  const messages: ChatMessage[] = [systemMessage, ...replay.messages, userMessage];
 
   const gatewayState = newNativeToolTurnState();
   const ledger: NativeLedgerEntry[] = [];
@@ -724,8 +761,11 @@ export async function runNativeTurn(
         phases.toolsMs += elapsedSince(tTool);
         toolCallsExecuted += 1;
         messages.push({ role: "tool", toolCallId: call.id, content: outcome.modelNote });
-        ledger.push(outcome.ledger);
-        trajectoryEntries.push(trajectoryEntryOf(outcome));
+        ledger.push({
+          ...outcome.ledger,
+          ...(outcome.verifiedReadback === true ? { verifiedReadback: true } : {}),
+        });
+        trajectoryEntries.push(trajectoryEntryOf(outcome, call));
         if (outcome.kind === "read" && outcome.status === "ok") {
           readEvidence.push(`${outcome.tool}: ${outcome.modelNote.slice(0, 400)}`);
           for (const ref of outcome.refs) {
@@ -756,7 +796,19 @@ export async function runNativeTurn(
       return shipNotice(NOTICE_TURN_COMPLETION);
     }
 
-    // Final model-authored reply — the fail-closed verification ladder.
+    // Final model-authored reply — the fail-closed verification ladder,
+    // EXCEPT the G5 experiment: a turn whose ENTIRE ledger is fully
+    // verified low-risk internal state changes (canonical read-back on
+    // every op, no reads, no work claims) may ship on the read-back alone.
+    if (readbackSkipEligible(replyText, ledger, readEvidence)) {
+      await audit(ctx.db, "native.verify_skipped", {
+        principalId: ctx.input.principalId,
+        reason: "verified-readback-internal-only",
+        ops: ledger.map((entry) => ({ opType: entry.opType, status: entry.status })),
+      });
+      await persistTrajectory(ctx, trajectoryEntries);
+      return shipReply(ctx, replyText, turnsUsed, toolCallsExecuted, cost, "readback-verified", referents, trajectoryEntries, { totalMs: elapsedSince(startMs), ...phases });
+    }
     const tVerify = Date.now();
     const verified = await verifyLadder(ctx, replyText, ledger, readEvidence, models, workSnapshot, workActiveTotal, workToolRan, (c) => { cost += c; });
     phases.verifyMs += elapsedSince(tVerify);

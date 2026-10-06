@@ -51,6 +51,8 @@ import {
   type NativeToolInvocation,
 } from "./tool-registry.js";
 import { activeProfile } from "../profiles.js";
+import { redactContent } from "../redact.js";
+import type { OperationResolution } from "../operations.js";
 
 /**
  * Profile.update arrives as a PADDED FULL RESOURCE (gpt-4.1 habit: the
@@ -152,6 +154,13 @@ export interface NativeToolOutcome {
   readonly closedWindow: boolean;
   /** Verifier ledger line (kind resolution|operation mirrors §22.9). */
   readonly ledger: { readonly kind: "operation" | "resolution"; readonly opType: string; readonly status: string; readonly detail?: string };
+  /** Semantic-bridge G3/G5: structured selector/read-back body (JSON) —
+   *  persisted for native trajectory replay. */
+  readonly structuredResult?: string;
+  /** Semantic-bridge G5: true when the result carries canonical read-back
+   *  (the service returned the row it wrote). Gates the narrow
+   *  verifier-skip experiment; never set on staged/parked results. */
+  readonly verifiedReadback?: boolean;
 }
 
 export interface NativeToolTurnState {
@@ -498,11 +507,59 @@ async function executeNativeWrite(
     now: ctx.now(),
     calendarPolicy: null,
   });
+  // Semantic-bridge G3/G5: selector outcomes and applied internal writes
+  // return STRUCTURED canonical results (not_found / ambiguous+candidates /
+  // applied+read-back). Staged/parked and failures keep fail-closed prose.
+  const structured = structuredResolutionBody(result.resolution);
   return outcome(ctx, invocation, "write", {
     status: result.status === "applied" ? "ok" : result.status === "parked" || result.status === "queued" ? "staged" : "error",
     authority: result.status === "parked" || result.status === "queued" ? "pending_owner_confirmation" : "current_authenticated_turn",
-    modelNote: `OPERATION RESULT ${op.type}: ${result.status}${result.id !== undefined ? ` (${result.id})` : ""}${result.detail !== undefined ? ` — ${result.detail}` : ""}`,
+    modelNote: structured ?? `OPERATION RESULT ${op.type}: ${result.status}${result.id !== undefined ? ` (${result.id})` : ""}${result.detail !== undefined ? ` — ${result.detail}` : ""}`,
     ledger: { kind: "operation", opType: op.type, status: result.status, detail: result.detail },
+    ...(structured !== undefined ? { structuredResult: structured } : {}),
+    ...(result.resolution?.kind === "applied" && result.resolution.object !== undefined && result.status === "applied"
+      ? { verifiedReadback: true }
+      : {}),
+  });
+}
+
+/**
+ * G3/G5: render an OperationResolution as the bounded structured JSON the
+ * model receives as its tool result — 0 matches → not_found (no mutation),
+ * 2+ → ambiguous with bounded candidates (clarify, never mutate), 1 →
+ * applied WITH the canonical read-back object. Deterministic rendering of
+ * deterministic outcomes; no interpretation anywhere.
+ */
+function structuredResolutionBody(resolution: OperationResolution | undefined): string | undefined {
+  if (resolution === undefined) return undefined;
+  if (resolution.kind === "not_found") {
+    return JSON.stringify({
+      result: "not_found",
+      query: clip(resolution.query ?? "", 200),
+      mutated: false,
+      note: "no open commitment matched those words — nothing was changed; ask which one",
+    });
+  }
+  if (resolution.kind === "ambiguous") {
+    return JSON.stringify({
+      result: "ambiguous",
+      query: clip(resolution.query ?? "", 200),
+      mutated: false,
+      candidates: (resolution.candidates ?? []).slice(0, 5),
+      note: "more than one open commitment matched — nothing was changed; ask which one",
+    });
+  }
+  if (resolution.object === undefined) return undefined;
+  return JSON.stringify({
+    result: "applied",
+    object: {
+      id: resolution.object.id,
+      ...(resolution.object.title !== undefined ? { title: resolution.object.title } : {}),
+      ...(resolution.object.previous_status !== undefined ? { previous_status: resolution.object.previous_status } : {}),
+      ...(resolution.object.current_status !== undefined ? { current_status: resolution.object.current_status } : {}),
+      ...(resolution.object.note !== undefined ? { note: resolution.object.note } : {}),
+    },
+    verified: true,
   });
 }
 
@@ -550,10 +607,17 @@ async function executeNativeResolution(
       pending: survivors.length > 0 ? survivors : null,
       now: ctx.now(),
     });
+    const declinedBody = JSON.stringify({
+      result: "declined",
+      object: { id, kind: entry.type, current_status: "declined" },
+      verified: true,
+    });
     return outcome(ctx, invocation, "resolution", {
       status: "ok", authority: "pending_owner_confirmation",
-      modelNote: `offer ${id} (${entry.type}) dropped — it will not be applied`,
+      modelNote: declinedBody,
       ledger: { kind: "resolution", opType: entry.type, status: "applied", detail: "declined" },
+      structuredResult: declinedBody,
+      verifiedReadback: true,
     });
   }
   if (!resolutionAllowed(entry.type)) {
@@ -605,16 +669,36 @@ async function executeNativeResolution(
       now: ctx.now(),
     });
   }
+  const appliedBody =
+    result.status === "applied"
+      ? JSON.stringify({
+          result: "applied",
+          object: {
+            id,
+            kind: entry.type,
+            current_status: "applied",
+            ...(result.detail !== undefined ? { note: clip(result.detail, 160) } : {}),
+          },
+          verified: true,
+        })
+      : undefined;
   return outcome(ctx, invocation, "resolution", {
     status: result.status === "applied" ? "ok" : result.status === "failed" ? "error" : "staged",
     authority: "pending_owner_confirmation",
-    modelNote: `offer ${id} (${entry.type}) → ${result.status}${result.detail !== undefined ? ` — ${result.detail}` : ""}`,
+    modelNote: appliedBody ?? `offer ${id} (${entry.type}) → ${result.status}${result.detail !== undefined ? ` — ${result.detail}` : ""}`,
     ledger: { kind: "resolution", opType: entry.type, status: result.status, detail: result.detail },
+    ...(appliedBody !== undefined ? { structuredResult: appliedBody, verifiedReadback: true } : {}),
   });
 }
 
-/** Trajectory entry for one gateway outcome (§8.2 persistence). */
-export function trajectoryEntryOf(outcome: NativeToolOutcome): ToolTrajectoryEntry {
+/**
+ * Trajectory entry for one gateway outcome (§8.2 persistence +
+ * semantic-bridge G1): carries the provider call id, the redacted bounded
+ * arguments, and the bounded structured result so the NEXT turn replays
+ * this call as a native tool_call/tool_result pair. Redaction happens
+ * here (single choke point) and again at parse (defense in depth).
+ */
+export function trajectoryEntryOf(outcome: NativeToolOutcome, invocation?: NativeToolInvocation): ToolTrajectoryEntry {
   const entry: ToolTrajectoryEntry = {
     tool: outcome.tool,
     kind: outcome.kind,
@@ -622,6 +706,16 @@ export function trajectoryEntryOf(outcome: NativeToolOutcome): ToolTrajectoryEnt
     summary: clip(outcome.modelNote.replace(/\s+/g, " "), 200),
     ...(outcome.argsDigest !== null ? { argsDigest: outcome.argsDigest } : {}),
     ...(outcome.refs.length > 0 ? { refs: [...outcome.refs] } : {}),
+    ...(invocation !== undefined
+      ? {
+          callId: clip(redactContent(invocation.id), 64),
+          arguments: clip(redactContent(invocation.arguments), 240),
+          result: clip(
+            redactContent(outcome.structuredResult ?? outcome.modelNote),
+            480,
+          ),
+        }
+      : {}),
   };
   return entry;
 }
