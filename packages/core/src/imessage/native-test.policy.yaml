@@ -16,7 +16,7 @@ notifications:
 gateway:
   routing: single
   cognition: native
-  passes: { route: { model: openai/gpt-4.1 }, answer_fast: { model: openai/gpt-4.1 }, answer_standard: { model: anthropic/claude-sonnet-4.5 }, answer_fallback: { model: google/gemini-3.8-flash }, route_fallback: { model: google/gemini-3.8-flash } }
+  passes: { route: { model: openai/gpt-5.6-terra }, answer_fast: { model: openai/gpt-4.1 }, answer_standard: { model: anthropic/claude-sonnet-4.5 }, answer_fallback: { model: google/gemini-3.8-flash }, route_fallback: { model: google/gemini-3.8-flash } }
   capture: { enabled: true, principals: [josctl], max_per_hour: 5, dedupe_window_hours: 24 }
   review: { enabled: true, principals: [josctl], max_bad_refs: 3, snooze_hours: 24, ref_ttl_hours: 168, digest_max_candidates: 10, digest_max_escalations: 5 }
   actions: { enabled: true, principals: [josctl], max_proposals_per_day: 10, max_dispatches_per_day: 5, confirm_ttl_minutes: 10 }
