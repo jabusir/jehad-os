@@ -13,7 +13,7 @@
 // the provider balance is below MIN_BALANCE_USD (never run to the
 // affordability boundary — owner directive).
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -40,9 +40,13 @@ import { createIsolatedTestDb, dropIsolatedTestDb } from "../../packages/db/test
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.join(HERE, "out");
-// W2c: holdout v3 (owner-authored; v2 is seen/burned — never rerun).
-const HOLDOUT_FILE = path.join(HERE, "holdout-v3.yaml");
-const HOLDOUT_SHA256 = "7d41df470ddeb293e0be49f3b4959e6341f1f1e1c97240cf1ca48e49d5420ff6";
+// Holdout corpus: v3 by default (owner-authored; v2 is seen/burned — never
+// rerun). V4 prep: `--holdout <file>` points the SAME runner at a new
+// owner-authored corpus; `--sha <hex>` pins the expected digest (the run
+// refuses a mismatch), and omitting `--sha` computes + prints it for the
+// owner to ratify BEFORE any spend.
+const HOLDOUT_FILE_DEFAULT = path.join(HERE, "holdout-v3.yaml");
+const HOLDOUT_SHA256_DEFAULT = "7d41df470ddeb293e0be49f3b4959e6341f1f1e1c97240cf1ca48e49d5420ff6";
 const NATIVE_FIXTURE_POLICY = path.join(HERE, "..", "..", "packages/core/src/imessage/native-test.policy.yaml");
 const SPEND_CEILING_USD = 1.2;
 const MIN_BALANCE_USD = 2.5;
@@ -64,7 +68,7 @@ function parseArgv(argv: readonly string[]): { options: Map<string, string> } {
   const options = new Map<string, string>();
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
-    if (arg === "--driver" || arg === "--label" || arg === "--ceiling") {
+    if (arg === "--driver" || arg === "--label" || arg === "--ceiling" || arg === "--holdout" || arg === "--sha") {
       options.set(arg.slice(2), argv[i + 1] ?? "");
       i += 1;
     }
@@ -113,10 +117,18 @@ interface V2Case {
   expect: Record<string, unknown>;
 }
 
-function loadHoldout(): V2Case[] {
-  const raw = parse(readFileSync(HOLDOUT_FILE, "utf8")) as { version: number; cases: V2Case[] };
+function loadHoldout(options: ReadonlyMap<string, string>): { cases: V2Case[]; holdoutSha256: string } {
+  const holdoutFile = options.get("holdout") ?? HOLDOUT_FILE_DEFAULT;
+  const expectedSha = options.get("sha") ?? (holdoutFile === HOLDOUT_FILE_DEFAULT ? HOLDOUT_SHA256_DEFAULT : null);
+  const actualSha = createHash("sha256").update(readFileSync(holdoutFile, "utf8")).digest("hex");
+  if (expectedSha === null) {
+    console.log(`[holdout] ${holdoutFile}\n[holdout] sha256 ${actualSha} — ratify with --sha <hex> before any spend`);
+  } else if (expectedSha !== actualSha) {
+    throw new Error(`holdout sha mismatch: expected ${expectedSha}, got ${actualSha} — refusing to run`);
+  }
+  const raw = parse(readFileSync(holdoutFile, "utf8")) as { version: number; cases: V2Case[] };
   if (raw.version !== 3) throw new Error(`holdout: version must be 3, got ${String(raw.version)}`);
-  return raw.cases;
+  return { cases: raw.cases, holdoutSha256: expectedSha ?? actualSha };
 }
 
 // ------------------------------------------------------------------ runner
@@ -171,7 +183,7 @@ async function main(): Promise<void> {
   }
 
   const judgeModel = process.env.JUDGE_MODEL ?? (await loadRepoPolicy()).policy?.gateway?.passes?.route?.model ?? JUDGE_MODEL_FALLBACK;
-  const cases = loadHoldout();
+  const { cases, holdoutSha256 } = loadHoldout(options);
 
   const db = await createIsolatedTestDb(databaseUrl, `w2b_${Date.now() % 100000}`);
   const registry = new ModelEgressPolicyRegistry([
@@ -628,7 +640,7 @@ async function main(): Promise<void> {
   const ccRate = common.filter((o) => o.failures.length === 0).length / Math.max(1, common.length);
   const turnLats = observations.map((o) => o.turnLatencyMs).filter((v): v is number => v !== undefined).sort((a, b) => a - b);
   const result = {
-    label, driver, holdoutSha256: HOLDOUT_SHA256, freezeSha: process.env.W2B_FREEZE_SHA ?? null,
+    label, driver, holdoutSha256, freezeSha: process.env.W2B_FREEZE_SHA ?? null,
     judgeModel, totalSpendUsd: Math.round(spend * 10000) / 10000,
     casePassRate: Math.round(passRate * 1000) / 1000,
     commonControlPassRate: Math.round(ccRate * 1000) / 1000,

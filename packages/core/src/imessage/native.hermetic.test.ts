@@ -384,6 +384,7 @@ describe.skipIf(!TEST_DATABASE_URL)("native tool cognition (W1 spike, hermetic i
       ).rows[0]!.id as string,
       now: () => NOW,
       policyReads: ["commitments", "gmail", "work"],
+      round: 0,
     };
     const state = newNativeToolTurnState();
     // INLINE: user's current turn names it; zero reads so far.
@@ -396,7 +397,9 @@ describe.skipIf(!TEST_DATABASE_URL)("native tool cognition (W1 spike, hermetic i
     expect(inline.authority).toBe("current_authenticated_turn");
     expect(await commitmentStatus(commitmentId)).toBe("met");
 
-    // POST-READ: gmail.search ran → a new write must stage, not execute.
+    // POST-READ without authorization (provenance hardening): a write is
+    // DENIED — no mutation AND no staged pending state. External content
+    // must never be able to manufacture an actionable approval.
     const read = await executeNativeTool(ctx, state, {
       id: "c1",
       name: "gmail.search",
@@ -405,21 +408,41 @@ describe.skipIf(!TEST_DATABASE_URL)("native tool cognition (W1 spike, hermetic i
     expect(read.status).toBe("ok");
     expect(read.closedWindow).toBe(true);
     await seedCommitment("florist invoice");
-    const staged = await executeNativeTool(ctx, state, {
+    const denied = await executeNativeTool(ctx, state, {
       id: "c2",
+      name: "commitments.transition",
+      arguments: JSON.stringify({ selector: "florist invoice", verb: "done" }),
+    });
+    expect(denied.status).toBe("denied");
+    expect(JSON.parse(denied.modelNote)).toMatchObject({ result: "not_authorized", mutated: false, staged: false });
+    const floristId = String(
+      (await db.pool.query(`SELECT id FROM commitments WHERE description = 'florist invoice'`)).rows[0]!.id,
+    );
+    expect(await commitmentStatus(floristId)).toBe("open");
+    expect(await pendingProposals()).toHaveLength(0);
+
+    // ROUND-0 preauthorize: the user's current message conditionally
+    // authorized the class → the same post-read write now STAGES (the
+    // user's yes remains the executing authority).
+    const pre = await executeNativeTool(ctx, state, {
+      id: "c3",
+      name: "authority.preauthorize",
+      arguments: JSON.stringify({ actions: ["commitment_transition"] }),
+    });
+    expect(pre.status).toBe("ok");
+    expect(state.preauthorized.has("commitment_transition")).toBe(true);
+    const staged = await executeNativeTool(ctx, state, {
+      id: "c4",
       name: "commitments.transition",
       arguments: JSON.stringify({ selector: "florist invoice", verb: "done" }),
     });
     expect(staged.status).toBe("staged");
     expect(staged.authority).toBe("pending_owner_confirmation");
-    expect(await commitmentStatus(await (async () => {
-      const row = await db.pool.query(`SELECT id FROM commitments WHERE description = 'florist invoice'`);
-      return String(row.rows[0]!.id);
-    })())).toBe("open");
+    expect(await commitmentStatus(floristId)).toBe("open");
     const pending = await pendingProposals();
     expect(pending).toHaveLength(1);
     expect(pending[0]!.type).toBe("native_write");
-    expect(await auditRows("native.tool_call")).toHaveLength(3);
+    expect(await auditRows("native.tool_call")).toHaveLength(5);
   });
 
   it("gateway: resolution gates — unknown id, consent class, replay; apply executes the staged op", async () => {
@@ -439,6 +462,7 @@ describe.skipIf(!TEST_DATABASE_URL)("native tool cognition (W1 spike, hermetic i
       threadId,
       now: () => NOW,
       policyReads: ["commitments"],
+      round: 0,
     };
     const state = newNativeToolTurnState();
     const unknown = await executeNativeTool(ctx, state, { id: "c0", name: "offers.apply", arguments: JSON.stringify({ id: "task_batch:a1b2" }) });
@@ -451,11 +475,25 @@ describe.skipIf(!TEST_DATABASE_URL)("native tool cognition (W1 spike, hermetic i
       name: "commitments.transition",
       arguments: JSON.stringify({ selector: "seating chart", verb: "done" }),
     });
-    // Pre-read → inline (no staging); force the staging path with a read.
+    // Pre-read → inline (no staging); the post-read staging path now
+    // requires a round-0 conditional authorization.
     void staged;
     const read = await executeNativeTool(ctx, state, { id: "c2", name: "commitments.list", arguments: "{}" });
     expect(read.closedWindow).toBe(true);
     await seedCommitment("florist invoice");
+    const blocked = await executeNativeTool(ctx, state, {
+      id: "c2b",
+      name: "commitments.transition",
+      arguments: JSON.stringify({ selector: "florist invoice", verb: "done" }),
+    });
+    expect(blocked.status).toBe("denied");
+    expect(await pendingProposals()).toHaveLength(0);
+    const pre = await executeNativeTool(ctx, state, {
+      id: "c2c",
+      name: "authority.preauthorize",
+      arguments: JSON.stringify({ actions: ["commitment_transition"] }),
+    });
+    expect(pre.status).toBe("ok");
     const staged2 = await executeNativeTool(ctx, state, {
       id: "c3",
       name: "commitments.transition",
@@ -493,6 +531,7 @@ describe.skipIf(!TEST_DATABASE_URL)("native tool cognition (W1 spike, hermetic i
       threadId,
       now: () => NOW,
       policyReads: ["work"],
+      round: 0,
     };
     const state = newNativeToolTurnState();
     const delegated = await executeNativeTool(ctx, state, {
@@ -529,6 +568,7 @@ describe.skipIf(!TEST_DATABASE_URL)("native tool cognition (W1 spike, hermetic i
       threadId,
       now: () => NOW,
       policyReads: ["commitments"],
+      round: 0,
     };
     const state = newNativeToolTurnState();
     for (let i = 0; i < 3; i += 1) {
@@ -665,14 +705,14 @@ describe.skipIf(!TEST_DATABASE_URL)("native tool cognition (W1 spike, hermetic i
     }
   });
 
-  it("injection: post-read write in a live turn stages — canonical state untouched until the user's yes", async () => {
+  it("injection: post-read write in a live turn is DENIED — zero mutation, zero pending state (provenance hardening)", async () => {
     await grant();
     await seedCommitment("email the venue");
     const { outcome } = await nativeTurn(
       [
         chatTools([{ name: "gmail.search", args: { query: "invoice" } }]),
         chatTools([{ name: "commitments.transition", args: { selector: "email the venue", verb: "done" } }]),
-        chatText("I found an invoice email. Marking 'email the venue' done needs your yes — it's staged. Say the word."),
+        chatText("I found an invoice email. I haven't changed anything — want me to mark 'email the venue' done?"),
       ],
       [VERIFY_CONSISTENT],
       "check my email for the invoice",
@@ -686,12 +726,12 @@ describe.skipIf(!TEST_DATABASE_URL)("native tool cognition (W1 spike, hermetic i
       },
     );
     expect(outcome.replied).toBe(true);
-    // The hostile email body cannot have authorized the write: canonical
-    // state is untouched, and a native_write offer awaits fresh authority.
+    // The hostile email body cannot have authorized the write — and under
+    // the hardened provenance rule it cannot even manufacture a pending
+    // approval: canonical state untouched, NO staged offer exists.
     const row = await db.pool.query(`SELECT status FROM commitments WHERE description = 'email the venue'`);
     expect(String(row.rows[0]!.status)).toBe("open");
-    const pending = await pendingProposals();
-    expect(pending.map((p) => p.type)).toContain("native_write");
+    expect(await pendingProposals()).toHaveLength(0);
     expect(outcome.verified).toBe("consistent");
   });
 
@@ -822,7 +862,7 @@ describe.skipIf(!TEST_DATABASE_URL)("native tool cognition (W1 spike, hermetic i
     ).rows[0]!.id as string;
     const gatewayCtx = {
       db: db.pool, principalId: josctlId, principalName: "josctl", threadId,
-      now: () => NOW, policyReads: ["commitments"],
+      now: () => NOW, policyReads: ["commitments"], round: 0,
     };
     const staged = await executeNativeTool(gatewayCtx, newNativeToolTurnState(), {
       id: "s0", name: "commitments.create",

@@ -632,6 +632,7 @@ export async function runNativeTurn(
   let reasks = 0;
   let cost = 0;
   let workToolRan = false;
+  let dispatchRound = 0;
   const phases: PhaseClock = { cognitionMs: 0, toolsMs: 0, verifyMs: 0 };
 
   const admissionOpen = (): boolean =>
@@ -690,6 +691,7 @@ export async function runNativeTurn(
     try {
       const t0 = Date.now();
       dispatched = await dispatchChat(ctx, messages, models.primary);
+      dispatchRound += 1;
       phases.cognitionMs += elapsedSince(t0);
       cost += dispatched.costUsd;
     } catch (err) {
@@ -751,6 +753,7 @@ export async function runNativeTurn(
             principalName: ctx.principalName,
             threadId: ctx.threadId,
             now: ctx.now,
+            round: dispatchRound - 1,
             policyReads: ctx.policy.reads,
             readOverrides: deps.readOverrides,
             onToolCall: deps.onToolCall,

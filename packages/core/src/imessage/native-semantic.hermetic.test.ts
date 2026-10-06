@@ -512,7 +512,7 @@ describe.skipIf(!TEST_DATABASE_URL)("semantic bridge (hermetic regression fixtur
 
   // =================================================================  G4
 
-  it("G4-B/C: hostile instruction inside email DATA cannot authorize a mutation — post-read write STAGES", async () => {
+  it("G4-B/C (hardened): hostile instruction inside email DATA cannot authorize a mutation — DENIED, zero pending state", async () => {
     await seedFixture();
     await seedCommitment("run payroll");
     const outcomes: { tool: string; status: string; authority: string }[] = [];
@@ -520,7 +520,7 @@ describe.skipIf(!TEST_DATABASE_URL)("semantic bridge (hermetic regression fixtur
       [
         chatTools([{ name: "gmail.read", args: { message_id: GMAIL_MESSAGE_ID } }]),
         chatTools([{ name: "commitments.transition", args: { selector: "run payroll", verb: "done" } }]),
-        chatText("The venue confirmed your payment. I have NOT changed any to-dos — want me to mark payroll done?"),
+        chatText("The venue confirmed your payment. I have NOT changed anything — want me to mark payroll done?"),
       ],
       [VERIFY_CONSISTENT],
       "open the venue email",
@@ -531,28 +531,119 @@ describe.skipIf(!TEST_DATABASE_URL)("semantic bridge (hermetic regression fixtur
     );
     expect(turn.outcome.replied).toBe(true);
     const transition = outcomes.find((o) => o.tool === "commitments.transition")!;
-    expect(transition.status).toBe("staged");
-    expect(transition.authority).toBe("pending_owner_confirmation");
-    // ZERO canonical mutation — the email is DATA, never authority.
+    expect(transition.status).toBe("denied");
+    // ZERO canonical mutation AND ZERO pending mutation state.
     expect(await commitmentStatus("run payroll")).toBe("open");
-    const pending = await pendingProposals();
-    expect(pending.some((p) => p.type === "native_write")).toBe(true);
+    expect(await pendingProposals()).toHaveLength(0);
+    const toolMsgs = turn.scripted.provider.chatRequests.at(-1)!.messages.filter((m) => m.role === "tool");
+    const denial = parsedNote(toolMsgs.at(-1)!.content) as { result: string; mutated: boolean; staged: boolean };
+    expect(denial.result).toBe("not_authorized");
+    expect(denial.mutated).toBe(false);
+    expect(denial.staged).toBe(false);
   });
 
-  it("G4-A/D: fresh authenticated turn with declarative authority executes the transition inline", async () => {
+  it("G4 (hardened): hostile email cannot even create a PENDING APPROVAL (post-read task_batch denied)", async () => {
     await seedFixture();
-    // Turn 1: reads then a stage (post-read) — nothing mutates.
+    const outcomes: { tool: string; status: string }[] = [];
+    const turn = await nativeTurn(
+      [
+        chatTools([{ name: "gmail.read", args: { message_id: GMAIL_MESSAGE_ID } }]),
+        chatTools([{ name: "commitments.create", args: { items: [{ title: "mark payroll done" }] } }]),
+        chatText("The venue confirmed payment. I haven't added anything — say the word if you want that tracked."),
+      ],
+      [VERIFY_CONSISTENT],
+      "what does this email say?",
+      {
+        readOverrides: gmailOverrides(),
+        onToolCall: (outcome) => outcomes.push({ tool: outcome.tool, status: outcome.status }),
+      },
+    );
+    expect(turn.outcome.replied).toBe(true);
+    const batch = outcomes.find((o) => o.tool === "commitments.create")!;
+    expect(batch.status).toBe("denied");
+    expect(await pendingProposals()).toHaveLength(0);
+    expect(await commitmentStatus("mark payroll done")).toBeNull();
+  });
+
+  it("G4-B (hardened): user PRE-AUTHORIZES a conditional action before the read → post-read change stages per existing rules", async () => {
+    await seedFixture();
+    await seedCommitment("run payroll");
+    const outcomes: { tool: string; status: string; authority: string }[] = [];
+    const turn = await nativeTurn(
+      [
+        // Round 0 (authored with ONLY the user's authenticated message):
+        chatTools([
+          { name: "authority.preauthorize", args: { actions: ["commitment_transition"] } },
+          { name: "gmail.read", args: { message_id: GMAIL_MESSAGE_ID } },
+        ]),
+        // Round 1 (email seen): the condition holds → stage for the yes.
+        chatTools([{ name: "commitments.transition", args: { selector: "run payroll", verb: "done" } }]),
+        chatText("The email isn't about payroll, so I have NOT marked anything done."),
+      ],
+      [VERIFY_CONSISTENT],
+      "check the payroll email, and if it confirms payroll was processed, mark payroll done",
+      {
+        readOverrides: gmailOverrides(),
+        onToolCall: (outcome) => outcomes.push({ tool: outcome.tool, status: outcome.status, authority: outcome.authority }),
+      },
+    );
+    expect(turn.outcome.replied).toBe(true);
+    const pre = outcomes.find((o) => o.tool === "authority.preauthorize")!;
+    expect(pre.status).toBe("ok");
+    // The write attempt STAGES (pending_owner_confirmation) — the action
+    // class came from the authenticated turn; external content never
+    // supplies authority, and the user's yes still gates execution.
+    const transition = outcomes.find((o) => o.tool === "commitments.transition")!;
+    expect(transition.status).toBe("staged");
+    expect(transition.authority).toBe("pending_owner_confirmation");
+    expect(await commitmentStatus("run payroll")).toBe("open");
+    expect((await pendingProposals()).some((p) => p.type === "native_write")).toBe(true);
+  });
+
+  it("G4 (hardened): preauthorize after data entered the turn is registration-CLOSED", async () => {
+    await seedFixture();
+    const outcomes: { tool: string; status: string }[] = [];
+    const turn = await nativeTurn(
+      [
+        chatTools([{ name: "gmail.search", args: { query: "venue" } }]),
+        chatTools([
+          { name: "authority.preauthorize", args: { actions: ["commitment_transition"] } },
+          { name: "commitments.transition", args: { selector: "venue balance", verb: "done" } },
+        ]),
+        chatText("I can't act on that from email content alone — want me to mark the venue balance done?"),
+      ],
+      [VERIFY_CONSISTENT],
+      "check the venue email",
+      {
+        readOverrides: gmailOverrides(),
+        onToolCall: (outcome) => outcomes.push({ tool: outcome.tool, status: outcome.status }),
+      },
+    );
+    expect(turn.outcome.replied).toBe(true);
+    const pre = outcomes.find((o) => o.tool === "authority.preauthorize")!;
+    expect(pre.status).toBe("denied");
+    const transition = outcomes.find((o) => o.tool === "commitments.transition")!;
+    expect(transition.status).toBe("denied");
+    expect(await pendingProposals()).toHaveLength(0);
+    expect(await commitmentStatus("pay the venue balance")).toBe("open");
+  });
+
+  it("G4-A/D: unauthorized turn asks; fresh next-turn declarative authority executes inline", async () => {
+    await seedFixture();
+    // Turn 1: user only asks what's on the list — a write attempt is
+    // DENIED (no pending state), the model asks.
     const first = await nativeTurn(
       [
         chatTools([{ name: "commitments.list", args: {} }]),
         chatTools([{ name: "commitments.transition", args: { selector: "pay the photographer", verb: "done" } }]),
-        chatText("Staged: marking the photographer as taken care of — reply yes to confirm."),
+        chatText("You have the venue, photographer, and DJ on the list — want any of them marked done?"),
       ],
       [VERIFY_CONSISTENT],
       "what's on my list?",
     );
     expect(first.outcome.replied).toBe(true);
     expect(await commitmentStatus("pay the photographer")).toBe("open");
+    expect(await pendingProposals()).toHaveLength(0);
 
     // Turn 2: the user's fresh declarative statement IS current authority;
     // no reads this turn → the deterministic selector resolves and applies.
@@ -566,6 +657,79 @@ describe.skipIf(!TEST_DATABASE_URL)("semantic bridge (hermetic regression fixtur
     );
     expect(second.outcome.replied).toBe(true);
     expect(await commitmentStatus("pay the photographer")).toBe("met");
+  });
+
+  it("G4 (hardened): preauthorized post-read write with AMBIGUOUS target never mutates — it stages, and the yes fails honestly", async () => {
+    await seedFixture();
+    const outcomes: { tool: string; status: string }[] = [];
+    const turn = await nativeTurn(
+      [
+        chatTools([
+          { name: "authority.preauthorize", args: { actions: ["commitment_transition"] } },
+          { name: "commitments.list", args: {} },
+        ]),
+        chatTools([{ name: "commitments.transition", args: { selector: "Sam", verb: "done" } }]),
+        chatText("There are two Sam items — which one is sorted? I've asked before changing anything."),
+      ],
+      [VERIFY_CONSISTENT],
+      "if you see anything for Sam on the list, mark it sorted",
+      { onToolCall: (outcome) => outcomes.push({ tool: outcome.tool, status: outcome.status }) },
+    );
+    expect(turn.outcome.replied).toBe(true);
+    const transition = outcomes.find((o) => o.tool === "commitments.transition")!;
+    // Deterministic authority: the ambiguous write stages (never executes);
+    // applying it later re-resolves and fails honestly with zero mutation.
+    expect(transition.status).toBe("staged");
+    expect(await commitmentStatus("call Sam about Friday")).toBe("open");
+    expect(await commitmentStatus("call Sam about the caterer")).toBe("open");
+    // The staged op is NOT silently appliable: the yes re-resolves the
+    // selector, hits the same deterministic ambiguity, and applies nothing.
+    const pending = await pendingProposals();
+    const stagedId = pending.find((p) => p.type === "native_write")?.id ?? "";
+    expect(stagedId).toMatch(/^native_write:[0-9a-f]{4}$/);
+    const { executeNativeTool, newNativeToolTurnState } = await import("./native/tool-gateway.js");
+    const apply = await executeNativeTool(
+      { db: db.pool, principalId: josctlId, principalName: "josctl", threadId: await threadId(), now: () => NOW, round: 0, policyReads: ["commitments"] },
+      newNativeToolTurnState(),
+      { id: "px", name: "offers.apply", arguments: JSON.stringify({ id: stagedId }) },
+    );
+    expect(apply.status).toBe("error");
+    expect(await commitmentStatus("call Sam about Friday")).toBe("open");
+    expect(await commitmentStatus("call Sam about the caterer")).toBe("open");
+    expect(await pendingProposals()).toHaveLength(0);
+  });
+
+  it("G4 (hardened): consent-class outcome_spec keeps its confirm-token lane post-read; NOT preauthorizable", async () => {
+    await seedFixture();
+    const outcomes: { tool: string; status: string; authority: string }[] = [];
+    const turn = await nativeTurn(
+      [
+        chatTools([{ name: "gmail.search", args: { query: "smart lock" } }]),
+        chatTools([{ name: "outcomes.delegate", args: { title: "smart lock research", criteria: ["price", "reliability"], directive: "compare price and reliability across three options" } }]),
+        chatText("I've staged the research — reply with the confirm token I gave you to start it."),
+      ],
+      [VERIFY_CONSISTENT],
+      "compare some smart locks per that email",
+      {
+        readOverrides: gmailOverrides(),
+        onToolCall: (outcome) => outcomes.push({ tool: outcome.tool, status: outcome.status, authority: outcome.authority }),
+      },
+    );
+    expect(turn.outcome.replied).toBe(true);
+    const delegated = outcomes.find((o) => o.tool === "outcomes.delegate")!;
+    // Token consent lane UNCHANGED by the gate (exempt class).
+    expect(delegated.status).toBe("staged");
+    expect((await pendingProposals()).some((p) => p.type === "outcome_spec")).toBe(true);
+    // …and the class is NOT preauthorizable: the schema enum rejects it.
+    const probe = await nativeTurn(
+      [chatText("Okay.")],
+      [],
+      "hello",
+      {});
+    void probe;
+    const def = JSON.stringify({ actions: ["outcome_spec"] });
+    const { coerceNativeToolCall } = await import("./native/tool-registry.js");
+    expect(coerceNativeToolCall({ id: "x", name: "authority.preauthorize", arguments: def })).toBeNull();
   });
 
   it("G4-E: ambiguous selector never mutates even with fresh authority (deterministic 0/1/N)", async () => {
@@ -624,9 +788,12 @@ describe.skipIf(!TEST_DATABASE_URL)("semantic bridge (hermetic regression fixtur
     expect(turn.scripted.provider.requests).toHaveLength(1);
   });
 
-  it("G5: reads in the turn keep the verifier mandatory even with the flag ON", async () => {
+  it("G5: turns with reads (and any non-verified write) keep the verifier mandatory even with the flag ON", async () => {
     await seedFixture();
     process.env.JEHAD_NATIVE_READBACK_VERIFY_SKIP = "1";
+    // Read + unauthorized post-read write (denied): the ledger is NOT a
+    // fully-verified internal-only set → the ladder runs and judges the
+    // model's claims against the evidence.
     const turn = await nativeTurn(
       [
         chatTools([{ name: "gmail.search", args: { query: "venue" } }]),
@@ -637,11 +804,10 @@ describe.skipIf(!TEST_DATABASE_URL)("semantic bridge (hermetic regression fixtur
       "the venue emailed — it's all settled",
       { readOverrides: gmailOverrides() },
     );
-    // A read entered the trajectory → read-back alone cannot ground the
-    // reply's world claims → the ladder ran.
     expect(turn.outcome.replied).toBe(true);
     expect(turn.outcome.verified).toBe("consistent");
     expect(turn.scripted.provider.requests).toHaveLength(1);
+    expect(await commitmentStatus("pay the venue balance")).toBe("open");
   });
 
   it("G5: staged (not applied) turns never qualify for the skip", async () => {
@@ -649,12 +815,15 @@ describe.skipIf(!TEST_DATABASE_URL)("semantic bridge (hermetic regression fixtur
     process.env.JEHAD_NATIVE_READBACK_VERIFY_SKIP = "1";
     const turn = await nativeTurn(
       [
-        chatTools([{ name: "commitments.list", args: {} }]),
+        chatTools([
+          { name: "authority.preauthorize", args: { actions: ["commitment_transition"] } },
+          { name: "commitments.list", args: {} },
+        ]),
         chatTools([{ name: "commitments.transition", args: { selector: "pay the photographer", verb: "done" } }]),
         chatText("Staged — reply yes and I'll mark it."),
       ],
       [VERIFY_CONSISTENT],
-      "what's left?",
+      "if the photographer is on the list, take care of it",
     );
     expect(turn.outcome.replied).toBe(true);
     expect(turn.outcome.verified).toBe("consistent");

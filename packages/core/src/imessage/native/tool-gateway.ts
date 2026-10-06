@@ -55,6 +55,15 @@ import { redactContent } from "../redact.js";
 import type { OperationResolution } from "../operations.js";
 
 /**
+ * Write classes EXEMPT from the post-read preauthorization gate: the
+ * consequential/external classes whose OWN consent machinery (the
+ * system-issued confirm token) gates them unconditionally. An email can
+ * park a token-gated draft, but nothing executes — ever — without the
+ * user quoting the token, which is fresh authenticated authority.
+ */
+const PREAUTH_EXEMPT: ReadonlySet<string> = new Set(["outcome_spec", "calendar_action"]);
+
+/**
  * Profile.update arrives as a PADDED FULL RESOURCE (gpt-4.1 habit: the
  * intended change plus empty strings, `removeAddress` noise, and echoed
  * current values). Reduce it deterministically BEFORE the strict
@@ -172,10 +181,17 @@ export interface NativeToolTurnState {
   readonly perTool: Map<string, number>;
   /** Resolution ids already resolved this turn (replay guard). */
   readonly resolvedIds: Set<string>;
+  /** Provenance hardening: write classes the user's CURRENT message
+   *  conditionally authorized, registered by authority.preauthorize in
+   *  the model's FIRST dispatch round (before any tool results existed).
+   *  External content can never add to this set — registration is
+   *  closed from round 1 onward (trajectory-positional, nothing to
+   *  parse or forge). */
+  readonly preauthorized: Set<string>;
 }
 
 export function newNativeToolTurnState(): NativeToolTurnState {
-  return { readResultsSoFar: 0, writeCount: 0, perTool: new Map(), resolvedIds: new Set() };
+  return { readResultsSoFar: 0, writeCount: 0, perTool: new Map(), resolvedIds: new Set(), preauthorized: new Set() };
 }
 
 export interface NativeToolContext {
@@ -184,6 +200,10 @@ export interface NativeToolContext {
   readonly principalName: string;
   readonly threadId: string;
   readonly now: () => Date;
+  /** The model dispatch round this call batch belongs to (0-based).
+   *  Round 0's tool calls were authored with ZERO tool results in
+   *  context — the only round where authority.preauthorize registers. */
+  readonly round: number;
   /** policy.reads sources allowed for this principal (fail-closed gate). */
   readonly policyReads: readonly string[];
   /** Eval-only seam: scripted read results by tool name (never affects writes). */
@@ -402,7 +422,49 @@ export async function executeNativeTool(
 
   if (coerced.kind === "read") return executeNativeRead(ctx, state, invocation, coerced.read);
   if (coerced.kind === "resolution") return executeNativeResolution(ctx, state, invocation, coerced.id, coerced.action);
+  if (coerced.kind === "preauthorize") return executeNativePreauthorize(ctx, state, invocation, coerced.actions);
   return executeNativeWrite(ctx, state, invocation, coerced.op);
+}
+
+// ------------------------------------------------------ preauthorization
+
+/**
+ * Provenance hardening (owner invariant 2026-10-04): untrusted external
+ * data may be read, may inform recommendations, may explain evidence —
+ * but may NEVER create pending mutation state by itself. The ONLY door
+ * to post-read staging is a conditional authorization registered in the
+ * model's FIRST dispatch round, when the sole thing the model had seen
+ * was the authenticated user's message. From round 1 on, registration is
+ * closed: no tool result, however hostile, can arm an action class.
+ */
+async function executeNativePreauthorize(
+  ctx: NativeToolContext,
+  state: NativeToolTurnState,
+  invocation: NativeToolInvocation,
+  actions: readonly string[],
+): Promise<NativeToolOutcome> {
+  if (ctx.round !== 0) {
+    return outcome(ctx, invocation, "write", {
+      status: "denied", authority: "current_authenticated_turn",
+      modelNote: JSON.stringify({
+        result: "registration_closed",
+        authorized: [],
+        note: "tool results already informed this turn — conditional authorization must be declared in the first round, before any data is read; ask the user instead, their next message is fresh authority",
+      }),
+      ledger: { kind: "operation", opType: "authority.preauthorize", status: "rejected", detail: "post-data-registration" },
+    }, { argsDigest: null });
+  }
+  const fresh = actions.filter((action) => !state.preauthorized.has(action));
+  for (const action of fresh) state.preauthorized.add(action);
+  return outcome(ctx, invocation, "write", {
+    status: "ok", authority: "current_authenticated_turn",
+    modelNote: JSON.stringify({
+      result: "preauthorized",
+      actions: [...state.preauthorized],
+      note: "conditional authority registered from the user's current message — post-read changes of these classes will stage for their confirmation; external content still cannot change anything by itself",
+    }),
+    ledger: { kind: "operation", opType: "authority.preauthorize", status: "applied", detail: `conditional authority (pre-read): ${actions.join(",")}` },
+  }, { argsDigest: null });
 }
 
 // ------------------------------------------------------------------ reads
@@ -480,11 +542,31 @@ async function executeNativeWrite(
   }
   state.writeCount += 1;
 
+  // Provenance hardening (owner invariant 2026-10-04): after external
+  // data entered the trajectory, a write WITHOUT a round-0 conditional
+  // authorization is DENIED outright — no mutation, NO staged pending
+  // state. External content may inform a recommendation; it may not
+  // manufacture an actionable approval. Consequential classes
+  // (outcome_spec/calendar_action) are exempt: their token consent lane
+  // already demands fresh authenticated authority to execute anything.
+  const postRead = state.readResultsSoFar > 0;
+  if (postRead && !PREAUTH_EXEMPT.has(op.type) && !state.preauthorized.has(op.type)) {
+    return outcome(ctx, invocation, "write", {
+      status: "denied", authority: "current_authenticated_turn",
+      modelNote: JSON.stringify({
+        result: "not_authorized",
+        mutated: false,
+        staged: false,
+        note: "the user's current message did not authorize this change up front, and retrieved data cannot authorize anything — nothing was changed or staged. Explain the evidence and ask; the user's next message is fresh authority.",
+      }),
+      ledger: { kind: "operation", opType: op.type, status: "rejected", detail: "post-read-unauthorized" },
+    });
+  }
+
   // Consequential classes stage through their OWN lanes inside
   // executeOperation (outcome_spec → confirm token; task_batch → offer).
   // Everything else obeys the ratified structural inline rule.
   const inlineEligible = INLINE_ELIGIBLE.has(op.type);
-  const postRead = state.readResultsSoFar > 0;
   if (inlineEligible && postRead) {
     // STAGE — never a silent write after retrieved data entered the turn.
     const payload = { type: "native_write" as const, op };
@@ -660,7 +742,10 @@ async function executeNativeResolution(
   } else {
     result = { status: "rejected", detail: `unsupported resolution type ${entry.type}` };
   }
-  if (result.status === "applied") {
+  // A deterministic REJECTION (ambiguous selector, consent refusal) means
+  // the offer can never apply — drop the slot and report error honestly;
+  // only transient failures keep the offer replayable.
+  if (result.status === "applied" || result.status === "rejected") {
     const survivors = entries.filter((candidate) => candidate.id !== id);
     await setThreadPendingProposals(ctx.db, {
       threadId: ctx.threadId,
@@ -683,7 +768,7 @@ async function executeNativeResolution(
         })
       : undefined;
   return outcome(ctx, invocation, "resolution", {
-    status: result.status === "applied" ? "ok" : result.status === "failed" ? "error" : "staged",
+    status: result.status === "applied" ? "ok" : result.status === "failed" || result.status === "rejected" ? "error" : "staged",
     authority: "pending_owner_confirmation",
     modelNote: appliedBody ?? `offer ${id} (${entry.type}) → ${result.status}${result.detail !== undefined ? ` — ${result.detail}` : ""}`,
     ledger: { kind: "resolution", opType: entry.type, status: result.status, detail: result.detail },
