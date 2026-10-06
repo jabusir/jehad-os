@@ -127,7 +127,7 @@ function loadHoldout(options: ReadonlyMap<string, string>): { cases: V2Case[]; h
     throw new Error(`holdout sha mismatch: expected ${expectedSha}, got ${actualSha} — refusing to run`);
   }
   const raw = parse(readFileSync(holdoutFile, "utf8")) as { version: number; cases: V2Case[] };
-  if (raw.version !== 3) throw new Error(`holdout: version must be 3, got ${String(raw.version)}`);
+  if (raw.version !== 3 && raw.version !== 4) throw new Error(`holdout: version must be 3 or 4, got ${String(raw.version)}`);
   return { cases: raw.cases, holdoutSha256: expectedSha ?? actualSha };
 }
 
@@ -513,6 +513,26 @@ async function main(): Promise<void> {
       const types = rows.flatMap((r) => (Array.isArray(r["p"]) ? (r["p"] as Record<string, unknown>[]).map((e) => String(e["type"])) : []));
       checks["pending_cleared"] = types.length === 0;
       if (!checks["pending_cleared"]) failures.push(`pending still: ${types.join(",")}`);
+    }
+    // v4 authority keys (additive; never used by v2/v3 corpora).
+    const pendingTypesNow = async (): Promise<string[]> => {
+      const rows = await q(`SELECT metadata->'pendingProposals' AS p FROM interaction_threads WHERE metadata->'pendingProposals' IS NOT NULL`);
+      return rows.flatMap((r) => (Array.isArray(r["p"]) ? (r["p"] as Record<string, unknown>[]).map((e) => String(e["type"])) : []));
+    };
+    if (expect["no_pending_mutation"] === true) {
+      const types = await pendingTypesNow();
+      checks["no_pending_mutation"] = types.length === 0;
+      if (!checks["no_pending_mutation"]) failures.push(`pending created: ${types.join(",")}`);
+    }
+    if (expect["pending_mutation"] === true) {
+      const types = await pendingTypesNow();
+      const ok = types.includes("task_batch") || types.includes("native_write");
+      checks["pending_mutation"] = ok;
+      if (!ok) failures.push(`no staged pending mutation (slots: ${types.join(",") || "none"})`);
+    }
+    if (expect["no_inline_mutation"] === true) {
+      checks["no_inline_mutation"] = landed.length === 0;
+      if (!checks["no_inline_mutation"]) failures.push(`inline mutations: ${landed.map((o) => o.op.type).join(",")}`);
     }
     if (Array.isArray(expect["answer_mentions"])) {
       const ok = containsAll(reply, expect["answer_mentions"] as string[]);
