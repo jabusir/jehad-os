@@ -26,6 +26,7 @@
 
 import type { SqlExecutor } from "../actions/audit.js";
 import { localDayBounds } from "../calendar/projection.js";
+import { commitmentRefCode } from "../commitments/transitions.js";
 import { BRIEF_TIMEZONE } from "../briefs/timezone.js";
 import { listReminders } from "../reminders/queries.js";
 
@@ -150,7 +151,10 @@ export async function resolveOpenCommitmentByText(
   const candidates = result.rows
     .filter((row) => selectorMatches(input.text, String(row.description ?? "")))
     .map((row) => ({
-      label: String(row.description ?? ""),
+      // Stable model-visible identity: the ambiguity candidate label carries
+      // the commitment's deterministic ref so a follow-up ("the first one")
+      // can target one object by ref without exposing raw UUIDs.
+      label: `[${commitmentRefCode(String(row.id))}] ${String(row.description ?? "")}`,
       value: { commitmentId: String(row.id), description: String(row.description ?? "") },
     }));
   return resolveFromCandidates(input.text, candidates);

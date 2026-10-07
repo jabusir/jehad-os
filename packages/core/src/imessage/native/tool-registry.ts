@@ -66,7 +66,7 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "gmail.read",
     kind: "read",
     description:
-      "Read one Gmail message in full by messageId (from a gmail.search result or prior tool activity). Use whenever the substance of a known message matters — its body, amounts, dates, or requests.",
+      "Read one Gmail message in full by messageId. Use whenever the substance of a known message matters — its body, amounts, dates, or requests — including when the user refers to a message from an earlier search or earlier in the conversation: its messageId is already in your tool history, so read it directly rather than searching again or saying you lack it.",
     parameters: {
       type: "object",
       properties: { message_id: { type: "string", maxLength: 200 } },
@@ -89,15 +89,16 @@ export const NATIVE_TOOLS: readonly NativeToolDef[] = [
     name: "commitments.transition",
     kind: "write",
     description:
-      "Record the outcome of one of the user's open to-dos: done, missed, or renegotiated. Use it whenever the user conveys — in any phrasing — that an existing commitment is finished, fell through, or moved. selector = the words that identify it; resolution is exact-or-ambiguous, never guessed.",
+      "Record the outcome of one of the user's open to-dos: done, missed, or renegotiated. Use it whenever the user conveys — in any phrasing, including a plain statement of fact — that an existing commitment is finished, fell through, or moved. Target it by ref (the stable code shown in your commitment list or in an ambiguity result) or by selector words; resolution is exact-or-ambiguous, never guessed.",
     parameters: {
       type: "object",
       properties: {
+        ref: { type: "string", pattern: "^[0-9A-Z]{3}$" },
         selector: { type: "string", maxLength: 200 },
         verb: { type: "string", enum: ["done", "missed", "renegotiated"] },
         note: { type: "string", maxLength: 120 },
       },
-      required: ["selector", "verb"],
+      required: ["verb"],
       additionalProperties: false,
     },
   },
@@ -252,7 +253,14 @@ export type CoercedNativeToolCall =
   | { readonly kind: "read"; readonly read: ReadToolCall }
   | { readonly kind: "write"; readonly op: CognitiveOperation }
   | { readonly kind: "resolution"; readonly id: string; readonly action: "apply" | "decline" }
-  | { readonly kind: "preauthorize"; readonly actions: readonly string[] };
+  | { readonly kind: "preauthorize"; readonly actions: readonly string[] }
+  | {
+      readonly kind: "ref_transition";
+      /** Stable commitment reference (deterministic 3-char code). */
+      readonly ref: string;
+      readonly verb: unknown;
+      readonly note?: string;
+    };
 
 /**
  * Provenance hardening (owner directive 2026-10-04): the write classes a
@@ -305,11 +313,25 @@ export function coerceNativeToolCall(invocation: NativeToolInvocation): CoercedN
       return call !== null && call.tool === "work.status" ? { kind: "read", read: call } : null;
     }
     case "commitments.transition": {
+      const verb = args["verb"];
       const note = typeof args["note"] === "string" && args["note"].trim().length === 0 ? null : args["note"] ?? null;
+      const ref = args["ref"];
+      const selector = args["selector"];
+      if (typeof ref === "string" && ref.length > 0) {
+        // Stable-ref targeting — resolved deterministically by the gateway
+        // against the caller's own open commitments (never the model's word).
+        if (typeof selector === "string" && selector.length > 0) return null;
+        if (!/^[0-9A-Z]{3}$/.test(ref)) return null;
+        const refNote = typeof args["note"] === "string" && args["note"].trim().length > 0 ? args["note"] : undefined;
+        const call: CoercedNativeToolCall = refNote !== undefined
+          ? { kind: "ref_transition", ref, verb, note: refNote }
+          : { kind: "ref_transition", ref, verb };
+        return call;
+      }
       const op = parseCognitiveOperation({
         type: "commitment_transition",
-        target: { text: args["selector"] },
-        verb: args["verb"],
+        target: { text: selector },
+        verb,
         note,
       });
       return op !== null && op.type === "commitment_transition" ? { kind: "write", op } : null;

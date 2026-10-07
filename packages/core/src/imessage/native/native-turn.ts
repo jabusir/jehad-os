@@ -648,8 +648,9 @@ export async function runNativeTurn(
     // Admission (§5.5): a dispatch starts only if the wall and cost budget
     // admit it. Closed budget or exhausted turns end the loop fail-safe.
     if (!admissionOpen() || turnsUsed >= NATIVE_MAX_TURNS) {
-      await persistTrajectory(ctx, trajectoryEntries);
-      return shipNotice(ledger.length === 0 ? NOTICE_EMPTY_LEDGER : NOTICE_PARTIAL_LEDGER);
+      const notice = ledger.length === 0 ? NOTICE_EMPTY_LEDGER : NOTICE_PARTIAL_LEDGER;
+      await persistTrajectory(ctx, trajectoryEntries, notice);
+      return shipNotice(notice);
     }
     // The LAST turn (and any turn after the tool-call cap) is FORCED-FINAL:
     // dispatched with tools stripped so the model must ANSWER from the
@@ -669,20 +670,21 @@ export async function runNativeTurn(
         turnsUsed += 1;
         cost += dispatched.costUsd;
         if (dispatched.text.trim().length === 0) {
-          await persistTrajectory(ctx, trajectoryEntries);
+          await persistTrajectory(ctx, trajectoryEntries, NOTICE_TURN_COMPLETION);
           return shipNotice(NOTICE_TURN_COMPLETION);
         }
         const tVerify = Date.now();
         const verified = await verifyLadder(ctx, dispatched.text, ledger, readEvidence, models, workSnapshot, workActiveTotal, workToolRan, (c) => { cost += c; });
         phases.verifyMs += elapsedSince(tVerify);
-        await persistTrajectory(ctx, trajectoryEntries);
         if (verified.verified === "contradicted_unresolved" || verified.verified.startsWith("verifier-")) {
           await audit(ctx.db, "native.turn_flagged", { principalId: ctx.input.principalId, verified: verified.verified, draft: redactContent(verified.reply.slice(0, 400)) });
+          await persistTrajectory(ctx, trajectoryEntries, NOTICE_TURN_COMPLETION);
           return shipNotice(NOTICE_TURN_COMPLETION);
         }
+        await persistTrajectory(ctx, trajectoryEntries, verified.reply);
         return shipReply(ctx, verified.reply, turnsUsed, toolCallsExecuted, cost, verified.verified, referents, trajectoryEntries, { totalMs: elapsedSince(startMs), ...phases });
       } catch {
-        await persistTrajectory(ctx, trajectoryEntries);
+        await persistTrajectory(ctx, trajectoryEntries, ledger.length === 0 ? NOTICE_EMPTY_LEDGER : NOTICE_PARTIAL_LEDGER);
         return shipNotice(ledger.length === 0 ? NOTICE_EMPTY_LEDGER : NOTICE_PARTIAL_LEDGER);
       }
     }
@@ -724,7 +726,7 @@ export async function runNativeTurn(
           turns: turnsUsed,
           errorName: err instanceof Error ? err.name : "unknown",
         });
-        await persistTrajectory(ctx, trajectoryEntries);
+        await persistTrajectory(ctx, trajectoryEntries, ledger.length === 0 ? NOTICE_EMPTY_LEDGER : NOTICE_PARTIAL_LEDGER);
         return shipNotice(ledger.length === 0 ? NOTICE_EMPTY_LEDGER : NOTICE_PARTIAL_LEDGER);
       }
       dispatched = recovered;
@@ -795,7 +797,7 @@ export async function runNativeTurn(
         messages.push({ role: "system", content: "SYSTEM: your last message was empty. Write your final plain-text reply now — no tool calls." });
         continue;
       }
-      await persistTrajectory(ctx, trajectoryEntries);
+      await persistTrajectory(ctx, trajectoryEntries, NOTICE_TURN_COMPLETION);
       return shipNotice(NOTICE_TURN_COMPLETION);
     }
 
@@ -809,7 +811,7 @@ export async function runNativeTurn(
         reason: "verified-readback-internal-only",
         ops: ledger.map((entry) => ({ opType: entry.opType, status: entry.status })),
       });
-      await persistTrajectory(ctx, trajectoryEntries);
+      await persistTrajectory(ctx, trajectoryEntries, replyText);
       return shipReply(ctx, replyText, turnsUsed, toolCallsExecuted, cost, "readback-verified", referents, trajectoryEntries, { totalMs: elapsedSince(startMs), ...phases });
     }
     const tVerify = Date.now();
@@ -821,10 +823,10 @@ export async function runNativeTurn(
         verified: verified.verified,
         draft: redactContent(verified.reply.slice(0, 400)),
       });
-      await persistTrajectory(ctx, trajectoryEntries);
+      await persistTrajectory(ctx, trajectoryEntries, NOTICE_TURN_COMPLETION);
       return shipNotice(NOTICE_TURN_COMPLETION);
     }
-    await persistTrajectory(ctx, trajectoryEntries);
+    await persistTrajectory(ctx, trajectoryEntries, verified.reply);
     return shipReply(ctx, verified.reply, turnsUsed, toolCallsExecuted, cost, verified.verified, referents, trajectoryEntries, { totalMs: elapsedSince(startMs), ...phases });
   }
 }
@@ -956,7 +958,7 @@ function contextSummary(ctx: TurnCtx): string {
 
 // ------------------------------------------------------- ship + trajectory
 
-async function persistTrajectory(ctx: TurnCtx, entries: readonly ToolTrajectoryEntry[]): Promise<void> {
+async function persistTrajectory(ctx: TurnCtx, entries: readonly ToolTrajectoryEntry[], shippedReply?: string): Promise<void> {
   if (entries.length === 0) return;
   try {
     const meta = await ctx.db.query("SELECT metadata FROM interaction_threads WHERE id = $1::uuid", [ctx.threadId]);
@@ -966,6 +968,9 @@ async function persistTrajectory(ctx: TurnCtx, entries: readonly ToolTrajectoryE
       turnId: ctx.runId.slice(0, 64),
       at: ctx.now().toISOString(),
       entries: entries.slice(0, 12),
+      ...(shippedReply !== undefined && shippedReply.trim().length > 0
+        ? { reply: shippedReply.trim().slice(0, 400) }
+        : {}),
     };
     await setThreadToolTrajectory(ctx.db, {
       threadId: ctx.threadId,

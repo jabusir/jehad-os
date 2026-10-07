@@ -38,6 +38,13 @@ import {
   applyTaskBatch,
 } from "../turn-interpretation.js";
 import {
+  commitmentRefCode,
+  eligibleCommitments,
+  resolveCommitmentTarget,
+  VERB_TO_STATUS,
+  type CommitmentVerb,
+} from "../../commitments/transitions.js";
+import {
   isPendingExpired,
   parseThreadMetadata,
   pendingWithDerivedIds,
@@ -50,6 +57,7 @@ import {
   nativeToolDef,
   type NativeToolInvocation,
 } from "./tool-registry.js";
+import { parseCognitiveOperation } from "../operations.js";
 import { activeProfile } from "../profiles.js";
 import { redactContent } from "../redact.js";
 import type { OperationResolution } from "../operations.js";
@@ -423,7 +431,100 @@ export async function executeNativeTool(
   if (coerced.kind === "read") return executeNativeRead(ctx, state, invocation, coerced.read);
   if (coerced.kind === "resolution") return executeNativeResolution(ctx, state, invocation, coerced.id, coerced.action);
   if (coerced.kind === "preauthorize") return executeNativePreauthorize(ctx, state, invocation, coerced.actions);
+  if (coerced.kind === "ref_transition") return executeNativeRefTransition(ctx, state, invocation, coerced);
   return executeNativeWrite(ctx, state, invocation, coerced.op);
+}
+
+// ------------------------------------------------------- stable-ref targeting
+
+/**
+ * Semantic-bridge hardening (owner directive 2026-10-07): commitments may
+ * be targeted by their STABLE deterministic ref (the code surfaced in
+ * commitment lists and ambiguity results) instead of selector words.
+ * Resolution is pure and principal/domain-scoped — exactly one live open
+ * commitment or an honest structured failure; closed/foreign/unknown refs
+ * never guess. The resolved id-form op then flows through the UNCHANGED
+ * authority path (inline / staged / preauthorized gates, write caps).
+ */
+async function executeNativeRefTransition(
+  ctx: NativeToolContext,
+  state: NativeToolTurnState,
+  invocation: NativeToolInvocation,
+  coerced: { readonly ref: string; readonly verb: unknown; readonly note?: string },
+): Promise<NativeToolOutcome> {
+  if (typeof coerced.verb !== "string" || !(coerced.verb in VERB_TO_STATUS)) {
+    return outcome(ctx, invocation, "write", {
+      status: "invalid", authority: "current_authenticated_turn",
+      modelNote: `invalid: verb must be done|missed|renegotiated`,
+      ledger: { kind: "operation", opType: "commitment_transition", status: "rejected", detail: "schema-invalid" },
+    });
+  }
+  const verb = coerced.verb as CommitmentVerb;
+  const eligible = await eligibleCommitments(ctx.db, {});
+  const resolution = resolveCommitmentTarget(eligible, coerced.ref);
+  if (resolution.kind === "sole" || resolution.kind === "ref") {
+    const item = eligible.find((candidate) => candidate.id === resolution.id)!;
+    const op = parseCommitmentIdOp(resolution.id, verb, coerced.note);
+    if (op === null) {
+      return outcome(ctx, invocation, "write", {
+        status: "invalid", authority: "current_authenticated_turn",
+        modelNote: `invalid: transition arguments failed the schema`,
+        ledger: { kind: "operation", opType: "commitment_transition", status: "rejected", detail: "schema-invalid" },
+      });
+    }
+    const writeOutcome = await executeNativeWrite(ctx, state, invocation, op);
+    // The id-form executor does not attach a selector resolution — splice
+    // the stable-identity read-back here (id, ref, title, statuses).
+    if (writeOutcome.status === "ok") {
+      const body = JSON.stringify({
+        result: "applied",
+        object: {
+          ref: commitmentRefCode(resolution.id),
+          id: resolution.id,
+          title: item.description.slice(0, 120),
+          previous_status: "open",
+          current_status: VERB_TO_STATUS[verb],
+        },
+        resolved_by: "ref",
+        verified: true,
+      });
+      return { ...writeOutcome, modelNote: body, structuredResult: body };
+    }
+    return writeOutcome;
+  }
+  if (resolution.kind === "ambiguous") {
+    return outcome(ctx, invocation, "write", {
+      status: "error", authority: "current_authenticated_turn",
+      modelNote: JSON.stringify({
+        result: "ambiguous",
+        ref: coerced.ref,
+        mutated: false,
+        candidates: resolution.candidates.slice(0, 5).map((candidate) => ({ ref: candidate.ref, label: candidate.description })),
+        note: "that ref collides with more than one open commitment — nothing was changed; ask which one",
+      }),
+      ledger: { kind: "operation", opType: "commitment_transition", status: "rejected", detail: "ref-ambiguous" },
+    });
+  }
+  // none | unknown_ref — honest structured failure (stale, closed, foreign,
+  // or malformed refs all land here; no guessing, no leakage).
+  return outcome(ctx, invocation, "write", {
+    status: "error", authority: "current_authenticated_turn",
+    modelNote: JSON.stringify({
+      result: "not_found",
+      ref: coerced.ref,
+      mutated: false,
+      note: resolution.kind === "unknown_ref"
+        ? "no open commitment carries that ref — it may already be resolved, or it belongs to nothing you can see; nothing was changed"
+        : "nothing is open right now — nothing was changed",
+    }),
+    ledger: { kind: "operation", opType: "commitment_transition", status: "rejected", detail: "ref-not-found" },
+  });
+}
+
+function parseCommitmentIdOp(commitmentId: string, verb: CommitmentVerb, note?: string): CognitiveOperation | null {
+  // Lazy import-free reuse: the shared validator owns the shape.
+  const parsed = parseCognitiveOperation({ type: "commitment_transition", commitmentId, verb, note: note ?? null });
+  return parsed !== null && parsed.type === "commitment_transition" ? parsed : null;
 }
 
 // ------------------------------------------------------ preauthorization

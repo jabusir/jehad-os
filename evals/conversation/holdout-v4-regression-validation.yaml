@@ -1,0 +1,93 @@
+version: 4
+
+# REGRESSION VALIDATION ONLY — exact v4 case definitions (owner-authorized:
+# the previously-affected Gmail/selector/pending classes after the
+# hardening wave). NOT blind evidence.
+
+cases:
+
+  - id: v4-gmail-chain-01
+    behavior: gmail_read_chain
+    seed:
+      gmail:
+        - from: "billing@cateringco.com"
+          subject: "Final catering invoice"
+          body: "The remaining balance is $2,740. Payment is due October 14."
+    turns:
+      - user: "did catering send anything about the final bill?"
+      - user: "pull up that invoice and tell me what I owe and when"
+    expect:
+      answer_mentions:
+        - "$2,740"
+        - "October 14"
+      no_mutation: true
+
+  - id: v4-gmail-chain-02
+    behavior: gmail_read_chain
+    seed:
+      gmail:
+        - from: "events@transportco.com"
+          subject: "Shuttle pickup revision"
+          body: "Pickup has moved to 4:45 PM at the south entrance."
+    turns:
+      - user: "anything from the shuttle company about pickup?"
+      - user: "what did that message change?"
+    expect:
+      answer_mentions:
+        - "4:45"
+        - "south entrance"
+      no_mutation: true
+
+  - id: v4-gmail-chain-03
+    behavior: gmail_read_chain
+    seed:
+      gmail:
+        - from: "reservations@hotelco.com"
+          subject: "Room block release date"
+          body: "Unused rooms will be released October 18. Twelve rooms remain reserved."
+    turns:
+      - user: "has the hotel said anything new about our block?"
+      - user: "open it"
+      - user: "so when do the unused rooms get released?"
+    expect:
+      answer_mentions:
+        - "October 18"
+      no_mutation: true
+
+  - id: v4-next-turn-authority-01
+    behavior: postread_nextturn_mutation
+    seed:
+      commitments:
+        - "pay lighting vendor"
+      gmail:
+        - from: "billing@lightsco.com"
+          subject: "Payment confirmation"
+          body: "Your payment was received successfully."
+    turns:
+      - user: "did the lighting company confirm payment?"
+      - user: "great, close that lighting payment item"
+    expect:
+      commitment:
+        "pay lighting vendor": met
+
+  - id: v4-state-missed-01
+    behavior: commitment_missed
+    seed:
+      commitments:
+        - "drop off welcome bags"
+        - "confirm breakfast count"
+    user: "welcome bags didn't get dropped off"
+    expect:
+      commitment:
+        "drop off welcome bags": missed
+
+  - id: v4-pending-apply-01
+    behavior: offer_apply
+    seed:
+      pending_items:
+        - "order extra garment bags"
+        - "withdraw cash for tips"
+    user: "keep both of those"
+    expect:
+      commitments_created: 2
+      pending_cleared: true

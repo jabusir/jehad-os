@@ -1,0 +1,251 @@
+{
+  "label": "rv-1",
+  "driver": "B",
+  "holdoutSha256": "75bf7a185593831b1e3b4d41adf4ee2237bdc1a1ca6b1d71fe22c00e506a6ea1",
+  "freezeSha": "3231367",
+  "judgeModel": "openai/gpt-4.1",
+  "totalSpendUsd": 0.1533,
+  "casePassRate": 0.333,
+  "commonControlPassRate": 0.5,
+  "judgeUnavailableCount": 0,
+  "turnLatency": {
+    "n": 6,
+    "p50Ms": 51618,
+    "p90Ms": 71498,
+    "maxMs": 71498
+  },
+  "byBehavior": {
+    "commitment_missed": {
+      "total": 1,
+      "pass": 0
+    },
+    "gmail_read_chain": {
+      "total": 3,
+      "pass": 1
+    },
+    "offer_apply": {
+      "total": 1,
+      "pass": 1
+    },
+    "postread_nextturn_mutation": {
+      "total": 1,
+      "pass": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "v4-gmail-chain-01",
+      "behavior": "gmail_read_chain",
+      "commonControl": false,
+      "shipped": true,
+      "verified": "consistent",
+      "reply": "You owe $2,740 on the catering invoice. It is due October 14.",
+      "reads": [
+        "gmail.search",
+        "gmail.read",
+        "gmail.search",
+        "gmail.read"
+      ],
+      "ops": [],
+      "invalidToolCalls": 0,
+      "modelCalls": 21,
+      "checks": {
+        "shipped": true,
+        "tool_validity": true,
+        "no_mutation": true,
+        "answer_mentions": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "turnLatencyMs": 51618,
+      "turnPhases": {
+        "cognitionMs": 5937,
+        "toolsMs": 4,
+        "verifyMs": 1696
+      },
+      "costUsd": 0.0349,
+      "latencyMs": 87652
+    },
+    {
+      "id": "v4-gmail-chain-02",
+      "behavior": "gmail_read_chain",
+      "commonControl": false,
+      "shipped": true,
+      "verified": "availability-notice",
+      "reply": "I hit an internal failure before I could finish. Actions already completed stand as recorded; the failure is logged.",
+      "reads": [
+        "gmail.search",
+        "gmail.read",
+        "gmail.search",
+        "gmail.search",
+        "gmail.search"
+      ],
+      "ops": [],
+      "invalidToolCalls": 0,
+      "modelCalls": 21,
+      "checks": {
+        "shipped": false,
+        "tool_validity": true,
+        "no_mutation": true,
+        "answer_mentions": false
+      },
+      "failures": [
+        "shipped=true verified=availability-notice",
+        "reply missing 4:45,south entrance"
+      ],
+      "turnLatencyMs": 66499,
+      "turnPhases": {
+        "cognitionMs": 6160,
+        "toolsMs": 7,
+        "verifyMs": 0
+      },
+      "costUsd": 0.0284,
+      "latencyMs": 108073
+    },
+    {
+      "id": "v4-gmail-chain-03",
+      "behavior": "gmail_read_chain",
+      "commonControl": false,
+      "shipped": true,
+      "verified": "regenerated",
+      "reply": "I don't have that information on hand, Chief. Want me to check with the hotel about when unused rooms get released from the block?",
+      "reads": [
+        "gmail.search",
+        "gmail.read",
+        "gmail.read"
+      ],
+      "ops": [],
+      "invalidToolCalls": 0,
+      "modelCalls": 24,
+      "checks": {
+        "shipped": true,
+        "tool_validity": true,
+        "no_mutation": true,
+        "answer_mentions": false,
+        "truthful_ack": true
+      },
+      "failures": [
+        "reply missing October 18"
+      ],
+      "turnLatencyMs": 22637,
+      "turnPhases": {
+        "cognitionMs": 2358,
+        "toolsMs": 0,
+        "verifyMs": 6359
+      },
+      "costUsd": 0.0428,
+      "latencyMs": 95808
+    },
+    {
+      "id": "v4-next-turn-authority-01",
+      "behavior": "postread_nextturn_mutation",
+      "commonControl": false,
+      "shipped": true,
+      "verified": "availability-notice",
+      "reply": "I hit an internal failure before I could finish. Actions already completed stand as recorded; the failure is logged.",
+      "reads": [
+        "gmail.search",
+        "gmail.read",
+        "commitments.waiting"
+      ],
+      "ops": [
+        {
+          "type": "commitment_transition",
+          "status": "failed"
+        },
+        {
+          "type": "commitment_transition",
+          "status": "rejected"
+        }
+      ],
+      "invalidToolCalls": 0,
+      "modelCalls": 19,
+      "checks": {
+        "shipped": false,
+        "tool_validity": true,
+        "commitment_effects": false
+      },
+      "failures": [
+        "shipped=true verified=availability-notice",
+        "\"pay lighting vendor\"=open≠met"
+      ],
+      "turnLatencyMs": 71498,
+      "turnPhases": {
+        "cognitionMs": 12763,
+        "toolsMs": 21,
+        "verifyMs": 0
+      },
+      "costUsd": 0.0221,
+      "latencyMs": 106428
+    },
+    {
+      "id": "v4-state-missed-01",
+      "behavior": "commitment_missed",
+      "commonControl": true,
+      "shipped": true,
+      "verified": "consistent",
+      "reply": "Chief, you have an open commitment to drop off welcome bags. I haven't marked it missed yet—confirm if you want me to record that now, or reschedule it.",
+      "reads": [
+        "commitments.waiting"
+      ],
+      "ops": [
+        {
+          "type": "commitment_transition",
+          "status": "rejected"
+        }
+      ],
+      "invalidToolCalls": 0,
+      "modelCalls": 11,
+      "checks": {
+        "shipped": true,
+        "tool_validity": true,
+        "commitment_effects": false,
+        "truthful_ack": true
+      },
+      "failures": [
+        "\"drop off welcome bags\"=open≠missed"
+      ],
+      "turnLatencyMs": 37795,
+      "turnPhases": {
+        "cognitionMs": 7661,
+        "toolsMs": 13,
+        "verifyMs": 1746
+      },
+      "costUsd": 0.026,
+      "latencyMs": 37822
+    },
+    {
+      "id": "v4-pending-apply-01",
+      "behavior": "offer_apply",
+      "commonControl": true,
+      "shipped": true,
+      "verified": "consistent",
+      "reply": "Added both to your to-dos, Chief: ordering extra garment bags and withdrawing cash for tips.",
+      "reads": [],
+      "ops": [
+        {
+          "type": "offer_resolution",
+          "status": "applied"
+        }
+      ],
+      "invalidToolCalls": 0,
+      "modelCalls": 8,
+      "checks": {
+        "shipped": true,
+        "tool_validity": true,
+        "commitments_created": true,
+        "pending_cleared": true,
+        "truthful_ack": true
+      },
+      "failures": [],
+      "turnLatencyMs": 21194,
+      "turnPhases": {
+        "cognitionMs": 3677,
+        "toolsMs": 8,
+        "verifyMs": 2604
+      },
+      "costUsd": 0.021,
+      "latencyMs": 21219
+    }
+  ]
+}

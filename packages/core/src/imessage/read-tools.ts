@@ -21,6 +21,7 @@ import {
   searchGmailContentByKeyword,
 } from "../gmail/content.js";
 import { whatWaitsOnMe } from "../queries/waiting.js";
+import { commitmentRefCode } from "../commitments/transitions.js";
 import { BRIEF_DOMAIN_KEY } from "../briefs/data.js";
 import { BRIEF_TIMEZONE } from "../briefs/timezone.js";
 import {
@@ -561,6 +562,7 @@ export async function executeReadTool(
       const dueSoon = waiting.filter((c) => !c.overdue && c.dueSoon);
       const otherOpen = waiting.filter((c) => !c.overdue && !c.dueSoon);
       const item = (c: (typeof waiting)[number]) => ({
+        ref: commitmentRefCode(c.id),
         description: truncate(c.description, CAP_DESCRIPTION),
         counterparty: truncate(c.counterpartyText, CAP_LOCATION),
         due: dueDay(c.dueAt),

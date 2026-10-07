@@ -1002,8 +1002,9 @@ export interface OperationResolution {
   readonly kind: "not_found" | "ambiguous" | "applied";
   /** The selector text the model asked about (bounded). */
   readonly query?: string;
-  /** Bounded candidate labels when ambiguous (clarify, never mutate). */
-  readonly candidates?: readonly string[];
+  /** Bounded candidates when ambiguous — stable refs where the selector
+   *  supplied them (clarify, never mutate). */
+  readonly candidates?: readonly ({ readonly ref?: string; readonly label: string } | string)[];
   /** Canonical read-back of the mutated/created object (applied only). */
   readonly object?: {
     readonly id: string;
@@ -1651,7 +1652,13 @@ export async function executeOperation(
               resolution: {
                 kind: "ambiguous",
                 query: op.target.text.slice(0, 200),
-                candidates: resolution.candidates.slice(0, 5),
+                // Candidate labels carry the stable [REF] prefix from the
+                // selector — structured here so follow-ups can target one
+                // candidate by ref without exposing raw UUIDs.
+                candidates: resolution.candidates.slice(0, 5).map((candidate) => {
+                  const match = /^\[([0-9A-Z]{3})\] (.+)$/.exec(candidate);
+                  return match !== null ? { ref: match[1]!, label: match[2]! } : { label: candidate };
+                }),
               },
             };
           }

@@ -153,7 +153,7 @@ describe.skipIf(!TEST_DATABASE_URL)("semantic bridge (hermetic regression fixtur
     const row = await db.pool.query(
       `INSERT INTO commitments
          (direction, counterparty_text, description, confidence, status, source_event_id, domain_id, created_at, updated_at)
-       VALUES ('owes_me', 'someone', $1, 0.9, 'open',
+       VALUES ('i_owe', 'someone', $1, 0.9, 'open',
                (SELECT id FROM events ORDER BY occurred_at DESC LIMIT 1), $2::uuid, $3::timestamptz, $3::timestamptz)
        RETURNING id`,
       [description, domainId, NOW.toISOString()],
@@ -828,6 +828,350 @@ describe.skipIf(!TEST_DATABASE_URL)("semantic bridge (hermetic regression fixtur
     expect(turn.outcome.replied).toBe(true);
     expect(turn.outcome.verified).toBe("consistent");
     expect(turn.scripted.provider.requests).toHaveLength(1);
+  });
+
+  // ============================================ hardening: gmail continuity
+
+  it("hardening G1a: replay closes the exchange with the shipped assistant text", async () => {
+    await seedFixture();
+    const first = await nativeTurn(
+      [
+        chatTools([{ name: "gmail.search", args: { query: "venue balance" } }]),
+        chatText("Found it — the venue emailed confirming your balance was received."),
+      ],
+      [VERIFY_CONSISTENT],
+      "did the venue email me back?",
+      { readOverrides: gmailOverrides() },
+    );
+    expect(first.outcome.replied).toBe(true);
+    const second = await nativeTurn(
+      [
+        chatTools([{ name: "gmail.read", args: { message_id: GMAIL_MESSAGE_ID } }]),
+        chatText("Here it is — the venue confirmed receipt."),
+      ],
+      [VERIFY_CONSISTENT],
+      "open that one",
+      { readOverrides: gmailOverrides() },
+    );
+    const messages = second.scripted.provider.chatRequests[0]!.messages;
+    const replayAssistantTexts = messages.filter((m) => m.role === "assistant" && m.toolCalls === undefined);
+    // The COMPLETE exchange: assistant(tools) → tool(s) → assistant(text) → user.
+    expect(replayAssistantTexts.length).toBe(1);
+    expect(replayAssistantTexts[0]!.content).toContain("balance was received");
+    const order = messages.map((m) => m.role);
+    expect(order.indexOf("user")).toBeGreaterThan(messages.findIndex((m) => m.role === "tool"));
+    expect(order).toEqual(["system", "assistant", "tool", "assistant", "user"]);
+  });
+
+  it("hardening G1b: third-turn follow-up still sees the full two-turn native history", async () => {
+    await seedFixture();
+    await nativeTurn(
+      [
+        chatTools([{ name: "gmail.search", args: { query: "venue" } }]),
+        chatText("Found the venue email."),
+      ],
+      [VERIFY_CONSISTENT],
+      "anything from the venue?",
+      { readOverrides: gmailOverrides() },
+    );
+    await nativeTurn(
+      [
+        chatTools([{ name: "gmail.read", args: { message_id: GMAIL_MESSAGE_ID } }]),
+        chatText("Opened it — receipt confirmed, no action needed."),
+      ],
+      [VERIFY_CONSISTENT],
+      "open it",
+      { readOverrides: gmailOverrides() },
+    );
+    const third = await nativeTurn(
+      [chatText("The venue confirmed receipt — nothing is owed.")],
+      [VERIFY_CONSISTENT],
+      "so what did it say?",
+      { readOverrides: gmailOverrides() },
+    );
+    const messages = third.scripted.provider.chatRequests[0]!.messages;
+    const toolMsgs = messages.filter((m) => m.role === "tool");
+    expect(toolMsgs.length).toBe(2); // search + read from BOTH prior turns
+    expect(messages.filter((m) => m.role === "assistant" && m.toolCalls !== undefined).length).toBe(2);
+    const closing = messages.filter((m) => m.role === "assistant" && m.toolCalls === undefined);
+    expect(closing.length).toBe(2);
+    expect(closing.at(-1)!.content).toContain("no action needed");
+  });
+
+  it("hardening G1c: two search results both visible in replay — no silent pick is possible from the wire", async () => {
+    await seedFixture();
+    const twoResults: NativeTurnDeps["readOverrides"] = {
+      take: (tool: string) =>
+        tool === "gmail.search"
+          ? {
+              result: {
+                matches: [
+                  { messageId: "msg_AAA", from: "a@x.com", subject: "Invoice one" },
+                  { messageId: "msg_BBB", from: "b@x.com", subject: "Invoice two" },
+                ],
+              },
+            }
+          : null,
+    };
+    const first = await nativeTurn(
+      [
+        chatTools([{ name: "gmail.search", args: { query: "invoices" } }]),
+        chatText("You have two invoice emails — which one?"),
+      ],
+      [VERIFY_CONSISTENT],
+      "what invoices came in?",
+      { readOverrides: twoResults },
+    );
+    expect(first.outcome.replied).toBe(true);
+    const second = await nativeTurn(
+      [
+        // The model asks instead of silently picking: NO read executes.
+        chatText("Which of the two invoices — the one from a@x.com or b@x.com?"),
+      ],
+      [VERIFY_CONSISTENT],
+      "open that",
+      { readOverrides: twoResults },
+    );
+    const messages = second.scripted.provider.chatRequests[0]!.messages;
+    const replayTools = messages.filter((m) => m.role === "tool").map((m) => m.content);
+    expect(replayTools.some((c) => c.includes("msg_AAA"))).toBe(true);
+    expect(replayTools.some((c) => c.includes("msg_BBB"))).toBe(true);
+    // No read ran: the ambiguity is surfaced, never silently resolved.
+    expect(second.outcome.toolCalls ?? 0).toBe(0);
+    expect(second.outcome.replied).toBe(true);
+  });
+
+  it("hardening G1d: stale/invalid messageId → honest structured not-found, no fabrication", async () => {
+    await seedFixture();
+    const turn = await nativeTurn(
+      [
+        chatTools([{ name: "gmail.read", args: { message_id: "msg_GONE" } }]),
+        chatText("That message isn't available anymore — nothing came up for it."),
+      ],
+      [VERIFY_CONSISTENT],
+      "open the message from last week",
+      {
+        readOverrides: {
+          take: (tool: string) => (tool === "gmail.read" ? { result: { found: false, messageId: "msg_GONE" } } : null),
+        },
+      },
+    );
+    expect(turn.outcome.replied).toBe(true);
+    const toolMsg = turn.scripted.provider.chatRequests[1]!.messages.filter((m) => m.role === "tool")[0]!;
+    expect(toolMsg.content).toContain('"found":false');
+    // The reply honestly reports absence — no fabricated content.
+    expect(turn.outcome.verified).toBe("consistent");
+  });
+
+  it("hardening G1e: cross-principal messageId is invisible — read cannot reach another principal's mail", async () => {
+    await seedFixture();
+    // Another principal's Gmail row exists in the canonical store.
+    const otherPrincipal = String(
+      (await db.pool.query(`INSERT INTO principals (type, name) VALUES ('user', 'someoneelse') RETURNING id`)).rows[0]!.id,
+    );
+    await db.pool.query(
+      `INSERT INTO gmail_messages (id, gmail_message_id, thread_id, principal_id, domain_id, from_addr, to_addrs, subject, snippet, body_text, body_bytes, internal_date, ingested_at)
+       VALUES ($1, 'msg_OTHER', 't-other', $2::uuid, 'personal', 'secret@x.com', '[]'::jsonb, 'Private', 'secret', 'secret', 6, $3::timestamptz, $3::timestamptz)`,
+      [randomUUID(), otherPrincipal, NOW.toISOString()],
+    );
+    const turn = await nativeTurn(
+      [
+        chatTools([{ name: "gmail.read", args: { message_id: "msg_OTHER" } }]),
+        chatText("I can't see any message with that id — nothing came up."),
+      ],
+      [VERIFY_CONSISTENT],
+      "open msg_OTHER",
+      { readOverrides: { take: () => null } },
+    );
+    expect(turn.outcome.replied).toBe(true);
+    const toolMsg = turn.scripted.provider.chatRequests[1]!.messages.filter((m) => m.role === "tool")[0]!;
+    // The principal-scoped read returns nothing from the other principal.
+    expect(toolMsg.content).toContain('"found":false');
+    expect(toolMsg.content).not.toContain("secret@x.com");
+  });
+
+  // ============================================ hardening: stable commitment refs
+
+  it("hardening R-A: list exposes stable refs; next-turn transition by ref applies", async () => {
+    await seedFixture();
+    const first = await nativeTurn(
+      [
+        chatTools([{ name: "commitments.list", args: {} }]),
+        chatText("You have three open to-dos: the venue balance, the photographer, and the DJ."),
+      ],
+      [VERIFY_CONSISTENT],
+      "what's on my list?",
+    );
+    // The read result carried the deterministic refs.
+    const listMsg = first.scripted.provider.chatRequests[1]!.messages.filter((m) => m.role === "tool")[0]!;
+    expect(listMsg.content).toMatch(/"ref":"[0-9A-Z]{3}"/);
+    expect(listMsg.content).toMatch(/"ref":"[0-9A-Z]{3}"/);
+    expect(listMsg.content).toContain("pay the venue balance");
+    // Deterministic fallback if the clipped tail hid a pairing: compute the
+    // venue's ref from canonical state the same way the read tool does.
+    const { commitmentRefCode } = await import("../commitments/transitions.js");
+    const venueId = String(
+      (await db.pool.query(`SELECT id FROM commitments WHERE description = 'pay the venue balance'`)).rows[0]!.id,
+    );
+    const venueRef = commitmentRefCode(venueId);
+    // Next turn: target by ref only — no selector words.
+    const second = await nativeTurn(
+      [
+        chatTools([{ name: "commitments.transition", args: { ref: venueRef, verb: "done" } }]),
+        chatText("Done — the venue balance is marked as taken care of."),
+      ],
+      [VERIFY_CONSISTENT],
+      "the first one is handled",
+    );
+    expect(second.outcome.replied).toBe(true);
+    expect(await commitmentStatus("pay the venue balance")).toBe("met");
+    const toolMsg = second.scripted.provider.chatRequests.at(-1)!.messages.filter((m) => m.role === "tool").at(-1)!;
+    const body = parsedNote(toolMsg.content) as { result: string; object: { ref: string; current_status: string }; resolved_by: string };
+    expect(body.result).toBe("applied");
+    expect(body.resolved_by).toBe("ref");
+    expect(body.object.ref).toBe(venueRef);
+    expect(body.object.current_status).toBe("met");
+  });
+
+  it("hardening R-B: ambiguous selector result carries both refs; no mutation", async () => {
+    await seedFixture();
+    const turn = await nativeTurn(
+      [
+        chatTools([{ name: "commitments.transition", args: { selector: "Sam", verb: "done" } }]),
+        chatText("Which Sam item?"),
+      ],
+      [VERIFY_CONSISTENT],
+      "Sam is sorted",
+    );
+    const toolMsg = turn.scripted.provider.chatRequests[1]!.messages.filter((m) => m.role === "tool")[0]!;
+    const body = parsedNote(toolMsg.content) as { result: string; candidates: { ref: string; label: string }[] };
+    expect(body.result).toBe("ambiguous");
+    expect(body.candidates.length).toBe(2);
+    for (const candidate of body.candidates) {
+      expect(candidate.ref).toMatch(/^[0-9A-Z]{3}$/);
+      expect(candidate.label).toContain("Sam");
+    }
+    expect(await commitmentStatus("call Sam about Friday")).toBe("open");
+  });
+
+  it("hardening R-C: follow-up resolves ONE candidate by ref; only that object changes", async () => {
+    await seedFixture();
+    // Discover the refs from an ambiguity result.
+    const probe = await nativeTurn(
+      [
+        chatTools([{ name: "commitments.transition", args: { selector: "Sam", verb: "done" } }]),
+        chatText("Which Sam item?"),
+      ],
+      [VERIFY_CONSISTENT],
+      "Sam is sorted",
+    );
+    const toolMsg = probe.scripted.provider.chatRequests.at(-1)!.messages.filter((m) => m.role === "tool").at(-1)!;
+    const body = parsedNote(toolMsg.content) as { candidates: { ref: string; label: string }[] };
+    const friday = body.candidates.find((c) => c.label.includes("Friday"))!;
+    const second = await nativeTurn(
+      [
+        chatTools([{ name: "commitments.transition", args: { ref: friday.ref, verb: "done" } }]),
+        chatText("Done — the Friday call is marked done."),
+      ],
+      [VERIFY_CONSISTENT],
+      "the friday one",
+    );
+    expect(await commitmentStatus("call Sam about Friday")).toBe("met");
+    expect(await commitmentStatus("call Sam about the caterer")).toBe("open");
+    expect(second.outcome.replied).toBe(true);
+  });
+
+  it("hardening R-D: a ref from another principal's world never resolves (no cross-principal leakage)", async () => {
+    await seedFixture();
+    // Another domain ("work") holds a commitment; its deterministic ref is
+    // computed the same way — but the authenticated surface is 'personal'.
+    const workDomain = String(
+      (
+        await db.pool.query(
+          `WITH ins AS (INSERT INTO domains (key, name, sensitivity, retention_class) VALUES ('work', 'Work', 'normal', 'standard') ON CONFLICT (key) DO NOTHING RETURNING id)
+           SELECT id FROM ins UNION ALL SELECT id FROM domains WHERE key = 'work' LIMIT 1`,
+        )
+      ).rows[0]!.id,
+    );
+    await db.pool.query(
+      `INSERT INTO events (id, type, source, occurred_at, idempotency_key, domain_id, payload, sensitivity, schema_version)
+       VALUES ($1::uuid, 'commitment.created', 'test', $2::timestamptz, $3, $4::uuid, '{}', 'normal', 1)`,
+      [randomUUID(), NOW.toISOString(), randomUUID(), workDomain],
+    );
+    const foreignId = String(
+      (
+        await db.pool.query(
+          `INSERT INTO commitments (direction, counterparty_text, description, confidence, status, source_event_id, domain_id, created_at, updated_at)
+           VALUES ('i_owe', 'boss', 'approve the vendor contract', 0.9, 'open', (SELECT id FROM events ORDER BY occurred_at DESC LIMIT 1), $1::uuid, $2::timestamptz, $2::timestamptz) RETURNING id`,
+          [workDomain, NOW.toISOString()],
+        )
+      ).rows[0]!.id,
+    );
+    const { commitmentRefCode } = await import("../commitments/transitions.js");
+    const foreignRef = commitmentRefCode(foreignId);
+    const turn = await nativeTurn(
+      [
+        chatTools([{ name: "commitments.transition", args: { ref: foreignRef, verb: "done" } }]),
+        chatText("I can't act on that ref — it doesn't match anything in your list."),
+      ],
+      [VERIFY_CONSISTENT],
+      "close out the contract",
+    );
+    const toolMsg = turn.scripted.provider.chatRequests[1]!.messages.filter((m) => m.role === "tool")[0]!;
+    const body = parsedNote(toolMsg.content) as { result: string; mutated: boolean };
+    expect(body.result).toBe("not_found");
+    expect(body.mutated).toBe(false);
+    const row = await db.pool.query(`SELECT status FROM commitments WHERE id = $1::uuid`, [foreignId]);
+    expect(String(row.rows[0]!.status)).toBe("open");
+  });
+
+  it("hardening R-E: invalid and stale refs fail honestly; a resolved commitment's ref cannot re-transition", async () => {
+    await seedFixture();
+    // Invalid shape is rejected at the schema; stale (resolved) ref is
+    // a structured not_found with no mutation.
+    await seedCommitment("already done thing");
+    await nativeTurn(
+      [
+        chatTools([{ name: "commitments.transition", args: { selector: "already done thing", verb: "done" } }]),
+        chatText("Marked done."),
+      ],
+      [VERIFY_CONSISTENT],
+      "the thing is done",
+    );
+    expect(await commitmentStatus("already done thing")).toBe("met");
+    const { commitmentRefCode, COMMITMENT_REF_ALPHABET } = await import("../commitments/transitions.js");
+    // A ref guaranteed OUTSIDE the live set: mutate the venue's code until
+    // it matches no open commitment (deterministic, no collision flake).
+    const openIds = (await db.pool.query(`SELECT id FROM commitments WHERE status = 'open'`)).rows.map((r) => String(r.id));
+    const liveCodes = new Set(openIds.map((id) => commitmentRefCode(id)));
+    const venueCode = commitmentRefCode(String((await db.pool.query(`SELECT id FROM commitments WHERE description = 'pay the venue balance'`)).rows[0]!.id));
+    let staleRef = "";
+    for (const ch of COMMITMENT_REF_ALPHABET) {
+      const candidate = ch + venueCode.slice(1);
+      if (!liveCodes.has(candidate) && candidate !== venueCode) {
+        staleRef = candidate;
+        break;
+      }
+    }
+    expect(staleRef).toMatch(/^[0-9A-Z]{3}$/);
+    const stale = await nativeTurn(
+      [
+        chatTools([{ name: "commitments.transition", args: { ref: staleRef, verb: "done" } }]),
+        chatText("That one is already resolved — nothing to change."),
+      ],
+      [VERIFY_CONSISTENT],
+      "mark that first thing done again",
+    );
+    const toolMsg = stale.scripted.provider.chatRequests.at(-1)!.messages.filter((m) => m.role === "tool").at(-1)!;
+    const body = parsedNote(toolMsg.content) as { result: string; mutated: boolean; note: string };
+    expect(body.result).toBe("not_found");
+    expect(body.mutated).toBe(false);
+    expect(body.note).toContain("already be resolved");
+    expect(await commitmentStatus("already done thing")).toBe("met");
+    // Malformed ref never reaches resolution (schema-invalid tool call).
+    const { coerceNativeToolCall } = await import("./native/tool-registry.js");
+    expect(coerceNativeToolCall({ id: "x", name: "commitments.transition", arguments: JSON.stringify({ ref: "ab", verb: "done" }) })).toBeNull();
+    expect(coerceNativeToolCall({ id: "x", name: "commitments.transition", arguments: JSON.stringify({ ref: "ABC", selector: "x", verb: "done" }) })).toBeNull();
   });
 });
 

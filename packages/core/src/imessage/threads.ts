@@ -422,6 +422,11 @@ export interface ToolTrajectoryTurn {
   readonly turnId: string;
   readonly at: string;
   readonly entries: readonly ToolTrajectoryEntry[];
+  /** Semantic-bridge G1 completion: the bounded, redacted text the model
+   *  finally shipped that turn — replayed as the CLOSING assistant message
+   *  so the provider sees a COMPLETE exchange (tool_call → tool_result →
+   *  assistant text) before the next user turn, not a dangling tool loop. */
+  readonly reply?: string;
 }
 
 export const TOOL_TRAJECTORY_TURNS_KEPT = 5;
@@ -436,6 +441,8 @@ export const TOOL_TRAJECTORY_SERIALIZED_MAX_CHARS = 8000;
 export const TOOL_TRAJECTORY_CALL_ID_MAX_CHARS = 64;
 export const TOOL_TRAJECTORY_REPLAY_ARGS_MAX_CHARS = 240;
 export const TOOL_TRAJECTORY_REPLAY_RESULT_MAX_CHARS = 480;
+/** The shipped final reply, bounded for replay as the closing turn. */
+export const TOOL_TRAJECTORY_REPLY_MAX_CHARS = 400;
 /** Replay window: at most this many recent turns come back as NATIVE
  *  tool_call/tool_result messages (never prose), within the byte budget. */
 export const TOOL_TRAJECTORY_REPLAY_TURNS_MAX = 2;
@@ -757,7 +764,7 @@ function parseToolTrajectory(value: unknown): ToolTrajectoryTurn[] | null {
     if (typeof rawTurn !== "object" || rawTurn === null || Array.isArray(rawTurn)) return null;
     const turnObj = rawTurn as Record<string, unknown>;
     for (const key of Object.keys(turnObj)) {
-      if (key !== "turnId" && key !== "at" && key !== "entries") return null;
+      if (key !== "turnId" && key !== "at" && key !== "entries" && key !== "reply") return null;
     }
     if (typeof turnObj.turnId !== "string" || turnObj.turnId.length === 0 || turnObj.turnId.length > 64) return null;
     if (typeof turnObj.at !== "string" || Number.isNaN(Date.parse(turnObj.at))) return null;
@@ -826,7 +833,20 @@ function parseToolTrajectory(value: unknown): ToolTrajectoryTurn[] | null {
       }
       entries.push(entry);
     }
-    turns.push({ turnId: turnObj.turnId, at: turnObj.at, entries });
+    const turn: ToolTrajectoryTurn = {
+      turnId: turnObj.turnId,
+      at: turnObj.at,
+      entries,
+      ...(turnObj.reply !== undefined
+        ? (() => {
+            if (typeof turnObj.reply !== "string" || turnObj.reply.trim().length === 0) return null;
+            const reply = redactContent(turnObj.reply).slice(0, TOOL_TRAJECTORY_REPLY_MAX_CHARS);
+            return reply.length > 0 ? { reply } : null;
+          })()
+        : {}),
+    };
+    if (turnObj.reply !== undefined && turn.reply === undefined) return null;
+    turns.push(turn);
   }
   return turns;
 }
@@ -1329,7 +1349,7 @@ export function renderTrajectoryHistory(
 
 /** One replayed tool call in provider-normalized shape (G1). */
 export type NativeReplayMessage =
-  | { readonly role: "assistant"; readonly content: string; readonly toolCalls: readonly { readonly id: string; readonly name: string; readonly arguments: string }[] }
+  | { readonly role: "assistant"; readonly content: string; readonly toolCalls?: readonly { readonly id: string; readonly name: string; readonly arguments: string }[] }
   | { readonly role: "tool"; readonly content: string; readonly toolCallId: string };
 
 export interface TrajectoryReplay {
@@ -1380,6 +1400,12 @@ export function renderTrajectoryReplay(metadata: ThreadMetadata | null): Traject
         toolCallId: entry.callId!,
         content: `[replayed tool result | ${entry.tool} | ${entry.status}] ${redactContent(entry.result!)}`,
       });
+    }
+    // Close the exchange with the text the model actually shipped — the
+    // provider must see a COMPLETE assistant exchange, never a dangling
+    // tool loop, before the next user turn.
+    if (turn.reply !== undefined) {
+      messages.push({ role: "assistant", content: redactContent(turn.reply) });
     }
   }
   return { messages, turnIds: picked.map((turn) => turn.turnId) };
