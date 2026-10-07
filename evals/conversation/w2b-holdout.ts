@@ -127,7 +127,7 @@ function loadHoldout(options: ReadonlyMap<string, string>): { cases: V2Case[]; h
     throw new Error(`holdout sha mismatch: expected ${expectedSha}, got ${actualSha} — refusing to run`);
   }
   const raw = parse(readFileSync(holdoutFile, "utf8")) as { version: number; cases: V2Case[] };
-  if (raw.version !== 3 && raw.version !== 4) throw new Error(`holdout: version must be 3 or 4, got ${String(raw.version)}`);
+  if (raw.version !== 3 && raw.version !== 4 && raw.version !== 5) throw new Error(`holdout: version must be 3, 4, or 5, got ${String(raw.version)}`);
   return { cases: raw.cases, holdoutSha256: expectedSha ?? actualSha };
 }
 
@@ -491,6 +491,17 @@ async function main(): Promise<void> {
         if (byDesc.get(description) !== status) bad.push(`"${description}"=${byDesc.get(description) ?? "(gone)"}≠${status}`);
       }
       checks["commitment_effects"] = bad.length === 0;
+      failures.push(...bad);
+    }
+    if (expect["commitment_unchanged"] !== undefined) {
+      const wanted = expect["commitment_unchanged"] as Record<string, string>;
+      const rows = await q(`SELECT description, status FROM commitments`);
+      const byDesc = new Map(rows.map((r) => [String(r.description), String(r.status)]));
+      const bad: string[] = [];
+      for (const [description, status] of Object.entries(wanted)) {
+        if (byDesc.get(description) !== status) bad.push(`"${description}"=${byDesc.get(description) ?? "(gone)"}≠${status} (must be unchanged)`);
+      }
+      checks["commitment_unchanged"] = bad.length === 0;
       failures.push(...bad);
     }
     if (Array.isArray(expect["staged_items"])) {
