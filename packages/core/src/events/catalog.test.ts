@@ -44,8 +44,11 @@ describe("event catalog v1", () => {
       "assignment.succeeded",
       "assignment.failed",
       "assignment.blocked",
+      // W1 additive (ADR-0018): the attention lifecycle, content-free payloads.
+      "attention.item.opened",
+      "attention.item.resolved",
     ]);
-    expect(EVENT_CATALOG_V1.length).toBe(38);
+    expect(EVENT_CATALOG_V1.length).toBe(40);
   });
 
   it("accepts catalog names and rejects everything else", () => {
