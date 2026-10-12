@@ -13,6 +13,7 @@
 import { UUID_RE } from "../events/envelope.js";
 import { recordAudit } from "../actions/audit.js";
 import type { SqlExecutor } from "../actions/audit.js";
+import type { AttentionItemRow } from "../attention/types.js";
 import { URGENCY_RANK } from "../review/batching.js";
 import {
   DEFAULT_NOTIFICATIONS_CONFIG,
@@ -29,7 +30,7 @@ export const NOTIFICATION_STATUSES = [
 ] as const;
 export type NotificationStatus = (typeof NOTIFICATION_STATUSES)[number];
 
-export const NOTIFICATION_SOURCE_TYPES = ["escalation", "brief", "run", "calendar", "calibration"] as const;
+export const NOTIFICATION_SOURCE_TYPES = ["escalation", "brief", "run", "calendar", "calibration", "attention"] as const;
 export type NotificationSourceType = (typeof NOTIFICATION_SOURCE_TYPES)[number];
 
 export interface NotificationRow {
@@ -326,7 +327,7 @@ export async function createNotification(
     );
   }
   if (!isSourceType(input.sourceType)) {
-    throw new NotificationInputError(`sourceType must be one of escalation|brief|run|calendar|calibration`);
+    throw new NotificationInputError(`sourceType must be one of escalation|brief|run|calendar|calibration|attention`);
   }
   if (typeof input.title !== "string" || input.title.trim().length === 0 || input.title.length > 280) {
     throw new NotificationInputError("title must be a non-empty string of at most 280 chars");
@@ -1057,5 +1058,62 @@ export async function enqueueCalendarChangeNotification(
       createdBy,
     },
     { config, actor: "service:calendar-sync", now: resolveNow(input.now) },
+  );
+}
+
+export interface AttentionNotificationInput {
+  /** The durable attention item this delivery projects (ADR-0018 §1.1). */
+  readonly item: AttentionItemRow;
+  readonly config?: NotificationsConfig;
+  readonly now?: Date | (() => Date);
+}
+
+/**
+ * Producer hook for the attention lane (W1, ADR-0018 §4): persists a
+ * kind=attention notification for an attention item. Payload is the
+ * AttentionNotificationPayload contract (content + optional whyItMatters and
+ * todayUrl — the edge renders that exact projection); todayUrl exists only
+ * when TODAY_BASE_URL is deployed. Auto-approved per policy
+ * (notifications.autoApproveKinds += attention, owner-directed like brief).
+ * Provenance: sourceType 'attention', sourceId = item.id. The caller stamps
+ * the delivery attempt (attention/delivery.ts markDeliveryAttempted) — this
+ * hook records only, per the lane split.
+ */
+export async function enqueueAttentionNotification(
+  db: SqlExecutor,
+  input: AttentionNotificationInput,
+): Promise<NotificationRow> {
+  const domainKey = "personal";
+  const domain = await db.query("SELECT id FROM domains WHERE key = $1", [domainKey]);
+  const domainId = domain.rows[0]?.id;
+  if (domainId === undefined) {
+    throw new NotificationInputError(`domain "${domainKey}" is not seeded`);
+  }
+  const createdBy = await resolveServicePrincipal(db, "service/attention");
+  const config = input.config ?? (await workflowNotificationsConfig());
+  const todayBase = process.env["TODAY_BASE_URL"];
+  const todayUrl =
+    todayBase !== undefined && todayBase.length > 0
+      ? `${todayBase}/ui#item-${input.item.id}`
+      : undefined;
+  const payload: Record<string, unknown> = { content: input.item.summary };
+  if (input.item.whyItMatters !== null && input.item.whyItMatters !== undefined) {
+    payload["whyItMatters"] = input.item.whyItMatters;
+  }
+  if (todayUrl !== undefined) {
+    payload["todayUrl"] = todayUrl;
+  }
+  return createNotification(
+    db,
+    {
+      kind: "attention",
+      title: input.item.title,
+      payload,
+      domainId: String(domainId),
+      sourceType: "attention",
+      sourceId: input.item.id,
+      createdBy,
+    },
+    { config, actor: "service:attention", now: resolveNow(input.now) },
   );
 }

@@ -142,6 +142,23 @@ export {
 } from "./lesson-harvest-workflows.js";
 
 export {
+  attentionLivenessWorkflow,
+  ATTENTION_LIVENESS_CRON,
+  ATTENTION_LIVENESS_ACTOR,
+  ATTENTION_RETRY_LOCAL_END_HOUR,
+  ATTENTION_RETRY_LOCAL_START_HOUR,
+  attentionPolicyOf,
+  DEFAULT_ATTENTION_POLICY,
+  isAttentionRetryLocalHour,
+  loadAttentionPolicy,
+  localAttentionRetryHour,
+  runAttentionLivenessTick,
+  type AttentionLivenessDeps,
+  type AttentionLivenessResult,
+  type AttentionPolicy,
+} from "./attention-workflows.js";
+
+export {
   APPROVE_SIGNAL_PREFIX,
   createWorkflowRuntime,
   type EventSender,
