@@ -6,6 +6,8 @@ import { registerReviewRoutes } from "./routes/review.js";
 import { registerHarnessRoutes } from "./routes/harness.js";
 import { registerImessageHarnessRoutes } from "./routes/harness-imessage.js";
 import { registerNotificationRoutes } from "./routes/notifications.js";
+import { registerAttentionRoutes } from "./routes/attention.js";
+import { registerUiRoutes } from "./routes/ui.js";
 import type { PromotionDb } from "@jehad/core";
 
 const HOST = "127.0.0.1";
@@ -23,15 +25,48 @@ export interface AppOptions {
 }
 
 export async function buildApp(opts: AppOptions = {}) {
-  const app = Fastify({ logger: false });
+  const app = Fastify({
+    logger: false,
+    // Lane D (Today, ADR-0019), additive: auth.ts's publicPaths gate
+    // exact-matches static paths only, so the contract's parameterized
+    // /ui/outcome/:ref is rewritten onto the static /ui/outcome?ref=… shape
+    // BEFORE the bearer hook runs — cookie-browsers (no Authorization
+    // header) reach the session-gated view. Every other URL passes through
+    // untouched; the handler serves both shapes.
+    rewriteUrl(request) {
+      const url = request.url ?? "/";
+      const q = url.indexOf("?");
+      const path = q === -1 ? url : url.slice(0, q);
+      const suffix = q === -1 ? "" : url.slice(q);
+      if (path.startsWith("/ui/outcome/")) {
+        let ref = path.slice("/ui/outcome/".length);
+        try {
+          ref = decodeURIComponent(ref);
+        } catch {
+          // keep raw ref — the view 404s unmatchable refs fail-closed
+        }
+        return `/ui/outcome?ref=${encodeURIComponent(ref)}${suffix}`;
+      }
+      return url;
+    },
+  });
 
   if (opts.db !== undefined) {
-    setupAuth(app, { db: opts.db, publicPaths: ["/healthz"] });
+    setupAuth(app, {
+      db: opts.db,
+      // Lane D (Today): /ui* are session-cookie surfaces (ADR-0019) — the
+      // paste endpoint is pre-auth by design; every other /ui path enforces
+      // the signed session + CSRF inside its handler. Machine principals
+      // never mint sessions (session.ts enforces type === "user").
+      publicPaths: ["/healthz", "/ui", "/ui/session", "/ui/action", "/ui/outcome"],
+    });
     registerEventRoutes(app, { db: opts.db });
     registerReviewRoutes(app, { db: opts.db });
     registerHarnessRoutes(app, { db: opts.db });
     registerImessageHarnessRoutes(app, { db: opts.db });
     registerNotificationRoutes(app, { db: opts.db });
+    registerAttentionRoutes(app, { db: opts.db });
+    registerUiRoutes(app, { db: opts.db });
   }
 
   app.get("/healthz", async () => ({ ok: true }) as const);
