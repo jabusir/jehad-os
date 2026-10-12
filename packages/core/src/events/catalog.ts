@@ -63,6 +63,13 @@ export const EVENT_CATALOG_V1 = [
   "assignment.succeeded",
   "assignment.failed",
   "assignment.blocked",
+  // W1 additive (product-reset plan §5; ADR-0018): the attention lifecycle.
+  // Payloads are CONTENT-FREE by contract — ids/kind/level on opened,
+  // resolvedBy + reason on resolved; item title/summary live only on the
+  // attention_items row (W1 contract invariant 8). Additive names only
+  // (ADR-0006); schemaVersion stays 1.
+  "attention.item.opened",
+  "attention.item.resolved",
 ] as const;
 
 export type EventTypeName = (typeof EVENT_CATALOG_V1)[number];
