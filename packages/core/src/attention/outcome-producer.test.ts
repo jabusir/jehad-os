@@ -85,7 +85,7 @@ describe.skipIf(!TEST_DATABASE_URL || !KERNEL_PRESENT)(
 
     async function itemsFor(outcomeId: string): Promise<Array<Record<string, unknown>>> {
       const result = await q(
-        `SELECT * FROM attention_items WHERE source_type = 'outcome' AND source_object_id = $1::uuid
+        `SELECT * FROM attention_items WHERE source_type = 'outcome' AND source_object_id = $1
          ORDER BY kind ASC`,
         [outcomeId],
       );
@@ -154,12 +154,12 @@ describe.skipIf(!TEST_DATABASE_URL || !KERNEL_PRESENT)(
       expect(after).toHaveLength(1);
       expect(after[0]!["occurrences"]).toBe(1);
       expect(after[0]!["change_fingerprint"]).toBe(before[0]!["change_fingerprint"]);
-      expect(after[0]!["updated_at"]).toBe(before[0]!["updated_at"]);
+      expect(String(after[0]!["updated_at"])).toBe(String(before[0]!["updated_at"]));
       // No second push for this outcome (the file shares one isolated db —
       // scope the count to this outcome's item rows).
       const notifications = await q(
-        `SELECT 1 FROM notifications n JOIN attention_items ai ON ai.id = n.source_id
-         WHERE n.kind = 'attention' AND ai.source_object_id = $1::uuid`,
+        `SELECT 1 FROM notifications n JOIN attention_items ai ON ai.id = n.source_id::uuid
+         WHERE n.kind = 'attention' AND ai.source_object_id = $1`,
         [id],
       );
       expect(notifications.rows).toHaveLength(1);

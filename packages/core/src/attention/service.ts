@@ -39,14 +39,25 @@ import {
   type OpenAttentionResult,
 } from "./types.js";
 
-/** Structural slice of pg.Pool — connect() yields a transaction-capable client. */
+/**
+ * Structural slice of pg.Pool — connect() yields a transaction-capable
+ * client. OPTIONAL: a bare transaction client (a caller already inside its
+ * own transaction, e.g. transitionOutcome on a client) satisfies AttentionDb
+ * too, and the write then rides the CALLER's transaction (strictly stronger
+ * atomicity than the Pool path below). Production callers pass Pools; tests
+ * and transactional callers pass clients.
+ */
 export interface AttentionDb extends EventStoreExecutor, SqlExecutor {
-  connect(): Promise<AttentionTx & { release(): void }>;
+  connect?(): Promise<AttentionTx & { release(): void }>;
 }
 
 export interface AttentionTx extends EventStoreExecutor, SqlExecutor {}
 
 async function withTransaction<T>(db: AttentionDb, fn: (tx: AttentionTx) => Promise<T>): Promise<T> {
+  // Client path: the caller owns BEGIN/COMMIT — never open a second
+  // connection (that would break same-transaction atomicity with the
+  // caller's transition).
+  if (typeof db.connect !== "function") return fn(db as AttentionTx);
   const client = await db.connect();
   try {
     await client.query("BEGIN");
@@ -116,7 +127,7 @@ function jsonbArray(value: unknown): readonly unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-function toAttentionItem(row: AttentionSqlRow): AttentionItemRow {
+export function toAttentionItem(row: AttentionSqlRow): AttentionItemRow {
   return {
     id: row.id,
     principalId: row.principal_id,

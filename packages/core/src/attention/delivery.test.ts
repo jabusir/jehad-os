@@ -314,6 +314,9 @@ describe.skipIf(!TEST_DATABASE_URL || !KERNEL_PRESENT)(
     });
 
     it("retryEligibleUndelivered enqueues only eligible items and skips snoozed/digest/in-flight", async () => {
+      // Fresh slate: earlier tests in this describe leave open items behind.
+      await db.pool.query("DELETE FROM notifications WHERE kind = 'attention'");
+      await db.pool.query("DELETE FROM attention_items");
       const eligible = await insertItem({ title: "eligible-open" });
       const eligibleSeen = await insertItem({ state: "seen", title: "eligible-seen" });
       const snoozed = await insertItem({
@@ -339,25 +342,34 @@ describe.skipIf(!TEST_DATABASE_URL || !KERNEL_PRESENT)(
         expect(Number(row["delivery_attempts"])).toBe(1);
         expect(row["last_delivery_attempt_at"]).not.toBeNull();
         const pushed = await db.pool.query(
-          `SELECT status FROM notifications WHERE kind = 'attention' AND source_id = $1::uuid`,
+          `SELECT status FROM notifications WHERE kind = 'attention' AND source_id = $1`,
           [id],
         );
         expect(pushed.rows).toHaveLength(1);
         expect(String(pushed.rows[0]!["status"])).toBe("approved");
       }
-      for (const id of [snoozed, digest, inFlight]) {
+      for (const id of [snoozed, digest]) {
         const pushed = await db.pool.query(
-          `SELECT 1 FROM notifications WHERE kind = 'attention' AND source_id = $1::uuid`,
+          `SELECT 1 FROM notifications WHERE kind = 'attention' AND source_id = $1`,
           [id],
         );
         expect(pushed.rows).toHaveLength(0);
       }
+      // inFlight keeps EXACTLY its pre-existing fixture row — no second push.
+      const inFlightRows = await db.pool.query(
+        `SELECT status FROM notifications WHERE kind = 'attention' AND source_id = $1`,
+        [inFlight],
+      );
+      expect(inFlightRows.rows).toHaveLength(1);
+      expect(String(inFlightRows.rows[0]!["status"])).toBe("pending");
 
       // Idempotent re-run: the two just-enqueued rows are now in-flight.
       expect(await delivery.retryEligibleUndelivered(exec, { now: NOW, config })).toBe(0);
     });
 
     it("retry defers inside quiet hours (22:00–07:00 PT) without dropping the item", async () => {
+      await db.pool.query("DELETE FROM notifications WHERE kind = 'attention'");
+      await db.pool.query("DELETE FROM attention_items");
       const late = await insertItem({ title: "quiet-hours-item" });
       // 2026-06-16T06:30:00Z == 23:30 PT (PDT, UTC-7) — inside quiet hours.
       const count = await delivery.retryEligibleUndelivered(exec, {
@@ -366,7 +378,7 @@ describe.skipIf(!TEST_DATABASE_URL || !KERNEL_PRESENT)(
       });
       expect(count).toBe(0);
       const pushed = await db.pool.query(
-        `SELECT 1 FROM notifications WHERE kind = 'attention' AND source_id = $1::uuid`,
+        `SELECT 1 FROM notifications WHERE kind = 'attention' AND source_id = $1`,
         [late],
       );
       expect(pushed.rows).toHaveLength(0);

@@ -22,6 +22,7 @@
     "eval:semantic:holdout": "pnpm run build && tsc -p evals/tsconfig.json && tsx evals/conversation/semantic-live.ts --holdout",
     "renew:ingest": "pnpm --filter @jehad/api exec tsx src/renew-ingest.ts",
     "setup:db": "bash infra/dev/setup-db.sh",
+    "migrate": "pnpm --filter @jehad/db exec tsx src/migrate.ts up",
     "backup": "bash infra/dev/backup.sh",
     "restore": "bash infra/dev/restore.sh"
   },

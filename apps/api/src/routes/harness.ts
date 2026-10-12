@@ -43,6 +43,7 @@ import {
   claimNextApprovedNotification,
   markDelivered,
   recordAudit,
+  stampAttentionDelivered,
 } from "@jehad/core";
 
 export interface HarnessRoutesOptions {
@@ -276,6 +277,16 @@ export function registerHarnessRoutes(
           grantId: request.harnessGrantId ?? null,
           grantCapability: request.harnessCapability ?? null,
         });
+        // Attention contract (ADR-0018 §1.1): a successful channel accept is
+        // the ONLY thing that stamps the item's last_delivered_at — and it
+        // must stamp even if the optional fingerprint report path fails.
+        if (notification.kind === "attention" && notification.sourceId !== null) {
+          await stampAttentionDelivered(
+            db,
+            notification.sourceId,
+            new Date(notification.deliveredAt ?? Date.now()),
+          );
+        }
         if (report !== undefined) {
           if (notification.deliveredAt === null) {
             throw new Error("delivered report missing delivered_at (fingerprint not recorded)");

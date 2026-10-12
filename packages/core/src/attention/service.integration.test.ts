@@ -337,12 +337,13 @@ describe.skipIf(TEST_DATABASE_URL === undefined)("attention service (W1, ADR-001
 
   it("migration 029 round-trip: down drops the table, re-up restores it", async () => {
     const rolled = await migrateDown(db.pool, { to: "028_gmail_principal_uuid" });
-    expect(rolled).toEqual(["029_attention_items"]);
+    // 030 exists post-merge: reverse-lexical down rolls it back first.
+    expect(rolled).toEqual(["030_attention_kind", "029_attention_items"]);
     const exists = await q(`SELECT 1 FROM information_schema.tables WHERE table_name = 'attention_items'`);
     expect(exists.rows).toHaveLength(0);
 
     const applied = await migrateUp(db.pool);
-    expect(applied).toEqual(["029_attention_items"]);
+    expect(applied).toEqual(["029_attention_items", "030_attention_kind"]);
     const recreated = await q(`SELECT 1 FROM information_schema.tables WHERE table_name = 'attention_items'`);
     expect(recreated.rows).toHaveLength(1);
   });

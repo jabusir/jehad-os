@@ -15,6 +15,7 @@
 //    never in tick logs.
 
 import type { SqlExecutor } from "../actions/audit.js";
+import { toAttentionItem } from "./service.js";
 import {
   enqueueAttentionNotification,
   type NotificationRow,
@@ -129,7 +130,7 @@ export async function retryEligibleUndelivered(
        AND last_delivered_at IS NULL
        AND NOT EXISTS (
          SELECT 1 FROM notifications n
-         WHERE n.kind = 'attention' AND n.source_id = attention_items.id
+         WHERE n.kind = 'attention' AND n.source_id = attention_items.id::text
            AND n.status IN ('pending', 'approved') AND n.expires_at > $1::timestamptz
        )
      ORDER BY first_raised_at ASC
@@ -157,7 +158,7 @@ export async function retryEligibleUndelivered(
        FROM attention_items WHERE id = $1::uuid`,
       [row.id],
     );
-    const item = fresh.rows[0] as unknown as AttentionItemRow | undefined;
+    const item = fresh.rows.length > 0 ? toAttentionItem(fresh.rows[0] as never) : undefined;
     if (item === undefined) continue;
     if (item.state !== "open" && item.state !== "seen") continue;
     const decision = decideDelivery({

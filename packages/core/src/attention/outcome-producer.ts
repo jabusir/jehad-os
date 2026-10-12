@@ -15,7 +15,8 @@
 // (w1-contract "Resolvers"): importing outcomes/service.ts loads this file,
 // so the resolver is registered before any attention flow can run.
 
-import type { OutcomeDb, OutcomeRow, OutcomeStatus } from "../outcomes/service.js";
+import type { OutcomeRow, OutcomeStatus } from "../outcomes/service.js";
+import type { AttentionDb } from "./service.js";
 import { registerAttentionResolver } from "./resolvers.js";
 import { openOrBumpOrReopen, resolveAttentionBySource } from "./service.js";
 import type { AttentionResolver } from "./resolvers.js";
@@ -50,9 +51,13 @@ const PRODUCED_KINDS = {
 /**
  * The ONE producer seam, called by transitionOutcome after its canonical
  * event (same executor ⇒ atomic with the transition).
+ *
+ * db is transitionOutcome's OutcomeDb — a pg Pool (own transaction via
+ * AttentionDb.connect) or a bare transaction client (the write rides the
+ * caller's transaction; AttentionDb.connect is optional, service.ts header).
  */
 export async function emitOutcomeAttention(
-  db: OutcomeDb,
+  db: AttentionDb,
   outcome: OutcomeRow,
   toStatus: OutcomeStatus,
   opts: { now: Date; actor: string },
