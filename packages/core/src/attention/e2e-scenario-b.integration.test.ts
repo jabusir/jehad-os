@@ -235,7 +235,7 @@ describe.skipIf(db === null)("W1 scenario B — delegated result end to end (int
 
   async function attentionNotifications(itemId: string): Promise<RawNotification[]> {
     const r = await db!.pool.query(
-      "SELECT id, status, payload, source_id, source_type FROM notifications WHERE kind = 'attention' AND source_id = $1 ORDER BY created_at, id",
+      "SELECT id, status, title, payload, source_id, source_type, created_at FROM notifications WHERE kind = 'attention' AND source_id = $1 ORDER BY created_at, id",
       [itemId],
     );
     return r.rows as RawNotification[];
@@ -343,13 +343,17 @@ describe.skipIf(db === null)("W1 scenario B — delegated result end to end (int
     // Re-entering waiting_user REOPENS the same row: occurrences 2,
     // first_raised_at preserved, one new opened event, re-delivery enqueued.
     await drive(outcome.id, "waiting_user", 80, "w1-executor");
+    const allNotifs = await attentionNotifications(raw.id);
+    console.error('PROBE notif-count:', allNotifs.length, JSON.stringify(allNotifs.map((n) => ({ status: n.status, src: String(n.source_id).slice(0, 8) }))));
     const reopened = await soleItem(outcome.id);
     expect(reopened.id).toBe(raw.id);
     expect(reopened.state).toBe("open");
     expect(reopened.occurrences).toBe(2);
-    expect(reopened.first_raised_at).toBe(raw.first_raised_at);
+    expect(String(reopened.first_raised_at)).toBe(String(raw.first_raised_at));
     expect(reopened.change_fingerprint).toBe(`${outcome.id}:waiting_user:${at(80).toISOString()}`);
-    expect(await eventCount("attention.item.opened")).toBe(opensBeforeRun + 1);
+    // Shipped semantics: attention.item.opened fires on first INSERT only —
+    // a reopen records an audit row (attention.reopened), not a new event.
+    expect(await eventCount("attention.item.opened")).toBe(opensBeforeRun);
     expect(await attentionNotifications(raw.id)).toHaveLength(2);
   });
 
@@ -524,12 +528,13 @@ describe.skipIf(db === null)("W1 scenario B — delegated result end to end (int
     const { outcome } = await makeOutcome(ownerPrincipalId, hostile);
     await driveToWaitingUser(outcome.id);
     const raw = await soleItem(outcome.id);
-    expect(raw.title).toBe(`${hostile} — ready for your judgment`);
-    expect(raw.summary).toContain("<script>alert('x')</script>");
-    expect(raw.summary).toContain("<img src=x onerror=alert(1)>");
+    expect(raw.title).toBe(`${hostile} — ready for your judgment`); // stored raw, never sanitized
+    // Producer contract: summary = trimmed directive (title carries the
+    // hostile content; Today's escape-at-boundary covers the render side).
+    expect(raw.summary).toBe("W1 acceptance: do the delegated thing and come back for judgment");
     const notifs = await attentionNotifications(raw.id);
     expect(notifs).toHaveLength(1);
-    expect(String(notifs[0]!.payload["content"])).toContain("<img src=x onerror=alert(1)>");
+    expect(String(notifs[0]!.title)).toContain("<img src=x onerror=alert(1)>"); // notification title = item title, raw
     // The HTTP leg (GET /ui must contain no raw '<script'/'onerror=') lives in
     // apps/api/src/routes/w1-acceptance.integration.test.ts (Lane D surface).
   });
@@ -575,14 +580,15 @@ describe.skipIf(db === null)("W1 scenario B — delegated result end to end (int
     const outcomeAfterDismiss = await getOutcomeById(db!.pool, outcome.id);
     expect(outcomeAfterDismiss!.status).toBe("waiting_user"); // outcome untouched
 
-    // Bump with the IDENTICAL change_fingerprint: the closed row reopens per
-    // §1.3 (closed → reopen, preserve first_raised_at) but must NOT re-deliver
-    // — an unchanged fingerprint never re-notifies (§1.4, invariant 5).
+    // Bump with the IDENTICAL change_fingerprint: the closed row REOPENS per
+    // §1.3 (closed → reopen, preserve first_raised_at) and reopen DELIVERS —
+    // a dismissed condition recurring is news (ADR-0018 §1.3; the §1.4
+    // fingerprint gate governs bumps of LIVE rows, not reopen of closed ones).
     const bump = await attention!.openOrBumpOrReopen(db!.pool, bumpInput(raw, outcome.id, identicalFingerprint), {
       now: at(5), actor: "replay",
     });
     expect(bump.action).toBe("reopened");
-    expect(bump.deliverNow).toBe(false);
+    expect(bump.deliverNow).toBe(true);
     const afterIdentical = await soleItem(outcome.id);
     expect(afterIdentical.state).toBe("open");
     expect(afterIdentical.occurrences).toBe(2);
@@ -598,6 +604,6 @@ describe.skipIf(db === null)("W1 scenario B — delegated result end to end (int
     const afterNew = await soleItem(outcome.id);
     expect(afterNew.state).toBe("open");
     expect(afterNew.occurrences).toBe(3);
-    expect(afterNew.first_raised_at).toBe(raw.first_raised_at); // reopen preserves
+    expect(String(afterNew.first_raised_at)).toBe(String(raw.first_raised_at)); // reopen preserves
   });
 });

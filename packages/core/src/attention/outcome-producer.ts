@@ -62,16 +62,31 @@ export async function emitOutcomeAttention(
   toStatus: OutcomeStatus,
   opts: { now: Date; actor: string },
 ): Promise<void> {
-  // Resolve-first: any held item for this outcome (ready or blocked) is
-  // closed producer-side when the outcome leaves its state. Running this
-  // before the open guarantees the just-opened item (in particular
-  // outcome.failed) is never the row resolved here.
-  await resolveAttentionBySource(db, outcome.principalId, "outcome", outcome.id, {
-    now: opts.now,
-    actor: opts.actor,
-    by: "producer",
-    reason: `outcome_${toStatus}`,
-  });
+  // Resolve-first, LEAVING-only (ADR-0018 §1.5): each held item closes when
+  // the outcome LEAVES its state — entering blocked resolves the ready item;
+  // entering waiting_user resolves a held blocked item; any other status
+  // resolves every held item of the outcome. A producer dispatch that does
+  // not change the held state (the common replay) resolves nothing —
+  // resolve-then-reopen would re-deliver on identical occurrences.
+  // Resolving before the open guarantees the just-opened item (in
+  // particular outcome.failed) is never the row resolved here.
+  const heldFingerprint = (segment: string): string => `outcome:${outcome.id}:${segment}`;
+  if (toStatus === "blocked") {
+    await resolveAttentionBySource(db, outcome.principalId, "outcome", outcome.id, {
+      now: opts.now, actor: opts.actor, by: "producer",
+      reason: `outcome_${toStatus}`, fingerprint: heldFingerprint("ready"),
+    });
+  } else if (toStatus === "waiting_user") {
+    await resolveAttentionBySource(db, outcome.principalId, "outcome", outcome.id, {
+      now: opts.now, actor: opts.actor, by: "producer",
+      reason: `outcome_${toStatus}`, fingerprint: heldFingerprint("blocked"),
+    });
+  } else {
+    await resolveAttentionBySource(db, outcome.principalId, "outcome", outcome.id, {
+      now: opts.now, actor: opts.actor, by: "producer",
+      reason: `outcome_${toStatus}`,
+    });
+  }
   const spec = PRODUCED_KINDS[toStatus as keyof typeof PRODUCED_KINDS];
   if (spec === undefined) return; // completed/cancelled/everything else: no item (ADR-0018 §1.2)
   const summary = outcome.directive.trim().length > 0 ? outcome.directive.trim() : outcome.title;

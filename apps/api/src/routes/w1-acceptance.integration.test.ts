@@ -24,7 +24,7 @@ type InjectResponse = Awaited<ReturnType<FastifyInstance["inject"]>>;
 
 async function loadBuildApp(): Promise<BuildAppFn | null> {
   try {
-    const specifier = "../../index.js";
+    const specifier = "../index.js";
     const mod = (await import(specifier)) as Record<string, unknown>;
     return typeof mod["buildApp"] === "function" ? (mod["buildApp"] as BuildAppFn) : null;
   } catch {
@@ -219,7 +219,7 @@ describe.skipIf(db === null)("W1 Today + attention HTTP surface (integration, po
     expect(csp).toContain("default-src 'none'");
   });
 
-  it("hostile outcome titles render escaped: no raw '<script', no 'onerror='", async () => {
+  it("hostile outcome titles render escaped: no raw '<script'/'<img' tags survive", async () => {
     const hostile = `<script>alert('x')</script> <img src=x onerror=alert(1)>`;
     const { ref } = await seedReadyOutcome(ownerPrincipalId, hostile);
     const session = await ownerSession();
@@ -227,14 +227,14 @@ describe.skipIf(db === null)("W1 Today + attention HTTP surface (integration, po
     const page = await app!.inject({ method: "GET", url: "/ui", headers: { cookie: session } });
     expect(page.statusCode).toBe(200);
     expect(page.body).not.toContain("<script");
-    expect(page.body).not.toContain("onerror=");
+    expect(page.body).not.toContain("<img"); // inert "onerror=" text may survive; the tag must not
 
     const outcomeView = await app!.inject({
       method: "GET", url: `/ui/outcome/${ref}`, headers: { cookie: session },
     });
     expect(outcomeView.statusCode).toBe(200);
     expect(outcomeView.body).not.toContain("<script");
-    expect(outcomeView.body).not.toContain("onerror=");
+    expect(outcomeView.body).not.toContain("<img");
     expect(outcomeView.body).toContain("&lt;script"); // escaped, rendered anyway
     expect(outcomeView.body).toContain("waiting_user");
   });

@@ -2,19 +2,12 @@
  * Today UI — integration (session paste → cookie, CSRF, XSS escaping,
  * principal isolation, registry-dispatched actions, outcome view).
  *
- * TEST-ONLY STAND-INS (lane D; delete at merge):
- *  - `ATTENTION_ITEMS_DDL` mirrors contract §029 (lane B owns the real file).
- *  - The vi.mock fakes implement the contract §service signatures + the
- *    §registry descriptor table as plain SQL/constants so the
- *    HTTP/auth/CSRF/XSS layer is testable before the attention service
- *    merges. They exercise MY layer only — lane B's semantics are lane E's
- *    acceptance scope.
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { migrateUp, sha256Hex, upsertPrincipalCredential } from "@jehad/db";
+import { migrateUp, seedDomains, sha256Hex, upsertPrincipalCredential } from "@jehad/db";
 import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../../../../packages/db/tests/test-db";
 import { issueSession } from "../session";
 import { buildApp } from "../index";
@@ -22,174 +15,8 @@ import { buildApp } from "../index";
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'";
 
-// ---- begin test-only stand-ins (delete at merge) ---------------------------
-const ATTENTION_ITEMS_DDL = `
-CREATE TABLE attention_items (
-    id                     uuid PRIMARY KEY,
-    principal_id           uuid NOT NULL REFERENCES principals(id),
-    source_type            text NOT NULL CHECK (source_type IN ('watch','outcome','system')),
-    source_object_id       text NOT NULL,
-    fingerprint            text NOT NULL,
-    kind                   text NOT NULL CHECK (kind IN
-                             ('outcome.ready','outcome.blocked','outcome.failed',
-                              'watch.match','system.missed_evidence','system.scan_gap')),
-    state                  text NOT NULL DEFAULT 'open'
-                           CHECK (state IN ('open','seen','snoozed','resolved','dismissed')),
-    level                  text NOT NULL DEFAULT 'inbox' CHECK (level IN ('inbox','digest','interrupt')),
-    safety_class           text NOT NULL DEFAULT 'none' CHECK (safety_class IN ('none','security','water','safety')),
-    title                  text NOT NULL,
-    summary                text NOT NULL,
-    why_it_matters         text,
-    evidence_refs          jsonb NOT NULL DEFAULT '[]'::jsonb,
-    actions                jsonb NOT NULL DEFAULT '[]'::jsonb,
-    occurrences            integer NOT NULL DEFAULT 1,
-    change_fingerprint     text,
-    first_raised_at        timestamptz NOT NULL DEFAULT now(),
-    updated_at             timestamptz NOT NULL DEFAULT now(),
-    seen_at                timestamptz,
-    snoozed_until          timestamptz,
-    snooze_count           integer NOT NULL DEFAULT 0,
-    resolved_at            timestamptz,
-    resolved_by            text CHECK (resolved_by IS NULL OR resolved_by IN ('owner','producer','liveness','system')),
-    resolution_reason      text,
-    last_delivered_at      timestamptz,
-    delivery_attempts      integer NOT NULL DEFAULT 0,
-    last_delivery_attempt_at timestamptz,
-    UNIQUE (principal_id, source_type, source_object_id, fingerprint)
-);
-CREATE INDEX attention_open_idx ON attention_items (principal_id, state, updated_at DESC);
-`;
 
-const holder = vi.hoisted(() => ({
-  db: null as null | {
-    query(text: string, values?: readonly unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
-  },
-}));
 
-vi.mock("@jehad/core", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@jehad/core")>();
-  const db = () => holder.db!;
-  const VERDICTS = ["useful", "noise", "missed", "incorrect", "interruptive"];
-  // Registry mirror (contract §registry): kind / defaultArgs / validateArgs /
-  // label — server-provided labels, fail-closed unknown keys → null.
-  const REGISTRY: Record<
-    string,
-    {
-      kind: "resolve" | "dismiss" | "snooze" | "seen" | "feedback" | "link";
-      defaultArgs?: Record<string, string | number>;
-      validateArgs?: (args?: Record<string, string | number>) => boolean;
-      label: (args?: Record<string, string | number>) => string;
-    }
-  > = {
-    "attention.resolve": { kind: "resolve", label: () => "Resolve" },
-    "attention.dismiss": { kind: "dismiss", label: () => "Dismiss" },
-    "attention.seen": { kind: "seen", label: () => "Mark seen" },
-    "attention.snooze": {
-      kind: "snooze",
-      defaultArgs: { minutes: 60 },
-      validateArgs: (args) => {
-        const m = Number(args?.minutes ?? 60);
-        return Number.isSafeInteger(m) && m >= 5 && m <= 4320;
-      },
-      label: (args) => `Snooze ${Number(args?.minutes ?? 60)}m`,
-    },
-    "attention.feedback": {
-      kind: "feedback",
-      validateArgs: (args) => typeof args?.verdict === "string" && VERDICTS.includes(args.verdict),
-      label: (args) => `Verdict: ${String(args?.verdict)}`,
-    },
-    "outcome.open": {
-      kind: "link",
-      validateArgs: (args) => typeof args?.ref === "string" && args.ref.length > 0,
-      label: () => "Open outcome",
-    },
-  };
-  function rowToItem(row: Record<string, unknown>) {
-    const date = (v: unknown): Date | null =>
-      v === null || v === undefined ? null : v instanceof Date ? v : new Date(String(v));
-    return {
-      id: String(row.id),
-      principalId: String(row.principal_id),
-      sourceType: String(row.source_type),
-      sourceObjectId: String(row.source_object_id),
-      fingerprint: String(row.fingerprint),
-      kind: String(row.kind),
-      state: String(row.state),
-      level: String(row.level),
-      safetyClass: String(row.safety_class),
-      title: String(row.title),
-      summary: String(row.summary),
-      whyItMatters: row.why_it_matters === null ? null : String(row.why_it_matters),
-      evidenceRefs: (row.evidence_refs ?? []) as unknown[],
-      actions: (row.actions ?? []) as unknown[],
-      occurrences: Number(row.occurrences),
-      changeFingerprint: row.change_fingerprint === null ? null : String(row.change_fingerprint),
-      firstRaisedAt: date(row.first_raised_at)!,
-      updatedAt: date(row.updated_at)!,
-      seenAt: date(row.seen_at),
-      snoozedUntil: date(row.snoozed_until),
-      snoozeCount: Number(row.snooze_count),
-      resolvedAt: date(row.resolved_at),
-      resolvedBy: row.resolved_by === null ? null : String(row.resolved_by),
-      resolutionReason: row.resolution_reason === null ? null : String(row.resolution_reason),
-      lastDeliveredAt: date(row.last_delivered_at),
-      deliveryAttempts: Number(row.delivery_attempts),
-      lastDeliveryAttemptAt: date(row.last_delivery_attempt_at),
-    };
-  }
-  return {
-    ...actual,
-    getActionDescriptor: (key: string) => REGISTRY[key] ?? null,
-    listOpenAttention: async (_db: unknown, principalId: string, opts: { now?: Date; includeSnoozed?: boolean }) => {
-      const res = await db().query(
-        `SELECT * FROM attention_items WHERE principal_id = $1::uuid
-           AND (state IN ('open','seen') OR ($2::boolean AND state = 'snoozed'))
-          ORDER BY first_raised_at ASC`,
-        [principalId, opts.includeSnoozed ?? false],
-      );
-      return res.rows.map(rowToItem);
-    },
-    resolveAttention: async (_db: unknown, principalId: string, itemId: string, opts: { now: Date; by: string }) => {
-      const res = await db().query(
-        `UPDATE attention_items SET state = 'resolved', resolved_at = $3::timestamptz,
-                resolved_by = $4, updated_at = $3::timestamptz
-          WHERE id = $1::uuid AND principal_id = $2::uuid AND state IN ('open','seen','snoozed')
-          RETURNING *`,
-        [itemId, principalId, opts.now.toISOString(), opts.by],
-      );
-      return res.rows[0] ? rowToItem(res.rows[0]) : null;
-    },
-    dismissAttention: async (_db: unknown, principalId: string, itemId: string, opts: { now: Date }) => {
-      const res = await db().query(
-        `UPDATE attention_items SET state = 'dismissed', updated_at = $3::timestamptz
-          WHERE id = $1::uuid AND principal_id = $2::uuid AND state IN ('open','seen','snoozed')
-          RETURNING *`,
-        [itemId, principalId, opts.now.toISOString()],
-      );
-      return res.rows[0] ? rowToItem(res.rows[0]) : null;
-    },
-    markSeen: async (_db: unknown, principalId: string, itemId: string, opts: { now: Date }) => {
-      const res = await db().query(
-        `UPDATE attention_items SET state = 'seen', seen_at = COALESCE(seen_at, $3::timestamptz), updated_at = $3::timestamptz
-          WHERE id = $1::uuid AND principal_id = $2::uuid AND state IN ('open','seen')
-          RETURNING *`,
-        [itemId, principalId, opts.now.toISOString()],
-      );
-      return res.rows[0] ? rowToItem(res.rows[0]) : null;
-    },
-    snoozeAttention: async (_db: unknown, principalId: string, itemId: string, minutes: number, opts: { now: Date }) => {
-      const res = await db().query(
-        `UPDATE attention_items SET state = 'snoozed',
-                snoozed_until = $3::timestamptz + make_interval(mins => $4::int),
-                snooze_count = snooze_count + 1, updated_at = $3::timestamptz
-          WHERE id = $1::uuid AND principal_id = $2::uuid AND state IN ('open','seen','snoozed')
-          RETURNING *`,
-        [itemId, principalId, opts.now.toISOString(), minutes],
-      );
-      return res.rows[0] ? rowToItem(res.rows[0]) : null;
-    },
-  };
-});
 // ---- end test-only stand-ins ----------------------------------------------
 
 const USER_CREDENTIAL = randomBytes(32).toString("hex");
@@ -289,7 +116,7 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
   beforeAll(async () => {
     db = await createIsolatedTestDb(TEST_DATABASE_URL!, "apitoday");
     await migrateUp(db.pool);
-    await db.pool.query(ATTENTION_ITEMS_DDL);
+    await seedDomains(db.pool);
     const user = await upsertPrincipalCredential(db.pool, {
       type: "user", name: "josctl", credentialHash: sha256Hex(USER_CREDENTIAL),
     });
@@ -298,7 +125,6 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
       type: "user", name: "second", credentialHash: sha256Hex(OTHER_CREDENTIAL),
     });
     otherId = other.id;
-    holder.db = db.pool;
 
     await seedItem(userId, { title: XSS_TITLE, why_it_matters: XSS_WHY });
     await seedItem(userId, { title: "Seen thing", state: "seen", occurrences: 2 });

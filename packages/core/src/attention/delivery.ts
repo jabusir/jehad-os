@@ -33,6 +33,14 @@ import {
 /** Retry loop cap (chunked passes; the next tick picks up the remainder). */
 const RETRY_CAP = 500;
 
+// Contract home for the enqueue seam is the delivery surface; the
+// implementation lives beside the notifications queue (single write path)
+// and is re-exported here so producers/liveness/tests have ONE import site.
+export {
+  enqueueAttentionNotification,
+  type AttentionNotificationInput,
+} from "../notifications/service.js";
+
 /** Policy knobs for the attention delivery seam (policy.yaml `attention:`). */
 export interface AttentionDeliveryConfig {
   /** Per-item re-delivery cooldown minutes; default = the types.ts constant. */
@@ -96,6 +104,7 @@ export async function stampAttentionDelivered(
  * attempt stamp.
  */
 export async function notifyAttentionItem(
+
   db: SqlExecutor,
   item: AttentionItemRow,
   opts: { now: Date; config?: AttentionDeliveryConfig },

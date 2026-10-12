@@ -451,16 +451,19 @@ export async function resolveAttentionBySource(
   principalId: string,
   sourceType: AttentionSourceType,
   sourceObjectId: string,
-  opts: { now: Date; actor: string; by: AttentionResolvedBy; reason: string },
+  opts: { now: Date; actor: string; by: AttentionResolvedBy; reason: string;
+          /** Narrow the close to one fingerprint (e.g. one held state of an outcome). */
+          fingerprint?: string },
 ): Promise<number> {
   const flipped = await db.query(
     `UPDATE attention_items SET
        state = 'resolved', resolved_at = $4::timestamptz, resolved_by = $5,
        resolution_reason = $6, updated_at = $4::timestamptz
      WHERE principal_id = $1::uuid AND source_type = $2 AND source_object_id = $3
+       AND ($7::text IS NULL OR fingerprint = $7::text)
        AND state IN ${LIVE_STATES}
      RETURNING ${ATTENTION_COLUMNS}`,
-    [principalId, sourceType, sourceObjectId, opts.now.toISOString(), opts.by, opts.reason],
+    [principalId, sourceType, sourceObjectId, opts.now.toISOString(), opts.by, opts.reason, opts.fingerprint ?? null],
   );
   for (const row of flipped.rows as unknown as AttentionSqlRow[]) {
     const item = toAttentionItem(row);
