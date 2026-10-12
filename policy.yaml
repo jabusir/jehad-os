@@ -34,7 +34,7 @@ autonomy_ceiling:
 #                           expires_at; past it a row is expired and can never
 #                           be claimed or delivered.
 notifications:
-  autoApproveKinds: ["brief", "calendar-change", "calibration", "grant-reminder", "typing"]
+  autoApproveKinds: ["brief", "calendar-change", "calibration", "grant-reminder", "typing", "attention"]
   escalationMinUrgency: high
   defaultTtlMinutes: 240
 
@@ -119,6 +119,12 @@ calibration:
   daily: { enabled: true, principals: [josctl], prompt_local_hour: 20 }
 
 outcomes: { enabled: true, max_active_per_principal: 3, default_budget_usd: 5, default_deadline_days: 14 }
+
+# attention — W1 watch/outcome attention (ADR-0018; w1-contract). enabled is
+# the attention-liveness workflow's kill switch (checked as `!== false`, so
+# an absent section still runs); cooldownMinutes is the per-item re-delivery
+# cooldown fed to salience by the retry loop (plan §12.4 default 60).
+attention: { enabled: true, cooldownMinutes: 60 }
 
 # workers — D1 (roadmap §8): the worker contract's autonomy ceiling. Workers
 # are roles with typed assignments, never free agents: each role pins its

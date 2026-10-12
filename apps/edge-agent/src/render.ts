@@ -60,6 +60,10 @@ function asString(value: unknown): string | null {
  *   calibration     → content only (the rendered daily-check prompt)
  *   calendar-change → title only (the title IS the message: `X: moved to Y`)
  *   escalation      → title + consequenceOfWaiting (when present)
+ *   attention       → title + content + whyItMatters? + todayUrl? line
+ *                     (the W1 attention payload contract; todayUrl renders
+ *                     as `Review in Today: <url>` so the owner can jump to
+ *                     the item — absent when TODAY_BASE_URL is not deployed)
  *   anything else   → title only
  *
  * INVARIANT (owner directive 2026-09-23): the transport envelope — payload
@@ -89,6 +93,18 @@ export function renderNotificationText(notification: DeliverableNotification): s
     case "escalation": {
       const consequence = asString(notification.payload["consequenceOfWaiting"]);
       text = consequence === null ? notification.title : `${notification.title}\n${consequence}`;
+      break;
+    }
+    case "attention": {
+      const todayUrl = asString(notification.payload["todayUrl"]);
+      text = [
+        notification.title,
+        asString(notification.payload["content"]),
+        asString(notification.payload["whyItMatters"]),
+        todayUrl === null ? null : `Review in Today: ${todayUrl}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
       break;
     }
     default:

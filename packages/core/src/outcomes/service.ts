@@ -19,6 +19,7 @@
 
 import { randomUUID } from "node:crypto";
 import { recordAudit, type SqlExecutor } from "../actions/audit.js";
+import { emitOutcomeAttention } from "../attention/outcome-producer.js";
 import { acceptEvent, type EventStoreExecutor } from "../events/store.js";
 import { LATEST_PAYLOAD_SCHEMA_VERSION } from "../events/catalog.js";
 import {
@@ -339,6 +340,9 @@ export async function transitionOutcome(
     payload: { outcomeId: outcome.id, ref: outcome.ref, fromStatus: current.status, toStatus, ...(extra.failureReason !== undefined ? { reason: extra.failureReason } : {}) },
     runId: null,
   }, { now: () => opts.now });
+  // Attention producer seam (ADR-0018 §4): same executor ⇒ atomic with the
+  // transition — the attention truth can never lag the outcome status.
+  await emitOutcomeAttention(db, outcome, toStatus, opts);
   await audit(db, "outcome.transitioned", { outcomeId: outcome.id, ref: outcome.ref, from: current.status, to: toStatus }, opts.actor);
   return { outcome, changed: true };
 }

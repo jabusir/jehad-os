@@ -4,12 +4,14 @@
  * calendar sync (E3, every 15 min), calendar occurrence sweep (W5b,
  * hourly), gmail sync (Phase GMAIL, every 5 min), thread retention
  * (Phase D, hourly), calibration (lane C2: daily prompt 20:30 local +
- * weekly Sunday 20:00 local rollup), and the SV3 nightly lesson harvest
- * (03:30 local guarded tick).
+ * weekly Sunday 20:00 local rollup), the SV3 nightly lesson harvest
+ * (03:30 local guarded tick), and the attention liveness/retry sweep
+ * (W1, every 5 min; retry step guarded to 07:00–22:00 local PT).
  */
 
 import {
   type AnyWorkflowDefinition,
+  attentionLivenessWorkflow,
   defineWorkflow,
   briefWorkflows,
   calibrationWorkflows,
@@ -49,4 +51,5 @@ export const workflows: readonly AnyWorkflowDefinition[] = [
   threadRetentionWorkflow,
   ...calibrationWorkflows,
   lessonHarvestWorkflow,
+  attentionLivenessWorkflow,
 ];

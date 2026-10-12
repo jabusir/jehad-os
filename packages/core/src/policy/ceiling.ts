@@ -58,6 +58,12 @@ export interface PolicyV1 {
    * + empty principals (profiles stay inert).
    */
   personas?: PersonasPolicy;
+  /**
+   * `attention:` (W1; ADR-0018; w1-contract): the attention-liveness kill
+   * switch + the retry cooldown. Absent → ENABLED with the default cooldown
+   * (the workflow checks `enabled !== false` — the contract-literal switch).
+   */
+  attention?: AttentionSectionPolicy;
 }
 
 /**
@@ -287,6 +293,27 @@ export function parsePersonasEntry(value: string): PersonasPolicy {
     enabled: m[1] === "true",
     principals: [...new Set((m[2] ?? "").split(",").map((x) => x.trim()).filter((x) => x.length > 0))],
   };
+}
+
+/**
+ * The `attention:` section (W1; ADR-0018): `{ enabled: <bool>,
+ * cooldownMinutes: <int> }` — EXACTLY those two keys (the personas
+ * strict-shape pattern). enabled=false is the attention-liveness kill
+ * switch; cooldownMinutes feeds the retry loop's salience gate.
+ */
+export interface AttentionSectionPolicy {
+  readonly enabled: boolean;
+  readonly cooldownMinutes: number;
+}
+
+export function parseAttentionEntry(value: string): AttentionSectionPolicy {
+  const m = value.match(/^\{\s*enabled:\s*(true|false),\s*cooldownMinutes:\s*(\d+)\s*\}$/);
+  if (m === null) {
+    throw new Error(
+      `policy: attention must be "{ enabled: <bool>, cooldownMinutes: <int> }" (got '${value}')`,
+    );
+  }
+  return { enabled: m[1] === "true", cooldownMinutes: Number(m[2]) };
 }
 
 /**
@@ -860,6 +887,8 @@ export function parsePolicyV1(text: string): PolicyV1 {
   const outcomesPolicy: { value: OutcomesPolicy | null } = { value: null };
   const workersLines: string[] = [];
   const personasPolicy: { value: PersonasPolicy | null } = { value: null };
+  let sawAttention = false;
+  const attentionPolicy: { value: AttentionSectionPolicy | null } = { value: null };
 
   for (const rawLine of text.split("\n")) {
     const line = stripComment(rawLine);
@@ -918,6 +947,15 @@ export function parsePolicyV1(text: string): PolicyV1 {
           throw new Error("policy: personas must be a flow mapping '{ enabled: <bool>, principals: [name, …] }'");
         }
         personasPolicy.value = parsePersonasEntry(value);
+      } else if (key === "attention") {
+        if (sawAttention) throw new Error("policy: duplicate attention key");
+        sawAttention = true;
+        if (value === "") {
+          throw new Error(
+            "policy: attention must be a flow mapping '{ enabled: <bool>, cooldownMinutes: <int> }'",
+          );
+        }
+        attentionPolicy.value = parseAttentionEntry(value);
       } else {
         throw new Error(`policy: unknown top-level key '${key}'`);
       }
@@ -1096,6 +1134,9 @@ export function parsePolicyV1(text: string): PolicyV1 {
   }
   if (sawPersonas && personasPolicy.value !== null) {
     policy.personas = personasPolicy.value;
+  }
+  if (sawAttention && attentionPolicy.value !== null) {
+    policy.attention = attentionPolicy.value;
   }
   return policy;
 }

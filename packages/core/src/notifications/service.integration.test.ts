@@ -378,7 +378,7 @@ describe.skipIf(!TEST_DATABASE_URL)("notification service (integration)", () => 
     const config = await loadNotificationsConfig();
     expect(config).toEqual({
       ...DEFAULT_NOTIFICATIONS_CONFIG,
-      autoApproveKinds: ["brief", "calendar-change", "calibration", "grant-reminder", "typing"], // E4-S list + Wave T typing control plane
+      autoApproveKinds: ["brief", "calendar-change", "calibration", "grant-reminder", "typing", "attention"], // E4-S list + Wave T typing control plane + W1 attention (ADR-0018 §4)
     });
     expect(config.escalationMinUrgency).toBe("high"); // escalations keep the >= high threshold
   });
