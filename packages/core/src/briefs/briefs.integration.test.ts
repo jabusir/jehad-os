@@ -9,7 +9,7 @@
 
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { migrateUp, seedDomains } from "@jehad/db";
+import { migrateUp, seedDomains, sha256Hex, upsertPrincipalCredential } from "@jehad/db";
 import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../../../db/tests/test-db.js";
 import { seedQueryFixtureWorld, type FixtureIds } from "../queries/fixtures.js";
 import { raiseEscalation } from "../escalations/service.js";
@@ -116,8 +116,9 @@ describe.skipIf(!TEST_DATABASE_URL)("briefs (integration)", () => {
     expect(outcome.suppressed).toBe(false);
     expect(outcome.kind).toBe("brief");
     const content = outcome.content!;
-    // Overnight event delta appears.
-    expect(content).toContain("capture.recorded ×");
+    // W1.2 audit fix: machine event kinds (capture.recorded etc.) are NOT
+    // owner-meaningful delta — they never render as an Overnight histogram.
+    expect(content).not.toContain("capture.recorded ×");
     // Overdue i_owe commitment appears (fixture: rent due a day ago).
     expect(content).toContain("OVERDUE Pay October rent — due 2026-09-16T12:00:00.000Z (i_owe Landlord)");
     // §25 leverage: Decision A (blocks B/C/D + depth chain) is today's unlock.
@@ -214,6 +215,61 @@ describe.skipIf(!TEST_DATABASE_URL)("briefs (integration)", () => {
     expect(outcome).toMatchObject({ kind: "brief", suppressed: true, content: null, artifactId: null });
     const count = await emptyDb.pool.query(`SELECT count(*)::int AS n FROM artifacts`);
     expect(count.rows[0].n).toBe(0);
+  });
+
+  it("W1.2 audit fix: a machine-events-only delta stays suppressed (no telemetry briefs)", async () => {
+    const db2 = await createIsolatedTestDb(TEST_DATABASE_URL!, "m6btelemetry");
+    await migrateUp(db2.pool);
+    await seedDomains(db2.pool);
+    for (let i = 0; i < 3; i += 1) {
+      await db2.pool.query(
+        `INSERT INTO events (id, type, source, occurred_at, recorded_at, idempotency_key, domain_id, payload, sensitivity, schema_version)
+         VALUES ($1, 'gmail.message.received', 'adapter:gmail', $2::timestamptz, $2::timestamptz, $3, $4::uuid, '{}'::jsonb, 'normal', 1)`,
+        [randomUUID(), new Date(NOW.getTime() - 2 * HOUR).toISOString(), `telemetry-${i}`, (await db2.pool.query("SELECT id FROM domains WHERE key='personal'")).rows[0]!.id],
+      );
+    }
+    const outcome = await renderMorningBrief(db2.pool, { now });
+    expect(outcome.suppressed).toBe(true);
+    await dropIsolatedTestDb(TEST_DATABASE_URL!, db2);
+  });
+
+  it("W1.2 audit fix: an outcome parked on the owner un-suppresses the morning brief", async () => {
+    const db2 = await createIsolatedTestDb(TEST_DATABASE_URL!, "m6boutcome");
+    await migrateUp(db2.pool);
+    await seedDomains(db2.pool);
+    const principal = await upsertPrincipalCredential(db2.pool, {
+      type: "user", name: "josctl", credentialHash: sha256Hex("brief-outcome"),
+    });
+    await db2.pool.query(
+      `INSERT INTO outcomes (id, principal_id, ref, title, directive, status)
+       VALUES ($1::uuid, $2::uuid, 'BRF1', 'Parked mission probe', 'd', 'waiting_user')`,
+      [randomUUID(), principal.id],
+    );
+    const outcome = await renderMorningBrief(db2.pool, { now });
+    expect(outcome.suppressed).toBe(false);
+    expect(outcome.content).toContain("Delegated outcomes");
+    expect(outcome.content).toContain('- BRF1 needs you — "Parked mission probe"');
+    await dropIsolatedTestDb(TEST_DATABASE_URL!, db2);
+  });
+
+  it("W1.2 audit fix: an open attention item un-suppresses and renders Waiting in Today", async () => {
+    const db2 = await createIsolatedTestDb(TEST_DATABASE_URL!, "m6battn");
+    await migrateUp(db2.pool);
+    await seedDomains(db2.pool);
+    const principal = await upsertPrincipalCredential(db2.pool, {
+      type: "user", name: "josctl", credentialHash: sha256Hex("brief-attn"),
+    });
+    await db2.pool.query(
+      `INSERT INTO attention_items
+         (id, principal_id, source_type, source_object_id, fingerprint, kind, state, title, summary, evidence_refs, actions, occurrences)
+       VALUES ($1::uuid, $2::uuid, 'watch', 'obj-9', 'fp-9', 'watch.match', 'open', 'Attention probe', 's', '[]'::jsonb, '[]'::jsonb, 1)`,
+      [randomUUID(), principal.id],
+    );
+    const outcome = await renderMorningBrief(db2.pool, { now });
+    expect(outcome.suppressed).toBe(false);
+    expect(outcome.content).toContain("Waiting in Today");
+    expect(outcome.content).toContain("- 1 item needs you in Today");
+    await dropIsolatedTestDb(TEST_DATABASE_URL!, db2);
   });
 
   it("evening close renders the §31 TODAY shape and persists a 'close' artifact", async () => {

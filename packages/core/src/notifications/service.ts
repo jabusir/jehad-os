@@ -933,12 +933,20 @@ export async function enqueueBriefNotification(
   }
   const createdBy = await resolveServicePrincipal(db, "service/briefs");
   const config = input.config ?? (await workflowNotificationsConfig());
+  // W1.2 audit fix: the daily message enumerates needs-you items — carry the
+  // Today tap-through exactly like attention notifications do (absent when
+  // TODAY_BASE_URL is not deployed).
+  const todayBase = process.env["TODAY_BASE_URL"];
+  const payload: Record<string, unknown> = { artifactId: input.artifactId, content: input.content };
+  if (todayBase !== undefined && todayBase.length > 0) {
+    payload["todayUrl"] = `${todayBase}/ui`;
+  }
   return createNotification(
     db,
     {
       kind: "brief",
       title: input.title,
-      payload: { artifactId: input.artifactId, content: input.content },
+      payload,
       domainId: String(domainId),
       sourceType: "brief",
       sourceId: input.artifactId,

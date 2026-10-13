@@ -10,7 +10,7 @@ import type { TodayScheduleItem } from "../calendar/projection.js";
 import type {
   OutcomesBriefSection,
   OutcomeBriefItem, EveningCloseData, MorningBriefData } from "./data.js";
-import { OUTCOMES_BRIEF_MAX_PER_LIST } from "./data.js";
+import { OUTCOMES_BRIEF_MAX_PER_LIST, OWNER_MEANINGFUL_EVENT_PREFIXES } from "./data.js";
 import { renderDivergenceBlock } from "./divergence.js";
 
 function blank(): string {
@@ -226,7 +226,7 @@ export function renderOutcomesSection(outcomes: OutcomesBriefSection | null | un
     if (items.length > OUTCOMES_BRIEF_MAX_PER_LIST) out.push(`  - …and ${items.length - OUTCOMES_BRIEF_MAX_PER_LIST} more`);
     return out;
   };
-  lines.push(...cap(outcomes.needsYou, (o) => `- ${o.ref} needs your verification — "${o.title}"`));
+  lines.push(...cap(outcomes.needsYou, (o) => `- ${o.ref} needs you — "${o.title}"`));
   lines.push(...cap(outcomes.active, (o) => `- ${o.ref} in progress — "${o.title}"`));
   lines.push(...cap(outcomes.resolved, (o) => `- ${o.ref} ${o.status === "completed" ? "completed" : "failed"} — "${o.title}"`));
   for (const result of outcomes.results ?? []) {
@@ -234,6 +234,17 @@ export function renderOutcomesSection(outcomes: OutcomesBriefSection | null | un
     lines.push(`- ${result.ref} ${result.role} result — "${result.title}"${summary}`);
   }
   return lines.length > 1 ? lines : [];
+}
+
+/**
+ * W1.2 audit fix: the daily message must reflect open AttentionItems — the
+ * W1 "genuinely needs me" surface. Terse count (the tap-through lives on the
+ * notification envelope as todayUrl); §31-suppressed at zero.
+ */
+export function renderAttentionSection(openAttention: number): string[] {
+  if (openAttention <= 0) return [];
+  const noun = openAttention === 1 ? "item needs you" : "items need you";
+  return ["Waiting in Today", `- ${openAttention} ${noun} in Today`];
 }
 
 export function renderMorningBriefText(data: MorningBriefData): string {
@@ -246,7 +257,10 @@ export function renderMorningBriefText(data: MorningBriefData): string {
 
   const whileAway: string[] = [];
   if (!deltaEmpty) {
-    whileAway.push(...friendlyEventGroups(changed.eventGroups));
+    const ownerGroups = changed.eventGroups.filter((g) =>
+      OWNER_MEANINGFUL_EVENT_PREFIXES.some((prefix) => g.type.startsWith(prefix)),
+    );
+    whileAway.push(...friendlyEventGroups(ownerGroups));
     if (changed.commitments.length > 0) {
       whileAway.push(`- ${changed.commitments.length} commitment${changed.commitments.length === 1 ? "" : "s"} captured:`);
       for (const c of changed.commitments.slice(0, 5)) {
@@ -282,6 +296,7 @@ export function renderMorningBriefText(data: MorningBriefData): string {
     unlock,
     escalations,
     outcomes,
+    renderAttentionSection(data.openAttention),
     review,
   ].filter((section) => section.length > 0);
 
@@ -328,6 +343,7 @@ export function renderEveningCloseText(data: EveningCloseData): string {
       : [],
     renderStoppedReminders(data),
     renderOutcomesSection(data.outcomes),
+    renderAttentionSection(data.openAttention),
     data.unlock !== null
       ? [
           "Tomorrow's best unlock",

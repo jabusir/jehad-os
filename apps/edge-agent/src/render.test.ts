@@ -107,6 +107,27 @@ describe("renderNotificationText — transport envelope never user-visible", () 
     );
   });
 
+  // W1.2 audit fix: the daily brief carries the Today tap-through when
+  // deployed — the owner can jump from the daily message to the product.
+  it("brief renders title + content + Open-in-Today line when todayUrl is in the payload", () => {
+    const text = renderNotificationText(
+      notif(
+        "brief",
+        { content: "Morning brief — Tue, Oct 13", artifactId: "a-1", todayUrl: "https://jehad.ts.net/ui" },
+        "Morning brief",
+      ),
+    );
+    expect(text).toBe("Morning brief\nMorning brief — Tue, Oct 13\nOpen in Today: https://jehad.ts.net/ui");
+  });
+
+  it("brief without a deployed Today URL stays title + content", () => {
+    const text = renderNotificationText(
+      notif("brief", { content: "Evening close — Mon, Oct 12" }, "Evening close"),
+    );
+    expect(text).toBe("Evening close\nEvening close — Mon, Oct 12");
+    expect(text).not.toContain("Open in Today");
+  });
+
   it("attention without a deployed Today URL omits the Review line", () => {
     const text = renderNotificationText(
       notif("attention", { content: "body copy", whyItMatters: "why copy" }, "attention title"),

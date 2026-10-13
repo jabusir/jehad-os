@@ -146,6 +146,8 @@ export interface MorningBriefData {
    * deterministic pipeline — no LLM anywhere in briefs.
    */
   readonly review: ReviewDigest | null;
+  /** W1.2 audit fix: open AttentionItems (open|seen) — never suppressed away. */
+  readonly openAttention: number;
 }
 
 /** A reminder the system stopped texting about (parked) — evening surface only. */
@@ -181,6 +183,8 @@ export interface EveningCloseData {
   readonly divergence: DivergenceResult | null;
   /** D0 finisher: delegated-outcome progress (§31-suppressed when empty). */
   readonly outcomes: OutcomesBriefSection | null;
+  /** W1.2 audit fix: open AttentionItems (open|seen) — never suppressed away. */
+  readonly openAttention: number;
 }
 
 const OPEN_ESCALATIONS_SQL = `
@@ -293,6 +297,39 @@ function filterCalendarDeltaToFuture<T extends { type: string; count: number; ev
 /** Cap on outcome lines per sub-list in the brief section. */
 export const OUTCOMES_BRIEF_MAX_PER_LIST = 4;
 
+/**
+ * W1.2 audit fix: the "Overnight" delta carries OWNER-meaningful event kinds
+ * only. The event catalog has grown far past the §31 design (gmail.*,
+ * outcome.*, attention.*, run.*, grant.* …) — machine-telemetry histograms in
+ * a daily iMessage are worker-debug output, not a delta. The structured
+ * commitments/decisions/relationships lists carry their own meaning; only
+ * calendar changes need the grouped-event surface.
+ */
+export const OWNER_MEANINGFUL_EVENT_PREFIXES = ["calendar."] as const;
+
+function ownerMeaningfulEventGroups<T extends { type: string }>(
+  groups: readonly T[],
+): T[] {
+  return groups.filter((g) =>
+    OWNER_MEANINGFUL_EVENT_PREFIXES.some((prefix) => g.type.startsWith(prefix)),
+  );
+}
+
+/** Open attention items (state open|seen) for the owner principal — the
+ *  W1 "genuinely needs me" signal the daily message must never miss. */
+async function countOpenAttention(
+  db: QueryExecutor,
+  principalId: string | null,
+): Promise<number> {
+  if (principalId === null) return 0;
+  const result = await db.query(
+    `SELECT count(*)::int AS n FROM attention_items
+      WHERE principal_id = $1::uuid AND state IN ('open', 'seen')`,
+    [principalId],
+  );
+  return result.rows[0] === undefined ? 0 : Number(result.rows[0].n);
+}
+
 async function collectOutcomesBriefSection(
   db: QueryExecutor,
   opts: BriefOptions,
@@ -318,8 +355,14 @@ async function collectOutcomesBriefSection(
     title: String(row.title),
     status: String(row.status),
   });
-  const needsYou = open.rows.filter((r) => String(r.status) === "waiting_user").map(toItem);
-  const active = open.rows.filter((r) => String(r.status) !== "waiting_user").map(toItem);
+  // W1.2 alignment: `blocked` needs the owner just like `waiting_user` does
+  // (Missions groups both under "Needs you") — never render it as "in progress".
+  const needsYou = open.rows
+    .filter((r) => r.status === "waiting_user" || r.status === "blocked")
+    .map(toItem);
+  const active = open.rows
+    .filter((r) => r.status !== "waiting_user" && r.status !== "blocked")
+    .map(toItem);
   const resolvedItems = resolved.rows.map(toItem);
   // D2: assignment results delivered in the window — the artifact title +
   // summary are what the brief carries forward (the verified answer).
@@ -367,7 +410,9 @@ export async function collectMorningBriefData(
   const dueSoon = waitsOnMe.filter((c) => !c.overdue && c.dueSoon);
   const futureChanged: WhatChangedResult = {
     ...changed,
-    eventGroups: filterCalendarDeltaToFuture(changed.eventGroups, now),
+    eventGroups: ownerMeaningfulEventGroups(
+      filterCalendarDeltaToFuture(changed.eventGroups, now),
+    ),
   };
 
   // Phase G: the review section (§4.2) — suppressed entirely when the
@@ -388,6 +433,8 @@ export async function collectMorningBriefData(
       ? reviewDigest
       : null;
   const outcomes = await collectOutcomesBriefSection(db, opts, since);
+  const reviewPrincipalIdForAttention = await resolveReviewPrincipalId(db, opts);
+  const openAttention = await countOpenAttention(db, reviewPrincipalIdForAttention);
 
   return {
     kind: "brief",
@@ -415,6 +462,7 @@ export async function collectMorningBriefData(
     nextUpcoming,
     review,
     outcomes,
+    openAttention,
   };
 }
 
@@ -437,6 +485,8 @@ export async function collectEveningCloseData(
     whatIsBlocked(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
     highestLeverageDecision(db, { domainId: BRIEF_DOMAIN_KEY, now: nowFn }),
   ]);
+  const eveningAttentionPrincipal = await resolveReviewPrincipalId(db, opts);
+  const openAttention = await countOpenAttention(db, eveningAttentionPrincipal);
 
   // W6-phase-2: reminders parked in the last 24h surface here and only here
   // (parkReminder stops the texts). Counts against nothing — see
@@ -469,6 +519,7 @@ export async function collectEveningCloseData(
     divergence,
     stoppedReminders: parked.map((r) => ({ title: r.title })),
     outcomes: await collectOutcomesBriefSection(db, opts, since),
+    openAttention,
   };
 }
 
@@ -499,7 +550,11 @@ export function isMorningBriefMeaningful(data: MorningBriefData): boolean {
     // "do I have anything tomorrow" answer, delivered before it's asked).
     data.nextUpcoming !== null ||
     // Phase G: a non-empty review section un-suppresses (§4.2).
-    (data.review !== null && data.review.candidates.length + data.review.escalations.length > 0)
+    (data.review !== null && data.review.candidates.length + data.review.escalations.length > 0) ||
+    // W1.2 audit fix: a mission parked on the owner or an open AttentionItem
+    // is EXACTLY the "genuinely needs me" moment — never a suppressed day.
+    data.outcomes !== null ||
+    data.openAttention > 0
   );
 }
 
@@ -522,6 +577,9 @@ export function isEveningCloseMeaningful(data: EveningCloseData): boolean {
     data.blocked.length > 0 ||
     data.stalled.length > 0 ||
     data.unlock !== null ||
-    data.divergence !== null
+    data.divergence !== null ||
+    // W1.2 audit fix: parked missions and open attention un-suppress the close.
+    data.outcomes !== null ||
+    data.openAttention > 0
   );
 }

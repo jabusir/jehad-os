@@ -300,6 +300,8 @@ describe.skipIf(!TEST_DATABASE_URL)("notification service (integration)", () => 
     });
     expect(notification.kind).toBe("brief");
     expect(notification.status).toBe("approved");
+    // W1.2 audit fix: the brief payload carries the Today tap-through when
+    // TODAY_BASE_URL is deployed; tests run without it → absent.
     expect(notification.payload).toEqual({
       artifactId: notification.sourceId,
       content: "MORNING BRIEF — 2026-09-17",
@@ -311,6 +313,21 @@ describe.skipIf(!TEST_DATABASE_URL)("notification service (integration)", () => 
       )
     ).rows[0];
     expect(creator).toMatchObject({ type: "service", name: "service/briefs" });
+  });
+
+  it("W1.2 audit fix: brief notification carries todayUrl when TODAY_BASE_URL is deployed", async () => {
+    process.env["TODAY_BASE_URL"] = "https://today.example.tailnet";
+    try {
+      const notification = await enqueueBriefNotification(db.pool, {
+        title: "Morning brief",
+        content: "URL probe",
+        artifactId: randomUUID(),
+        now,
+      });
+      expect(notification.payload["todayUrl"]).toBe("https://today.example.tailnet/ui");
+    } finally {
+      delete process.env["TODAY_BASE_URL"];
+    }
   });
 
   it("producer hook: raiseEscalation enqueues a pending escalation notification at/above the threshold only", async () => {

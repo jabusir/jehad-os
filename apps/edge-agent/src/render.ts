@@ -77,9 +77,19 @@ function asString(value: unknown): string | null {
 export function renderNotificationText(notification: DeliverableNotification): string {
   let text: string;
   switch (notification.kind) {
-    case "brief":
-      text = [notification.title, asString(notification.payload["content"])].filter(Boolean).join("\n");
+    case "brief": {
+      // W1.2 audit fix: the daily message carries the Today tap-through when
+      // deployed (same contract as attention) — absent otherwise.
+      const todayUrl = asString(notification.payload["todayUrl"]);
+      text = [
+        notification.title,
+        asString(notification.payload["content"]),
+        todayUrl === null ? null : `Open in Today: ${todayUrl}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
       break;
+    }
     case "reply":
     case "calibration":
       // Conversational/bounded human copy: content ONLY — title prefixes and

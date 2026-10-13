@@ -69,7 +69,7 @@ const MORNING_FULL: MorningBriefData = {
   since: SINCE,
   changed: {
     since: SINCE,
-    eventGroups: [{ type: "capture.recorded", count: 2, events: [] }],
+    eventGroups: [],
     commitments: [
       {
         id: "c-rent",
@@ -193,6 +193,8 @@ const MORNING_FULL: MorningBriefData = {
     timezone: "America/Los_Angeles",
     location: "Google Meet",
   },
+  outcomes: null,
+  openAttention: 0,
   review: {
     candidates: [
       {
@@ -305,6 +307,8 @@ const EVENING_FULL: EveningCloseData = {
   unlock: MORNING_FULL.unlock,
   divergence: null,
   stoppedReminders: [],
+  outcomes: null,
+  openAttention: 0,
 };
 
 const EVENING_EMPTY: EveningCloseData = {
@@ -319,6 +323,8 @@ const EVENING_EMPTY: EveningCloseData = {
   unlock: null,
   divergence: null,
   stoppedReminders: [],
+  outcomes: null,
+  openAttention: 0,
 };
 
 /** W5(d): 2 of 3 blocks churned same-day (plan divergence — unverified). */
@@ -341,8 +347,6 @@ Today
 - next up: Mon, Sep 28 \u00b7 1:30\u20132:15 PM Video Interview with Taekus (Google Meet)
 
 Overnight
-- 2 events:
-  - capture.recorded ×2
 - 1 commitment captured:
   - Pay October rent (i_owe, open)
 - 1 decision:
@@ -505,7 +509,10 @@ describe("suppression predicates (§31 nothing-meaningful-changed)", () => {
   it("morning: empty world suppressed; every signal class alone makes it meaningful", () => {
     expect(isMorningBriefMeaningful(MORNING_EMPTY)).toBe(false);
 
-    expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, changed: { ...EMPTY_CHANGED, eventGroups: [{ type: "x", count: 1, events: [] }] } })).toBe(true);
+    expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, changed: { ...EMPTY_CHANGED, eventGroups: [{ type: "calendar.event.updated", count: 1, events: [] }] } })).toBe(true);
+    // W1.2 audit fix: parked missions and open attention un-suppress
+    expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, outcomes: { needsYou: [{ ref: "R1", title: "t", status: "waiting_user" }], active: [], resolved: [], results: [] } })).toBe(true);
+    expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, openAttention: 2 })).toBe(true);
     expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, waitingOnYou: { overdue: [waitsOnMe({ overdue: true })], dueSoon: [], otherOpenCount: 0 } })).toBe(true);
     expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, waitingOnYou: { overdue: [], dueSoon: [waitsOnMe({ dueSoon: true })], otherOpenCount: 0 } })).toBe(true);
     expect(isMorningBriefMeaningful({ ...MORNING_EMPTY, blocked: [MORNING_FULL.blocked[0]!] })).toBe(true);
@@ -522,6 +529,9 @@ describe("suppression predicates (§31 nothing-meaningful-changed)", () => {
 
   it("evening: calm world suppressed; each §31 signal alone makes it meaningful", () => {
     expect(isEveningCloseMeaningful(EVENING_EMPTY)).toBe(false);
+    // W1.2 audit fix: parked missions and open attention un-suppress the close
+    expect(isEveningCloseMeaningful({ ...EVENING_EMPTY, outcomes: { needsYou: [{ ref: "R1", title: "t", status: "blocked" }], active: [], resolved: [], results: [] } })).toBe(true);
+    expect(isEveningCloseMeaningful({ ...EVENING_EMPTY, openAttention: 1 })).toBe(true);
 
     expect(isEveningCloseMeaningful({ ...EVENING_EMPTY, decisionsMade: EVENING_FULL.decisionsMade })).toBe(true);
     expect(isEveningCloseMeaningful({ ...EVENING_EMPTY, newCommitments: EVENING_FULL.newCommitments })).toBe(true);
@@ -555,18 +565,23 @@ describe("renderOutcomesSection (D0 finisher: delegated outcomes in briefs)", ()
     expect(renderOutcomesSection(undefined)).toEqual([]);
   });
 
-  it("renders needs-you first, then in-flight, then window-resolved with status", () => {
+  it("renders needs-you first (waiting_user AND blocked), then in-flight, then window-resolved with status", () => {
     const lines = renderOutcomesSection({
-      needsYou: [{ ref: "FH1", title: "Verify the outcome loop", status: "waiting_user" }],
+      needsYou: [
+        { ref: "FH1", title: "Verify the outcome loop", status: "waiting_user" },
+        { ref: "BLK", title: "Blocked on external access", status: "blocked" },
+      ],
       active: [{ ref: "P8Q", title: "Chase the Acme quote", status: "running" }],
       resolved: [
         { ref: "BVB", title: "First delegated outcome", status: "completed" },
         { ref: "M2K", title: "Doomed errand", status: "failed" },
       ],
+      results: [],
     });
     expect(lines).toEqual([
       "Delegated outcomes",
-      '- FH1 needs your verification — "Verify the outcome loop"',
+      '- FH1 needs you — "Verify the outcome loop"',
+      '- BLK needs you — "Blocked on external access"',
       '- P8Q in progress — "Chase the Acme quote"',
       '- BVB completed — "First delegated outcome"',
       '- M2K failed — "Doomed errand"',
@@ -579,7 +594,7 @@ describe("renderOutcomesSection (D0 finisher: delegated outcomes in briefs)", ()
       title: `outcome ${i}`,
       status: "running",
     }));
-    const lines = renderOutcomesSection({ needsYou: [], active: five, resolved: [] });
+    const lines = renderOutcomesSection({ needsYou: [], active: five, resolved: [], results: [] });
     expect(lines).toHaveLength(1 + 4 + 1);
     expect(lines.at(-1)).toBe("  - …and 1 more");
   });
@@ -591,10 +606,39 @@ describe("renderOutcomesSection (D0 finisher: delegated outcomes in briefs)", ()
         needsYou: [{ ref: "FH1", title: "Verify the outcome loop", status: "waiting_user" }],
         active: [],
         resolved: [],
+        results: [],
       },
     });
     expect(text).toContain("Delegated outcomes");
     expect(text.indexOf("Delegated outcomes")).toBeGreaterThan(-1);
-    expect(text).toContain('FH1 needs your verification — "Verify the outcome loop"');
+    expect(text).toContain('FH1 needs you — "Verify the outcome loop"');
+  });
+
+  it("W1.2 audit fix: machine event kinds never render as an Overnight delta", () => {
+    const text = renderMorningBriefText({
+      ...MORNING_FULL,
+      changed: {
+        ...MORNING_FULL.changed,
+        eventGroups: [
+          { type: "gmail.message.received", count: 14, events: [] },
+          { type: "outcome.status_changed", count: 4, events: [] },
+          { type: "attention.item.opened", count: 2, events: [] },
+        ],
+      },
+    });
+    expect(text).not.toContain("gmail.message.received");
+    expect(text).not.toContain("outcome.status_changed");
+    expect(text).not.toContain("attention.item.opened");
+    expect(text).not.toContain("14 events");
+  });
+
+  it("W1.2 audit fix: open attention renders as a Waiting-in-Today section", () => {
+    const text = renderMorningBriefText({ ...MORNING_FULL, openAttention: 3 });
+    expect(text).toContain("Waiting in Today");
+    expect(text).toContain("- 3 items need you in Today");
+    const one = renderMorningBriefText({ ...MORNING_FULL, openAttention: 1 });
+    expect(one).toContain("- 1 item needs you in Today");
+    const none = renderMorningBriefText({ ...MORNING_FULL, openAttention: 0 });
+    expect(none).not.toContain("Waiting in Today");
   });
 });
