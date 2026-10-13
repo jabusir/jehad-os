@@ -157,13 +157,26 @@ export async function deliverOutcomeAttentionNow(
 ): Promise<void> {
   try {
     await notifyAttentionItem(db, item, { now: opts.now });
-  } catch (err) {
-    await recordAudit(db, {
-      actor: "system/attention-delivery",
-      action: "attention.enqueue_failed",
-      reversible: true,
-      outputsRef: JSON.stringify({ itemId: item.id, error: (err as Error)?.message ?? "unknown" }),
-    });
+  } catch (enqueueErr) {
+    // Post-commit delivery observability is best-effort TOO (W1.1 correction):
+    // if the DB itself is unavailable the audit write would also throw and
+    // make a COMMITTED transition appear failed to the caller. Attempt the
+    // audit; if it fails, log bounded metadata and swallow. This function
+    // NEVER rethrows — attention-liveness recovers the item either way.
+    try {
+      await recordAudit(db, {
+        actor: "system/attention-delivery",
+        action: "attention.enqueue_failed",
+        reversible: true,
+        outputsRef: JSON.stringify({ itemId: item.id, error: (enqueueErr as Error)?.message ?? "unknown" }),
+      });
+    } catch (auditErr) {
+      console.error(
+        `[attention] enqueue failed AND audit unavailable — itemId=${item.id} `
+        + `enqueue=${(enqueueErr as Error)?.message ?? "unknown"} `
+        + `audit=${(auditErr as Error)?.message ?? "unknown"}`,
+      );
+    }
   }
 }
 

@@ -376,6 +376,35 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
   });
 
   // ------------------------------------------------------ principal isolation
+  it("W1.1 correction: an EXPIRED snooze renders under Needs you immediately, not Snoozed", async () => {
+    const id = await seedItem(userId, {
+      title: "Expired-snooze sectioning probe",
+      state: "snoozed",
+      actions: [{ key: "attention.resolve" }],
+    });
+    // snoozed_until in the PAST: needs-you per the listOpenAttention contract
+    await db.pool.query(
+      "UPDATE attention_items SET snoozed_until = now() - interval '5 minutes' WHERE id = $1::uuid",
+      [id],
+    );
+    const page = (await app.inject({ method: "GET", url: "/ui", headers: { cookie } })).body;
+    const needs = page.split("Needs you")[1]!.split("Snoozed")[0]!;
+    const snoozed = page.split("Snoozed")[1]!;
+    expect(needs).toContain("Expired-snooze sectioning probe");
+    expect(snoozed).not.toContain("Expired-snooze sectioning probe");
+
+    // a LIVE snooze still renders under Snoozed
+    await db.pool.query(
+      "UPDATE attention_items SET snoozed_until = now() + interval '1 hour' WHERE id = $1::uuid",
+      [id],
+    );
+    const page2 = (await app.inject({ method: "GET", url: "/ui", headers: { cookie } })).body;
+    const needs2 = page2.split("Needs you")[1]!.split("Snoozed")[0]!;
+    const snoozed2 = page2.split("Snoozed")[1]!;
+    expect(needs2).not.toContain("Expired-snooze sectioning probe");
+    expect(snoozed2).toContain("Expired-snooze sectioning probe");
+  });
+
   it("a second principal sees none of the first principal's items; foreign action/view → 404", async () => {
     const fresh = await seedItem(userId, { title: "Isolation probe" });
     await seedItem(otherId, { title: "Others own thing" }); // their page must render a form (csrf)

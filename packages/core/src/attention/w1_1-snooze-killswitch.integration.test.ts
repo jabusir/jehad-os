@@ -18,7 +18,9 @@ import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../..
 import { createOutcome, transitionOutcome } from "../outcomes/service.js";
 import { snoozeAttention, listOpenAttention, livenessSweep, openOrBumpOrReopen } from "./service.js";
 import { retryEligibleUndelivered } from "./delivery.js";
+import { deliverOutcomeAttentionNow } from "./outcome-producer.js";
 import type { AttentionPolicy } from "./policy.js";
+import type { AttentionItemRow } from "./types.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
@@ -196,5 +198,32 @@ describe.skipIf(!TEST_DATABASE_URL)("W1.1 snooze lifecycle + kill switch (integr
     const dismissed = await import("./service.js").then((m) =>
       m.dismissAttention(exec, principalId, itemId, { now: at(50), actor: "w1.1-owner" }));
     expect(dismissed!.state).toBe("dismissed");
+  });
+});
+
+// W1.1 correction — post-commit delivery observability is best-effort ALL the
+// way down: enqueue failure is caught; the audit of that failure is caught
+// too (a DB outage must never make a COMMITTED transition appear failed).
+// Hermetic — the "DB" throws on every query.
+describe("deliverOutcomeAttentionNow never rethrows after canonical truth", () => {
+  it("resolves even when both the enqueue and the audit fail", async () => {
+    const hostile = {
+      query: () => { throw new Error("db unavailable (hostile probe)"); },
+    };
+    const item = {
+      id: "00000000-0000-4000-8000-000000000001",
+      principalId: "00000000-0000-4000-8000-000000000002",
+      sourceType: "outcome", sourceObjectId: "o1", fingerprint: "outcome:o1:ready",
+      kind: "outcome.ready", state: "open", level: "inbox", safetyClass: "none",
+      title: "t", summary: "s", whyItMatters: null,
+      evidenceRefs: [], actions: [], occurrences: 1, changeFingerprint: null,
+      firstRaisedAt: new Date(), updatedAt: new Date(), seenAt: null,
+      snoozedUntil: null, snoozeCount: 0, resolvedAt: null, resolvedBy: null,
+      resolutionReason: null, lastDeliveredAt: null, deliveryAttempts: 0,
+      lastDeliveryAttemptAt: null,
+    } as AttentionItemRow;
+    await expect(
+      deliverOutcomeAttentionNow(hostile as never, item, { now: new Date() }),
+    ).resolves.toBeUndefined();
   });
 });

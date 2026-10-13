@@ -65,7 +65,20 @@ function pool(): Pool {
   return new Pool({ connectionString: process.env.DATABASE_URL ?? "postgres://localhost:5432/jehad" });
 }
 
-const exec = (p: Pool) => ({ query: (sql: string, params: readonly unknown[] = []) => p.query(sql, params as unknown[]) });
+/**
+ * The production DB shape for every outcome lane (executor, resume scanner,
+ * reaper). W1.1: this adapter MUST preserve Pool.connect — erasing it makes
+ * isPoolDb() classify the adapter as a caller-owned transaction client while
+ * every query actually autocommits, silently defeating the atomic
+ * transition (Outcome + event + Attention in one txn). The companion
+ * production-shaped atomicity regression (transition-atomicity.production
+ * .integration.test.ts) exercises exactly this object.
+ */
+export const executorDb = (p: Pool) => ({
+  query: (sql: string, params: readonly unknown[] = []) => p.query(sql, params as unknown[]),
+  connect: () => p.connect(),
+});
+const exec = executorDb;
 
 // --------------------------------------------------- workers policy + harness
 

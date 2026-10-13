@@ -67,6 +67,7 @@ interface TodayItem {
   }[];
   readonly occurrences: number;
   readonly firstRaisedAt: Date;
+  readonly snoozedUntil: Date | string | null;
 }
 
 interface ActionDescriptor {
@@ -244,8 +245,17 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
       now,
       includeSnoozed: true,
     })) as readonly TodayItem[];
-    const needs = items.filter((i) => i.state === "open" || i.state === "seen");
-    const snoozed = items.filter((i) => i.state === "snoozed");
+    // W1.1 correction — snooze sectioning matches the listOpenAttention
+    // contract: an EXPIRED snooze is needs-you NOW (even before the ≤5-min
+    // liveness wake flips the stored state to open); only a LIVE snooze
+    // renders under Snoozed.
+    const snoozeLive = (i: TodayItem): boolean => {
+      if (i.state !== "snoozed") return false;
+      const until = i.snoozedUntil === null ? null : new Date(i.snoozedUntil);
+      return until !== null && until.getTime() > now.getTime();
+    };
+    const needs = items.filter((i) => !snoozeLive(i));
+    const snoozed = items.filter(snoozeLive);
     const body =
       `<h1>TODAY</h1>` +
       `<h2>Needs you</h2>` +
