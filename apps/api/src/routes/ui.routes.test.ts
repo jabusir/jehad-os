@@ -63,6 +63,7 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
             { key: "attention.resolve" },
             { key: "attention.dismiss" },
             { key: "attention.snooze" },
+            { key: "attention.seen" },
           ],
         ),
         overrides.occurrences ?? 1,
@@ -295,6 +296,23 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
     expect(snoozed.state).toBe("snoozed");
     expect(snoozed.snoozed_until).not.toBeNull();
     expect(Number(snoozed.snooze_count)).toBe(1);
+
+    // W1.1 finding 5: registry-valid keys that the ITEM does not store fail
+    // closed; stored-key with mismatched args fails closed too.
+    const forged = await seedItem(userId, {
+      title: "Forge target",
+      actions: [
+        { key: "attention.feedback", args: { verdict: "noise" } },
+        { key: "attention.snooze" },
+      ],
+    });
+    // registry-valid, not stored on THIS item → fail closed
+    expect((await actionPost(cookie, { itemId: forged, key: "attention.dismiss", args: "{}", csrf })).statusCode).toBe(403);
+    expect((await actionPost(cookie, { itemId: forged, key: "attention.feedback", args: JSON.stringify({ verdict: "interruptive" }), csrf })).statusCode).toBe(403);
+    // stored key, args the item never carried → fail closed
+    expect((await actionPost(cookie, { itemId: forged, key: "attention.feedback", args: JSON.stringify({ verdict: "useful" }), csrf })).statusCode).toBe(403);
+    // stored key + exact stored args → passes the gate (snooze dispatch = free minutes)
+    expect((await actionPost(cookie, { itemId: forged, key: "attention.snooze", args: JSON.stringify({ minutes: 30 }), csrf })).statusCode).toBe(303);
 
     const outOfBounds = await actionPost(cookie, {
       itemId: snoozeId, key: "attention.snooze", args: JSON.stringify({ minutes: 9999 }), csrf,

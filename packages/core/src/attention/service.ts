@@ -53,12 +53,27 @@ export interface AttentionDb extends EventStoreExecutor, SqlExecutor {
 
 export interface AttentionTx extends EventStoreExecutor, SqlExecutor {}
 
+/**
+ * W1.1: pg PoolClients ALSO expose .connect — the discriminator is `release`
+ * (PoolClient has it; Pool does not). Getting this wrong re-enters a live
+ * client ("already been connected") or fragments the transaction.
+ */
+export function isPoolDb(db: AttentionDb | OutcomePoolLike): boolean {
+  return typeof (db as { connect?: unknown }).connect === "function" &&
+    typeof (db as { release?: unknown }).release !== "function";
+}
+
+interface OutcomePoolLike {
+  connect?(): unknown;
+  release?: unknown;
+}
+
 async function withTransaction<T>(db: AttentionDb, fn: (tx: AttentionTx) => Promise<T>): Promise<T> {
   // Client path: the caller owns BEGIN/COMMIT — never open a second
   // connection (that would break same-transaction atomicity with the
   // caller's transition).
-  if (typeof db.connect !== "function") return fn(db as AttentionTx);
-  const client = await db.connect();
+  if (!isPoolDb(db)) return fn(db as AttentionTx);
+  const client = await db.connect!();
   try {
     await client.query("BEGIN");
     const result = await fn(client);
@@ -227,6 +242,11 @@ export async function openOrBumpOrReopen(
     );
     const prior = locked.rows[0] as unknown as AttentionSqlRow | undefined;
 
+    // W1.1 recorded finding (fixed, bounded): FOR UPDATE cannot lock a row
+    // that does not exist — two concurrent first-writes race the INSERT and
+    // the loser hits the identity UNIQUE violation. Catch it, re-lock, and
+    // fall through to the bump/reopen branches (single retry; the identity
+    // key guarantees one of the two writes is an insert).
     if (prior === undefined) {
       const id = randomUUID();
       const inserted = await tx.query(
@@ -237,6 +257,7 @@ export async function openOrBumpOrReopen(
          )
          VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11,
                  $12::jsonb, $13::jsonb, $14, $15::timestamptz, $15::timestamptz)
+         ON CONFLICT (principal_id, source_type, source_object_id, fingerprint) DO NOTHING
          RETURNING ${ATTENTION_COLUMNS}`,
         [
           id, input.principalId, input.sourceType, input.sourceObjectId, input.fingerprint,
@@ -245,96 +266,180 @@ export async function openOrBumpOrReopen(
           JSON.stringify(input.actions ?? []), input.changeFingerprint ?? null, opts.now.toISOString(),
         ],
       );
+      if (inserted.rows.length === 0) {
+        // Lost the concurrent insert race: the winner's row is now visible —
+        // re-lock and take the bump/reopen path below.
+        const raced = await tx.query(
+          `SELECT ${ATTENTION_COLUMNS} FROM attention_items
+            WHERE principal_id = $1::uuid AND source_type = $2
+              AND source_object_id = $3 AND fingerprint = $4
+            FOR UPDATE`,
+          [input.principalId, input.sourceType, input.sourceObjectId, input.fingerprint],
+        );
+        const racedRow = raced.rows[0] as unknown as AttentionSqlRow | undefined;
+        if (racedRow !== undefined) {
+          return await bumpOrReopen(tx, input, toAttentionItem(racedRow), opts);
+        }
+        // Still nothing (winner rolled back) — our INSERT was conflict-do-
+        // nothing against a ghost; retry the insert once.
+        const retried = await tx.query(
+          `INSERT INTO attention_items (
+             id, principal_id, source_type, source_object_id, fingerprint, kind,
+             level, safety_class, title, summary, why_it_matters, evidence_refs,
+             actions, change_fingerprint, first_raised_at, updated_at
+           )
+           VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                   $12::jsonb, $13::jsonb, $14, $15::timestamptz, $15::timestamptz)
+           RETURNING ${ATTENTION_COLUMNS}`,
+          [
+            id, input.principalId, input.sourceType, input.sourceObjectId, input.fingerprint,
+            input.kind, input.level, input.safetyClass ?? "none", input.title, input.summary,
+            input.whyItMatters ?? null, JSON.stringify(input.evidenceRefs ?? []),
+            JSON.stringify(input.actions ?? []), input.changeFingerprint ?? null, opts.now.toISOString(),
+          ],
+        );
+        const item = toAttentionItem(retried.rows[0] as unknown as AttentionSqlRow);
+        await acceptOpenedEvent(tx, item, opts);
+        await audit(tx, "attention.opened", { itemId: item.id, occurrences: 1, branch: "opened" }, opts.actor);
+        return { action: "opened", item, deliverNow: true, deferReason: null };
+      }
       const item = toAttentionItem(inserted.rows[0] as unknown as AttentionSqlRow);
       // Content-free payload contract: ids/kind/level only — never title/summary.
-      await acceptEvent(tx, {
-        type: "attention.item.opened",
-        schemaVersion: LATEST_PAYLOAD_SCHEMA_VERSION,
-        source: "internal",
-        externalId: `attention-opened:${item.id}`,
-        occurredAt: opts.now.toISOString(),
-        domainId: "personal",
-        sensitivity: "normal",
-        payload: {
-          itemId: item.id,
-          principalId: item.principalId,
-          sourceType: item.sourceType,
-          sourceObjectId: item.sourceObjectId,
-          fingerprint: item.fingerprint,
-          kind: item.kind,
-          level: item.level,
-        },
-        runId: null,
-      }, { now: () => opts.now });
+      await acceptOpenedEvent(tx, item, opts);
       await audit(tx, "attention.opened", { itemId: item.id, occurrences: 1, branch: "opened" }, opts.actor);
       return { action: "opened", item, deliverNow: true, deferReason: null };
     }
 
-    const priorItem = toAttentionItem(prior);
-    const newLevelRank = Math.max(LEVEL_RANK[input.level], LEVEL_RANK[priorItem.level]);
-    const effectiveLevel = LEVEL_BY_RANK[newLevelRank - 1]!;
+    return await bumpOrReopen(tx, input, toAttentionItem(prior), opts);
+  });
+}
 
-    if (priorItem.state === "resolved" || priorItem.state === "dismissed") {
-      const reopened = await tx.query(
-        `UPDATE attention_items SET
-           state = 'open',
-           occurrences = attention_items.occurrences + 1,
-           level = $2,
-           title = $3, summary = $4, why_it_matters = $5,
-           change_fingerprint = $6,
-           updated_at = $7::timestamptz,
-           snoozed_until = NULL,
-           resolved_at = NULL, resolved_by = NULL, resolution_reason = NULL
-         WHERE id = $1::uuid
-         RETURNING ${ATTENTION_COLUMNS}`,
-        [
-          priorItem.id, effectiveLevel, input.title, input.summary,
-          input.whyItMatters ?? null, input.changeFingerprint ?? null, opts.now.toISOString(),
-        ],
-      );
-      const item = toAttentionItem(reopened.rows[0] as unknown as AttentionSqlRow);
-      await audit(tx, "attention.reopened", { itemId: item.id, occurrences: item.occurrences, priorState: priorItem.state }, opts.actor);
-      // Contract: a closed condition recurring is news — reopen delivers.
-      return { action: "reopened", item, deliverNow: true, deferReason: null };
-    }
+/** The content-free opened event (ids/kind/level only — never title/summary). */
+async function acceptOpenedEvent(
+  tx: AttentionTx,
+  item: AttentionItemRow,
+  opts: { now: Date },
+): Promise<void> {
+  await acceptEvent(tx, {
+    type: "attention.item.opened",
+    schemaVersion: LATEST_PAYLOAD_SCHEMA_VERSION,
+    source: "internal",
+    externalId: `attention-opened:${item.id}`,
+    occurredAt: opts.now.toISOString(),
+    domainId: "personal",
+    sensitivity: "normal",
+    payload: {
+      itemId: item.id,
+      principalId: item.principalId,
+      sourceType: item.sourceType,
+      sourceObjectId: item.sourceObjectId,
+      fingerprint: item.fingerprint,
+      kind: item.kind,
+      level: item.level,
+    },
+    runId: null,
+  }, { now: () => opts.now });
+}
 
-    // Bump. Level-rise re-delivery is compared here (the salience input
-    // carries one level) and OR-ed with the ladder decision (§1.4).
-    const levelRisen = LEVEL_RANK[input.level] > LEVEL_RANK[priorItem.level];
-    const decision = decideDelivery({
-      level: effectiveLevel,
-      safetyClass: priorItem.safetyClass,
-      state: priorItem.state,
-      snoozedUntil: priorItem.snoozedUntil,
-      lastDeliveredAt: priorItem.lastDeliveredAt,
-      newChangeFingerprint: input.changeFingerprint ?? null,
-      storedChangeFingerprint: priorItem.changeFingerprint,
-      cooldownMinutes: ATTENTION_DEFAULT_COOLDOWN_MINUTES,
-      now: opts.now,
-    });
-    const bumped = await tx.query(
+/**
+ * The pre-write-state branches against a LOCKED existing row (ADR-0018
+ * §1.3): resolved/dismissed → reopen (news — delivers); live → bump with
+ * re-run salience.
+ *
+ * W1.1 finding 2 (snooze lifecycle): a CHANGED occurrence while snoozed
+ * wakes the item (state → open, snoozed_until cleared, updated_at = now)
+ * and delivers — an unchanged occurrence stays snoozed and deferred.
+ * W1.1 recorded finding (fixed): bump and reopen ALSO refresh
+ * evidence_refs + actions from the producer input — the stored controls on
+ * a recurring card are the producer's CURRENT set, never stale ones.
+ * safety_class stays first-write-wins by design (never downgrade safety).
+ */
+async function bumpOrReopen(
+  tx: AttentionTx,
+  input: OpenAttentionInput,
+  priorItem: AttentionItemRow,
+  opts: { now: Date; actor: string },
+): Promise<OpenAttentionResult> {
+  const newLevelRank = Math.max(LEVEL_RANK[input.level], LEVEL_RANK[priorItem.level]);
+  const effectiveLevel = LEVEL_BY_RANK[newLevelRank - 1]!;
+
+  if (priorItem.state === "resolved" || priorItem.state === "dismissed") {
+    const reopened = await tx.query(
       `UPDATE attention_items SET
+         state = 'open',
          occurrences = attention_items.occurrences + 1,
          level = $2,
          title = $3, summary = $4, why_it_matters = $5,
          change_fingerprint = $6,
-         updated_at = $7::timestamptz
+         evidence_refs = $7::jsonb, actions = $8::jsonb,
+         updated_at = $9::timestamptz,
+         snoozed_until = NULL,
+         resolved_at = NULL, resolved_by = NULL, resolution_reason = NULL
        WHERE id = $1::uuid
        RETURNING ${ATTENTION_COLUMNS}`,
       [
         priorItem.id, effectiveLevel, input.title, input.summary,
-        input.whyItMatters ?? null, input.changeFingerprint ?? null, opts.now.toISOString(),
+        input.whyItMatters ?? null, input.changeFingerprint ?? null,
+        JSON.stringify(input.evidenceRefs ?? []), JSON.stringify(input.actions ?? []),
+        opts.now.toISOString(),
       ],
     );
-    const item = toAttentionItem(bumped.rows[0] as unknown as AttentionSqlRow);
-    await audit(tx, "attention.bumped", { itemId: item.id, occurrences: item.occurrences, state: item.state, deliverNow: decision.deliver || levelRisen }, opts.actor);
-    return {
-      action: "bumped",
-      item,
-      deliverNow: decision.deliver || levelRisen,
-      deferReason: decision.deliver || levelRisen ? null : decision.deferReason,
-    };
+    const item = toAttentionItem(reopened.rows[0] as unknown as AttentionSqlRow);
+    await audit(tx, "attention.reopened", { itemId: item.id, occurrences: item.occurrences, priorState: priorItem.state }, opts.actor);
+    // Contract: a closed condition recurring is news — reopen delivers.
+    return { action: "reopened", item, deliverNow: true, deferReason: null };
+  }
+
+  // Bump. Level-rise re-delivery is compared here (the salience input
+  // carries one level) and OR-ed with the ladder decision (§1.4).
+  const levelRisen = LEVEL_RANK[input.level] > LEVEL_RANK[priorItem.level];
+  const fingerprintChanged =
+    input.changeFingerprint != null &&
+    priorItem.changeFingerprint != null &&
+    input.changeFingerprint !== priorItem.changeFingerprint;
+  // W1.1 finding 2: a CHANGED occurrence while SNOOZED wakes the item
+  // (state → open, snoozed_until cleared) and delivers — an unchanged
+  // occurrence stays snoozed and deferred.
+  const wakeFromSnooze = priorItem.state === "snoozed" && fingerprintChanged;
+  const decision = decideDelivery({
+    level: effectiveLevel,
+    safetyClass: priorItem.safetyClass,
+    state: wakeFromSnooze ? "open" : priorItem.state,
+    snoozedUntil: wakeFromSnooze ? null : priorItem.snoozedUntil,
+    lastDeliveredAt: priorItem.lastDeliveredAt,
+    newChangeFingerprint: input.changeFingerprint ?? null,
+    storedChangeFingerprint: priorItem.changeFingerprint,
+    cooldownMinutes: ATTENTION_DEFAULT_COOLDOWN_MINUTES,
+    now: opts.now,
   });
+  const bumped = await tx.query(
+    `UPDATE attention_items SET
+       occurrences = attention_items.occurrences + 1,
+       level = $2,
+       title = $3, summary = $4, why_it_matters = $5,
+       change_fingerprint = $6,
+       evidence_refs = $7::jsonb, actions = $8::jsonb,
+       updated_at = $9::timestamptz,
+       state = CASE WHEN $10::boolean THEN 'open' ELSE attention_items.state END,
+       snoozed_until = CASE WHEN $10::boolean THEN NULL ELSE attention_items.snoozed_until END
+     WHERE id = $1::uuid
+     RETURNING ${ATTENTION_COLUMNS}`,
+    [
+      priorItem.id, effectiveLevel, input.title, input.summary,
+      input.whyItMatters ?? null, input.changeFingerprint ?? null,
+      JSON.stringify(input.evidenceRefs ?? []), JSON.stringify(input.actions ?? []),
+      opts.now.toISOString(), wakeFromSnooze,
+    ],
+  );
+  const item = toAttentionItem(bumped.rows[0] as unknown as AttentionSqlRow);
+  const deliver = decision.deliver || levelRisen;
+  await audit(tx, "attention.bumped", { itemId: item.id, occurrences: item.occurrences, state: item.state, deliverNow: deliver, wokeFromSnooze: wakeFromSnooze }, opts.actor);
+  return {
+    action: "bumped",
+    item,
+    deliverNow: deliver,
+    deferReason: deliver ? null : decision.deferReason,
+  };
 }
 
 // ----------------------------------------------------------------- owner actions
@@ -428,10 +533,12 @@ export async function snoozeAttention(
   const flipped = await db.query(
     `UPDATE attention_items SET
        state = 'snoozed', snoozed_until = $3::timestamptz,
-       snooze_count = attention_items.snooze_count + 1, updated_at = $3::timestamptz
+       snooze_count = attention_items.snooze_count + 1, updated_at = $4::timestamptz
      WHERE id = $1::uuid AND principal_id = $2::uuid AND state IN ${LIVE_STATES}
      RETURNING ${ATTENTION_COLUMNS}`,
-    [itemId, principalId, snoozedUntil.toISOString()],
+    // W1.1 finding 2: updated_at is the MUTATION time (now), never the
+    // snoozed_until instant — the row's sort/version semantics stay honest.
+    [itemId, principalId, snoozedUntil.toISOString(), opts.now.toISOString()],
   );
   if (flipped.rows.length > 0) {
     const item = toAttentionItem(flipped.rows[0] as unknown as AttentionSqlRow);
@@ -487,17 +594,22 @@ export async function listOpenAttention(
   principalId: string,
   opts: { now: Date; includeSnoozed?: boolean; limit?: number },
 ): Promise<AttentionItemRow[]> {
-  const states = opts.includeSnoozed === true ? `('open','seen','snoozed')` : `('open','seen')`;
+  // W1.1 finding 2: an EXPIRED snooze is needs-you again — it renders in the
+  // default list even before the liveness sweep formally wakes the row.
+  const needsYou = `state IN ('open','seen') OR (state = 'snoozed' AND snoozed_until <= $2::timestamptz)`;
+  const states = opts.includeSnoozed === true
+    ? `(${needsYou} OR state = 'snoozed')`
+    : `(${needsYou})`;
   const limitSql = opts.limit === undefined ? "" : ` LIMIT ${Math.floor(opts.limit)}`;
   const result = await db.query(
     `SELECT ${ATTENTION_COLUMNS} FROM attention_items
-      WHERE principal_id = $1::uuid AND state IN ${states}
+      WHERE principal_id = $1::uuid AND ${states}
       ORDER BY
         (safety_class <> 'none') DESC,
         CASE level WHEN 'interrupt' THEN 3 WHEN 'inbox' THEN 2 ELSE 1 END DESC,
         (jsonb_array_length(actions) > 0) DESC,
         first_raised_at ASC${limitSql}`,
-    [principalId],
+    [principalId, opts.now.toISOString()],
   );
   return (result.rows as unknown as AttentionSqlRow[]).map(toAttentionItem);
 }
@@ -513,8 +625,21 @@ export async function listOpenAttention(
 export async function livenessSweep(
   db: AttentionDb,
   opts: { now: Date; cap?: number },
-): Promise<{ checked: number; resolved: number }> {
+): Promise<{ checked: number; resolved: number; woken?: number }> {
   const cap = opts.cap ?? 500;
+  // W1.1 finding 2: a snooze whose window has passed is DONE — wake it back
+  // to open so it is eligible for Today and delivery again (explicit state
+  // transition, audited; the snooze_count history stays).
+  const woken = await db.query(
+    `UPDATE attention_items SET
+       state = 'open', snoozed_until = NULL, updated_at = $1::timestamptz
+      WHERE state = 'snoozed' AND snoozed_until <= $1::timestamptz
+      RETURNING id`,
+    [opts.now.toISOString()],
+  );
+  if (woken.rows.length > 0) {
+    await audit(db, "attention.woken", { count: woken.rows.length }, "system/attention-liveness");
+  }
   const stale = await db.query(
     `SELECT ${ATTENTION_COLUMNS} FROM attention_items
       WHERE state IN ('open','seen')
@@ -555,5 +680,5 @@ export async function livenessSweep(
   if (gcDeleted > 0) {
     await audit(db, "attention.gc", { deleted: gcDeleted, retentionDays: ATTENTION_TERMINAL_RETENTION_DAYS }, "system/attention-liveness");
   }
-  return { checked: stale.rows.length, resolved };
+  return { checked: stale.rows.length, resolved, woken: woken.rows.length };
 }

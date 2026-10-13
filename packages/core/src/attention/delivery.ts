@@ -131,9 +131,10 @@ export async function retryEligibleUndelivered(
   const { cooldownMinutes, notifications } = resolveConfig(opts.config);
   const nowIso = opts.now.toISOString();
   const due = await db.query(
-    `SELECT id, state, level, safety_class, snoozed_until, last_delivered_at, change_fingerprint
+    `SELECT id, state, level, safety_class, snoozed_until, last_delivered_at, change_fingerprint, title
      FROM attention_items
-     WHERE state IN ('open', 'seen')
+     WHERE ( state IN ('open', 'seen')
+       OR (state = 'snoozed' AND snoozed_until <= $1::timestamptz) )
        AND (snoozed_until IS NULL OR snoozed_until <= $1::timestamptz)
        AND level IN ('inbox', 'interrupt')
        AND last_delivered_at IS NULL
@@ -146,6 +147,7 @@ export async function retryEligibleUndelivered(
      LIMIT $2`,
     [nowIso, RETRY_CAP],
   );
+  if (process.env.W11_DEBUG) console.error('PROBE due:', JSON.stringify(due.rows.map((r) => ({ t: r.title, s: r.state, l: r.level }))));
   let enqueued = 0;
   for (const row of due.rows as {
     id: string;
@@ -169,7 +171,10 @@ export async function retryEligibleUndelivered(
     );
     const item = fresh.rows.length > 0 ? toAttentionItem(fresh.rows[0] as never) : undefined;
     if (item === undefined) continue;
-    if (item.state !== "open" && item.state !== "seen") continue;
+    // W1.1 finding 2: an EXPIRED snooze is delivery-eligible (the gate below
+    // re-runs salience with the wake semantics); a LIVE snooze is not.
+    if (item.state === "snoozed" && (item.snoozedUntil === null || item.snoozedUntil.getTime() > opts.now.getTime())) continue;
+    if (item.state !== "open" && item.state !== "seen" && item.state !== "snoozed") continue;
     const decision = decideDelivery({
       level: item.level as AttentionLevel,
       safetyClass: item.safetyClass as AttentionSafetyClass,

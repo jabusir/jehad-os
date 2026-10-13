@@ -40,6 +40,7 @@ import {
   listOpenAttention,
   markSeen,
   resolveAttention,
+  storedActionMatches,
   snoozeAttention,
 } from "@jehad/core";
 import { escapeHtml } from "../escape-html.js";
@@ -295,6 +296,14 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
     const item = items.find((i) => i.id === itemId);
     if (item === undefined) {
       return await sendHtml(reply, 404, page(`<h1>TODAY</h1><p>Not found. <a href="/ui">Back to Today</a>.</p>`));
+    }
+    // W1.1 finding 5 — authorization is registry AND item: the submitted
+    // {key,args} must match an action the producer actually stored on THIS
+    // row. A registered key absent from the item (or with args the row never
+    // carried) fails closed — the registry alone is not authorization.
+    const storedActions = (item.actions ?? []) as readonly { key: string; args?: Record<string, string | number> }[];
+    if (!storedActionMatches(storedActions, String(key), args)) {
+      return await sendHtml(reply, 403, page(`<h1>TODAY</h1><p>That action is not available on this item. <a href="/ui">Back to Today</a>.</p>`));
     }
     switch (descriptor.kind) {
       case "resolve": {

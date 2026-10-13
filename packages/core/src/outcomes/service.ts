@@ -19,7 +19,9 @@
 
 import { randomUUID } from "node:crypto";
 import { recordAudit, type SqlExecutor } from "../actions/audit.js";
-import { emitOutcomeAttention } from "../attention/outcome-producer.js";
+import { isPoolDb } from "../attention/service.js";
+import type { AttentionPolicy } from "../attention/policy.js";
+import { emitOutcomeAttention, deliverOutcomeAttentionNow, type ProducedAttention } from "../attention/outcome-producer.js";
 import { acceptEvent, type EventStoreExecutor } from "../events/store.js";
 import { LATEST_PAYLOAD_SCHEMA_VERSION } from "../events/catalog.js";
 import {
@@ -290,17 +292,68 @@ export interface TransitionOutcomeResult {
 /**
  * CAS transition + canonical event. The DB trigger is the authority; the
  * `WHERE status = $old` here keeps concurrent executors exactly-once.
+ *
+ * W1.1 finding 1 — atomicity: the Outcome row, the canonical event, and the
+ * Attention truth (producer resolve + 3-branch write) commit in ONE
+ * transaction. Pool callers (executor, josctl, API): explicit BEGIN..COMMIT
+ * on a dedicated client; the delivery ENQUEUE happens only AFTER COMMIT,
+ * best-effort — a delivery failure must never make a committed canonical
+ * transition appear failed (attention-liveness re-enqueues). Bare-client
+ * callers (tests, transactional callers): the caller owns the transaction and
+ * the enqueue rides it (failure caught+audited) so a notification can never
+ * outlive a rolled-back transition.
  */
 export async function transitionOutcome(
   db: OutcomeDb,
   outcomeId: string,
   toStatus: OutcomeStatus,
   extra: { readonly waitingOn?: Record<string, unknown>; readonly failureReason?: string } = {},
-  opts: { readonly now: Date; readonly actor: string },
+  opts: { readonly now: Date; readonly actor: string; readonly attentionPolicy?: AttentionPolicy },
 ): Promise<TransitionOutcomeResult> {
   const current = await getOutcomeById(db, outcomeId);
   if (current === null) throw new Error(`outcomes: unknown outcome ${outcomeId}`);
   if (current.status === toStatus) return { outcome: current, changed: false };
+
+  if (isPoolDb(db)) {
+    const client = await (db as unknown as {
+      connect(): Promise<OutcomeDb & { release(): void }>;
+    }).connect();
+    let durable: { outcome: OutcomeRow; changed: boolean; produced: ProducedAttention | null };
+    try {
+      await client.query("BEGIN");
+      durable = await transitionDurable(client, current, outcomeId, toStatus, extra, opts);
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+    // Durable truth is committed — delivery is best-effort from here.
+    if (durable.changed && durable.produced?.deliverNow) {
+      await deliverOutcomeAttentionNow(db, durable.produced.item, { now: opts.now });
+    }
+    return { outcome: durable.outcome, changed: durable.changed };
+  }
+
+  const durable = await transitionDurable(db, current, outcomeId, toStatus, extra, opts);
+  if (durable.changed && durable.produced?.deliverNow) {
+    // Inside the caller's transaction: atomic with the truth; a failure is
+    // caught/audited (never fails the transition) and liveness recovers it.
+    await deliverOutcomeAttentionNow(db, durable.produced.item, { now: opts.now });
+  }
+  return { outcome: durable.outcome, changed: durable.changed };
+}
+
+/** The durable sequence: CAS UPDATE → event → attention truth → audit. */
+async function transitionDurable(
+  db: OutcomeDb,
+  current: OutcomeRow,
+  outcomeId: string,
+  toStatus: OutcomeStatus,
+  extra: { readonly waitingOn?: Record<string, unknown>; readonly failureReason?: string },
+  opts: { readonly now: Date; readonly actor: string; readonly attentionPolicy?: AttentionPolicy },
+): Promise<{ outcome: OutcomeRow; changed: boolean; produced: ProducedAttention | null }> {
   const updated = await db.query(
     `UPDATE outcomes SET
        status = $2,
@@ -320,7 +373,7 @@ export async function transitionOutcome(
   if (updated.rows.length === 0) {
     // Lost a race — re-read and report honestly; the caller re-evaluates.
     const reread = await getOutcomeById(db, outcomeId);
-    return { outcome: reread!, changed: false };
+    return { outcome: reread!, changed: false, produced: null };
   }
   const outcome = toOutcome(updated.rows[0] as unknown as OutcomeSqlRow);
   const eventType =
@@ -340,11 +393,11 @@ export async function transitionOutcome(
     payload: { outcomeId: outcome.id, ref: outcome.ref, fromStatus: current.status, toStatus, ...(extra.failureReason !== undefined ? { reason: extra.failureReason } : {}) },
     runId: null,
   }, { now: () => opts.now });
-  // Attention producer seam (ADR-0018 §4): same executor ⇒ atomic with the
-  // transition — the attention truth can never lag the outcome status.
-  await emitOutcomeAttention(db, outcome, toStatus, opts);
+  // Attention producer seam (ADR-0018 §4; W1.1 finding 1): durable part only,
+  // same transaction — an attention failure rolls the whole transition back.
+  const produced = await emitOutcomeAttention(db, outcome, toStatus, { now: opts.now, actor: opts.actor, policy: opts.attentionPolicy });
   await audit(db, "outcome.transitioned", { outcomeId: outcome.id, ref: outcome.ref, from: current.status, to: toStatus }, opts.actor);
-  return { outcome, changed: true };
+  return { outcome, changed: true, produced };
 }
 
 // ----------------------------------------------------------------- criteria

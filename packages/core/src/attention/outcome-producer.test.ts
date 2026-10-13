@@ -110,9 +110,15 @@ describe.skipIf(!TEST_DATABASE_URL || !KERNEL_PRESENT)(
       expect(item["title"]).toBe("Chase the Acme quote — ready for your judgment");
       expect(item["why_it_matters"]).toBe("Delegated work needs your decision to continue.");
       expect(item["evidence_refs"]).toEqual([{ type: "outcome", id: ref }]);
+      // W1.1 finding 3: outcome cards carry the full direct-control set.
       expect(item["actions"]).toEqual([
         { key: "outcome.open", args: { ref } },
         { key: "attention.resolve" },
+        { key: "attention.snooze" },
+        { key: "attention.dismiss" },
+        { key: "attention.feedback", args: { verdict: "useful" } },
+        { key: "attention.feedback", args: { verdict: "noise" } },
+        { key: "attention.feedback", args: { verdict: "interruptive" } },
       ]);
       expect(item["occurrences"]).toBe(1);
       expect(item["change_fingerprint"]).toBe(`${id}:waiting_user:${T1.toISOString()}`);

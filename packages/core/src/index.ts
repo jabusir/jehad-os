@@ -27,6 +27,7 @@ export * from "./attention/service.js";
 export * from "./attention/salience.js";
 export * from "./attention/resolvers.js";
 export * from "./attention/actions-registry.js";
+export * from "./attention/policy.js";
 export * from "./attention/delivery.js";
 export * from "./attention/outcome-producer.js";
 export * from "./calibration/index.js";

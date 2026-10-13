@@ -64,3 +64,30 @@ export function getActionDescriptor(key: string): AttentionActionDescriptor | nu
     ? ATTENTION_ACTION_REGISTRY[key as AttentionActionKey]
     : null;
 }
+
+/**
+ * W1.1 finding 5: authorization is registry AND item — a submitted action
+ * matches the item's stored refs only when the key is present AND the args
+ * agree. `snooze` is free-arg (minutes are chosen per submission and bounded
+ * by the route); every other key requires DEEP-EQUAL args (a forged
+ * {verdict}/{ref} that the producer never stored fails closed).
+ */
+export function storedActionMatches(
+  stored: readonly { key: string; args?: Readonly<Record<string, string | number>> }[],
+  key: string,
+  submittedArgs: Readonly<Record<string, string | number>> | undefined,
+): boolean {
+  const candidates = stored.filter((a) => a.key === key);
+  if (candidates.length === 0) return false;
+  const descriptor = getActionDescriptor(key);
+  if (descriptor === null) return false;
+  if (descriptor.kind === "snooze") return true; // minutes validated + bounded by the route
+  return candidates.some((a) => {
+    const storedArgs = a.args ?? {};
+    const submitted = submittedArgs ?? {};
+    const storedKeys = Object.keys(storedArgs);
+    const submittedKeys = Object.keys(submitted);
+    if (storedKeys.length !== submittedKeys.length) return false;
+    return storedKeys.every((k) => String(storedArgs[k]) === String(submitted[k]));
+  });
+}
