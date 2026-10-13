@@ -158,12 +158,17 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
   });
 
   // ------------------------------------------------------------------ auth
-  it("no session → 401 paste form; bad token → 401; good token → flagged cookie", async () => {
+  it("no session → 401 fail-closed page (recovery link, never a credential prompt); bad token → 401; good token → flagged cookie", async () => {
     const anon = await app.inject({ method: "GET", url: "/ui" });
     expect(anon.statusCode).toBe(401);
     expect(anon.headers["content-security-policy"]).toBe(CSP);
-    expect(anon.body).toContain(`action="/ui/session"`);
+    // W1.2: the normal path fails closed; the credential paste is recovery-only
+    expect(anon.body).toContain("/ui/recovery");
+    expect(anon.body).not.toContain(`action="/ui/session"`);
     expect(anon.body).toContain(`<meta name="viewport" content="width=device-width, initial-scale=1">`);
+    const recovery = await app.inject({ method: "GET", url: "/ui/recovery" });
+    expect(recovery.statusCode).toBe(200);
+    expect(recovery.body).toContain(`action="/ui/session"`);
 
     const bad = await app.inject({
       method: "POST", url: "/ui/session",

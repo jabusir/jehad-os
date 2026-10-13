@@ -18,10 +18,10 @@
  *                                            (waiting_user approval resume).
  */
 
+import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
 import { Pool } from "pg";
 import {
-  delegateOutcome,
   getOutcomeByRef,
   listActiveOutcomes,
   listOutcomeCriteria,
@@ -30,6 +30,7 @@ import {
   setCriterionStatus,
   type OutcomeRow,
 } from "@jehad/core";
+import { createAndDispatchOutcome } from "@jehad/workflow";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createWorkflowRuntime } from "@jehad/workflow";
@@ -204,19 +205,33 @@ export async function runDelegateCommand(
   const db = new Pool({ connectionString: process.env.DATABASE_URL ?? "postgres://localhost:5432/jehad" });
   try {
     const principalId = await ownerPrincipalId(db);
-    const created = await delegateOutcome(
+    // W1.2: the CLI and POST /ui/delegate share ONE canonical seam —
+    // createAndDispatchOutcome (create → criteria → policy cap → dispatch).
+    // D0 semantics preserved: directive as goal+directive, single
+    // owner-judgment criterion, policy budget/deadline defaults.
+    const policy = loadOutcomesPolicy();
+    const mission = await createAndDispatchOutcome(
       db,
-      { principalId, principalName: "josctl", directive, policy: loadOutcomesPolicy() },
+      await (async () => {
+        const runtime = createWorkflowRuntime();
+        return { start: (name, payload) => runtime.start(name, payload) };
+      })(),
+      {
+        principalId,
+        principalName: "josctl",
+        goal: directive,
+        directive,
+        criteria: ["Outcome achieved, judged by the owner"],
+        constraints: [],
+        submissionId: randomUUID(),
+        policy,
+      },
       { now: new Date(), actor: "josctl:delegate" },
     );
-    // Dispatch the executor through the WorkflowRuntime port — start()'s
-    // first real caller (roadmap D0).
-    const runtime = createWorkflowRuntime();
-    const handle = await runtime.start("outcome-executor", { outcomeId: created.outcome.id, ref: created.outcome.ref });
     opts.stdout.write(
-      `outcome ${created.outcome.ref} accepted — executor dispatched (run ${handle.runId})\n` +
-      `  criterion: ${created.criteria[0]!.criterion}\n` +
-      `  check on it: josctl ops outcome ${created.outcome.ref}\n`,
+      `outcome ${mission.outcome.ref} accepted — executor dispatched (run ${mission.runId})\n` +
+      `  criterion: ${mission.criteria[0]?.criterion}\n` +
+      `  check on it: josctl ops outcome ${mission.outcome.ref}\n`,
     );
     return 0;
   } finally {

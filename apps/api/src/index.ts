@@ -22,6 +22,11 @@ export interface AppOptions {
    * pg.Pool (query + connect — review/promotion paths run transactions).
    */
   db?: PromotionDb;
+  /**
+   * W1.2: dispatch port for the shared delegation seam. Defaults to the real
+   * WorkflowRuntime; tests inject a counting fake (no Inngest dependency).
+   */
+  dispatch?: import("@jehad/workflow").OutcomeDispatchPort;
 }
 
 export async function buildApp(opts: AppOptions = {}) {
@@ -58,7 +63,16 @@ export async function buildApp(opts: AppOptions = {}) {
       // paste endpoint is pre-auth by design; every other /ui path enforces
       // the signed session + CSRF inside its handler. Machine principals
       // never mint sessions (session.ts enforces type === "user").
-      publicPaths: ["/healthz", "/ui", "/ui/session", "/ui/action", "/ui/outcome"],
+      publicPaths: [
+        "/healthz",
+        "/ui",
+        "/ui/session",
+        "/ui/recovery",
+        "/ui/delegate",
+        "/ui/missions",
+        "/ui/action",
+        "/ui/outcome",
+      ],
     });
     registerEventRoutes(app, { db: opts.db });
     registerReviewRoutes(app, { db: opts.db });
@@ -66,7 +80,7 @@ export async function buildApp(opts: AppOptions = {}) {
     registerImessageHarnessRoutes(app, { db: opts.db });
     registerNotificationRoutes(app, { db: opts.db });
     registerAttentionRoutes(app, { db: opts.db });
-    registerUiRoutes(app, { db: opts.db });
+    registerUiRoutes(app, { db: opts.db, dispatch: opts.dispatch });
   }
 
   app.get("/healthz", async () => ({ ok: true }) as const);

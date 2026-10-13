@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { EVENT_CATALOG_V1, isCatalogV1EventTypeName } from "./catalog.js";
 
 describe("event catalog v1", () => {
-  it("contains the 17 plan §8 types in plan order, plus the 3 additive E3 calendar types, the additive GMAIL type, and the additive W5(c) commitment-transition type", () => {
+  it("contains the 17 plan §8 types in plan order, plus the additive E3 calendar, GMAIL, W5(c), D0 outcome, D1 worker, W1 attention, and W1.2 delegate types", () => {
     expect([...EVENT_CATALOG_V1]).toEqual([
       "capture.recorded",
       "commitment.detected",
@@ -27,6 +27,9 @@ describe("event catalog v1", () => {
       "gmail.message.received",
       "commitment.transitioned",
       // D0 additive (ADR-0017): the outcome lifecycle.
+      // W1.2 additive (mobile delegate): shared CLI/web idempotency markers.
+      "outcome.delegate_requested",
+      "outcome.delegate_created",
       "outcome.created",
       "outcome.accepted",
       "outcome.status_changed",
@@ -48,7 +51,7 @@ describe("event catalog v1", () => {
       "attention.item.opened",
       "attention.item.resolved",
     ]);
-    expect(EVENT_CATALOG_V1.length).toBe(40);
+    expect(EVENT_CATALOG_V1.length).toBe(42);
   });
 
   it("accepts catalog names and rejects everything else", () => {

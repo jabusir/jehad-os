@@ -45,6 +45,11 @@ export const EVENT_CATALOG_V1 = [
   // Payloads carry ids/refs/statuses/counts — never owner directive text
   // beyond the confirmed title (provenance lives on the outcomes row and,
   // for criteria, in evidence). Additive names only (ADR-0006).
+  // W1.2 additive (mobile delegate surface): idempotency markers for the
+  // shared CLI/web delegation seam. Payloads carry the submission id and
+  // counts/refs only — never directive text.
+  "outcome.delegate_requested",
+  "outcome.delegate_created",
   "outcome.created",
   "outcome.accepted",
   "outcome.status_changed",

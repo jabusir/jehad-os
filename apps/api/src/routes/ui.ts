@@ -44,15 +44,37 @@ import {
   snoozeAttention,
 } from "@jehad/core";
 import { escapeHtml } from "../escape-html.js";
-import { issueSession, verifyCsrf, verifySession } from "../session.js";
+import { issueSession, verifyCsrf, verifySession, type TodaySession } from "../session.js";
+import { loadTodayAuthPolicy, resolveTailscalePrincipal } from "../tailscale-auth.js";
+import { createAndDispatchOutcome, createWorkflowRuntime, type OutcomeDispatchPort } from "@jehad/workflow";
+import { outcomesPolicyOf, parsePolicyV1 } from "@jehad/core";
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 export interface UiRoutesOptions {
   db: SqlExecutor;
+  /** Defaults to the real WorkflowRuntime; tests inject a counting fake. */
+  dispatch?: OutcomeDispatchPort;
 }
 
 /** ADR-0019 CSP — sent on every Today response (contract-mandated value). */
 const CSP =
   "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'";
+
+function loadOutcomesPolicy() {
+  const moduleDefault = fileURLToPath(new URL("../../../../policy.yaml", import.meta.url));
+  const file = process.env.POLICY_YAML_PATH ?? moduleDefault;
+  return outcomesPolicyOf(parsePolicyV1(readFileSync(file, "utf8")));
+}
+
+let outcomeRuntime: ReturnType<typeof createWorkflowRuntime> | null = null;
+let injectedDispatch: OutcomeDispatchPort | null = null;
+function dispatchPort(): OutcomeDispatchPort {
+  if (injectedDispatch !== null) return injectedDispatch;
+  if (outcomeRuntime === null) outcomeRuntime = createWorkflowRuntime();
+  return outcomeRuntime;
+}
 
 /** Structural view of AttentionItemRow + registry descriptor (types.ts at merge). */
 interface TodayItem {
@@ -100,7 +122,9 @@ function page(body: string): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-body{font-family:system-ui,sans-serif;margin:1rem auto;max-width:40rem;padding:0 1rem;color:#111;background:#fafafa}
+body{font-family:system-ui,sans-serif;margin:1rem auto;max-width:40rem;padding:0 1rem;color:#111;background:#fafafa;overflow-wrap:break-word}
+nav{display:flex;gap:1rem;padding:.5rem 0;border-bottom:1px solid #ddd;margin-bottom:.5rem;font-size:1.05rem}
+label{display:block;margin:.5rem 0;font-size:1rem}
 h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:1.5rem;border-bottom:1px solid #ddd;padding-bottom:.25rem}
 article{background:#fff;border:1px solid #ddd;border-radius:8px;padding:.75rem 1rem;margin:.75rem 0}
 .meta{color:#555;font-size:.85rem;margin:.25rem 0}
@@ -108,9 +132,12 @@ form{display:inline-block;margin:.25rem .5rem 0 0}
 button{padding:.35rem .8rem;font-size:.9rem}
 ul{padding-left:1.25rem}.glyph{font-weight:bold}
 input[type=password]{width:100%;padding:.5rem;margin:.5rem 0;box-sizing:border-box}
+input[type=text],input[type=datetime-local],textarea{width:100%;padding:.5rem;margin:.25rem 0 .75rem;box-sizing:border-box;font-size:16px}
+button{min-height:44px;min-width:44px}
 </style>
 </head>
 <body>
+<nav><a href="/ui">Today</a><a href="/ui/delegate">Delegate</a><a href="/ui/missions">Missions</a></nav>
 ${body}
 </body>
 </html>`;
@@ -198,6 +225,41 @@ function hashesMatch(a: string, b: string): boolean {
 
 export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): void {
   const db = opts.db;
+  injectedDispatch = opts.dispatch ?? null;
+
+  /**
+   * W1.2 normal flow: valid Today session → use it; else a valid allowlisted
+   * Tailscale-User-Login maps to the exact user principal and mints a NORMAL
+   * Today session (same cookie, same CSRF, same scoping). Fail closed.
+   */
+  const todaySession = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<TodaySession | null> => {
+    const existing = await verifySession(db, request.headers.cookie, new Date());
+    if (existing !== null) return existing;
+    const principal = await resolveTailscalePrincipal(
+      db,
+      request.headers as Record<string, unknown> | undefined,
+      await loadTodayAuthPolicy(),
+    );
+    if (principal === null) return null;
+    const issued = issueSession(principal.id, principal.credentialHash!, new Date());
+    reply.header("set-cookie", issued.cookie);
+    return {
+      principal: { id: principal.id, type: principal.type, name: principal.name },
+      expiryMs: issued.expiryMs,
+      csrfToken: issued.csrfToken,
+    };
+  };
+
+  /** Fail-closed page — never the credential form on the normal path. */
+  const unauthorizedPage = (): string =>
+    page(
+      `<h1>TODAY</h1>` +
+        `<p>Not signed in. Open this tailnet URL from an allowlisted device, ` +
+        `or use <a href="/ui/recovery">recovery sign-in</a>.</p>`,
+    );
 
   // Native form POSTs are urlencoded; fastify core only parses JSON. Additive,
   // scoped to exactly this media type (no new deps — ADR-0019 no-toolchain).
@@ -234,11 +296,18 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
       .send("");
   });
 
+  // -------------------------------------------------- recovery (break-glass)
+  // The credential-paste flow is now RECOVERY/ADMIN access, not the normal
+  // product path (W1.2). POST /ui/session is preserved for compatibility.
+  app.get("/ui/recovery", async (_request, reply) => {
+    return await sendHtml(reply, 200, pasteFormPage("Recovery sign-in — paste a one-time credential to open Today."));
+  });
+
   // --------------------------------------------------------------- today
   app.get("/ui", async (request, reply) => {
-    const session = await verifySession(db, request.headers.cookie, new Date());
+    const session = await todaySession(request, reply);
     if (session === null) {
-      return await sendHtml(reply, 401, pasteFormPage("Paste a one-time credential to open Today."));
+      return await sendHtml(reply, 401, unauthorizedPage());
     }
     const now = new Date();
     const items = (await listOpenAttention(db, session.principal.id, {
@@ -374,11 +443,164 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
     }
   });
 
+
+  // ------------------------------------------------------- delegate (W1.2)
+  // Explicit structured Outcome creation — NOT a chatbot. The user chooses
+  // the verb (Delegate); natural language is only the CONTENT of bounded
+  // fields. No model calls, no intent inference, no josctl shell-out: the
+  // route uses the SAME canonical seam as the CLI (createAndDispatchOutcome).
+  const DELEGATE_ROWS = 4;
+  const rowInputs = (name: string, labels: readonly string[]): string =>
+    labels
+      .map((label, i) => {
+        const n = i + 1;
+        return (
+          `<label>${label} ${n}<br>` +
+          `<input type="text" name="${name}${n}" maxlength="2000" autocomplete="off"></label>`
+        );
+      })
+      .join("");
+
+  app.get("/ui/delegate", async (request, reply) => {
+    const session = await todaySession(request, reply);
+    if (session === null) return await sendHtml(reply, 401, unauthorizedPage());
+    const body =
+      `<p><a href="/ui">← Today</a></p>` +
+      `<h1>NEW MISSION</h1>` +
+      `<form method="post" action="/ui/delegate">` +
+      `<input type="hidden" name="csrf" value="${escapeHtml(session.csrfToken)}">` +
+      `<input type="hidden" name="submissionId" value="${randomUUID()}">` +
+      `<label>What do you want owned?<br>` +
+      `<input type="text" name="goal" maxlength="2000" required autocomplete="off"></label>` +
+      `<h2>Done means</h2>` +
+      rowInputs("criterion", Array.from({ length: DELEGATE_ROWS }, () => "")) +
+      `<h2>Constraints</h2>` +
+      rowInputs("constraint", Array.from({ length: DELEGATE_ROWS }, () => "")) +
+      `<h2>Deadline</h2>` +
+      `<label>Optional date/time<br><input type="datetime-local" name="deadline" autocomplete="off"></label>` +
+      `<p><button type="submit">Delegate</button></p>` +
+      `</form>`;
+    return await sendHtml(reply, 200, page(body));
+  });
+
+  app.post("/ui/delegate", async (request, reply) => {
+    const session = await todaySession(request, reply);
+    if (session === null) return await sendHtml(reply, 401, unauthorizedPage());
+    const body = request.body as Record<string, unknown> | undefined;
+    if (body === null || typeof body !== "object") {
+      return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Invalid submission.</p>`));
+    }
+    if (!verifyCsrf(session, body.csrf)) {
+      return await sendHtml(reply, 403, page(`<h1>TODAY</h1><p>Invalid CSRF token.</p>`));
+    }
+    const submissionId = typeof body.submissionId === "string" && UUID_RE.test(body.submissionId)
+      ? body.submissionId
+      : null;
+    if (submissionId === null) {
+      return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Invalid submission id.</p>`));
+    }
+    const goal = typeof body.goal === "string" ? body.goal : "";
+    const criteria = Array.from({ length: DELEGATE_ROWS }, (_v, i) =>
+      typeof body[`criterion${i + 1}`] === "string" ? String(body[`criterion${i + 1}`]) : "",
+    );
+    const constraints = Array.from({ length: DELEGATE_ROWS }, (_v, i) =>
+      typeof body[`constraint${i + 1}`] === "string" ? String(body[`constraint${i + 1}`]) : "",
+    );
+    let deadlineAt: string | undefined;
+    if (typeof body.deadline === "string" && body.deadline.trim().length > 0) {
+      const parsed = new Date(body.deadline);
+      if (Number.isNaN(parsed.getTime())) {
+        return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Malformed deadline.</p>`));
+      }
+      if (parsed.getTime() <= Date.now()) {
+        return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Deadline must be in the future.</p>`));
+      }
+      deadlineAt = parsed.toISOString();
+    }
+    try {
+      // Principal comes ONLY from the authenticated session — never the form.
+      const mission = await createAndDispatchOutcome(
+        db,
+        dispatchPort(),
+        {
+          principalId: session.principal.id,
+          principalName: session.principal.name,
+          goal,
+          directive: goal,
+          criteria,
+          constraints,
+          deadlineAt,
+          submissionId,
+          policy: loadOutcomesPolicy(),
+        },
+        { now: new Date(), actor: `user:${session.principal.name}` },
+      );
+      const ref = escapeHtml(mission.outcome.ref);
+      const banner = mission.alreadyRequested
+        ? `<p>Already delegated — showing the existing mission ${ref}.</p>`
+        : `<p>Mission ${ref} delegated — the executor is running it.</p>`;
+      return await sendHtml(
+        reply,
+        200,
+        page(
+          `<p><a href="/ui">← Today</a> · <a href="/ui/missions">Missions</a></p>` +
+            `<h1>DELEGATED</h1>${banner}` +
+            `<p><a href="/ui/missions">Open Missions</a></p>`,
+        ),
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "delegation failed";
+      return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>${escapeHtml(message)}</p>`));
+    }
+  });
+
+  // -------------------------------------------------------- missions (W1.2)
+  // Read-only projection of existing Outcomes — no new state.
+  app.get("/ui/missions", async (request, reply) => {
+    const session = await todaySession(request, reply);
+    if (session === null) return await sendHtml(reply, 401, unauthorizedPage());
+    const now = new Date();
+    const result = await db.query(
+      `SELECT ref, title, status, deadline_at, updated_at
+         FROM outcomes
+        WHERE principal_id = $1::uuid
+        ORDER BY (status IN ('completed','failed','cancelled')), updated_at DESC`,
+      [session.principal.id],
+    );
+    type Row = { ref: string; title: string; status: string; deadline_at: string | Date | null; updated_at: string | Date };
+    const rows = result.rows as Row[];
+    const NEEDS_YOU = new Set(["waiting_user", "blocked"]);
+    const RUNNING = new Set(["accepted", "queued", "running", "waiting_external", "verifying"]);
+    const FINISHED = new Set(["completed", "failed", "cancelled"]);
+    const recentCutoff = now.getTime() - 7 * 86_400_000;
+    const asOf = (v: string | Date): Date => (v instanceof Date ? v : new Date(v));
+    const cardHtml = (r: Row): string =>
+      `<article>` +
+      `<h3><a href="/ui/outcome/${encodeURIComponent(r.ref)}">${escapeHtml(r.title)}</a></h3>` +
+      `<p class="meta">${escapeHtml(r.ref)} · ${escapeHtml(r.status)} · updated ${escapeHtml(relativeAge(asOf(r.updated_at), now))}` +
+      (r.deadline_at !== null ? ` · deadline ${escapeHtml(asOf(r.deadline_at).toISOString().slice(0, 16).replace("T", " "))}` : "") +
+      `</p></article>`;
+    const needs = rows.filter((r) => NEEDS_YOU.has(r.status));
+    const running = rows.filter((r) => RUNNING.has(r.status));
+    const finished = rows
+      .filter((r) => FINISHED.has(r.status) && asOf(r.updated_at).getTime() >= recentCutoff)
+      .slice(0, 20);
+    const section = (title: string, list: Row[], empty: string): string =>
+      `<h2>${title}</h2>` + (list.length > 0 ? list.map(cardHtml).join("") : `<p>${empty}</p>`);
+    const body =
+      `<p><a href="/ui">← Today</a></p>` +
+      `<h1>MISSIONS</h1>` +
+      section("Needs you", needs, "Nothing needs you.") +
+      section("Running", running, "Nothing running.") +
+      section("Recently finished", finished, "Nothing finished recently.");
+    return await sendHtml(reply, 200, page(body));
+  });
+
   // ------------------------------------------------------- outcome view
   const outcomeView = async (request: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
-    const session = await verifySession(db, request.headers.cookie, new Date());
+    const session = await todaySession(request, reply);
     if (session === null) {
-      return await sendHtml(reply, 401, pasteFormPage("Session expired — paste your credential again."));
+      return await sendHtml(reply, 401, unauthorizedPage());
     }
     const params = request.params as { ref?: string };
     const query = request.query as { ref?: string };

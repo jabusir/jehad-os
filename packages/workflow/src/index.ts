@@ -41,6 +41,13 @@ export {
 
 export { calendarSyncWorkflow, type CalendarSyncResult } from "./calendar-workflows.js";
 export {
+  createAndDispatchOutcome,
+  type CreateAndDispatchOutcomeInput,
+  type DelegateFormInput,
+  type DelegatedMission,
+  type OutcomeDispatchPort,
+} from "./delegate-shared.js";
+export {
   calendarOccurrenceSweepWorkflow,
   type CalendarOccurrenceSweepResult,
 } from "./occurrence-workflows.js";

@@ -65,6 +65,28 @@ export async function findPrincipalByCredentialHash(
   };
 }
 
+/** Exact-name lookup (Today tailscale identity mapping; W1.2). Type-scoped by the caller. */
+export async function findPrincipalByName(
+  db: SqlExecutor,
+  name: string,
+): Promise<PrincipalRecord | null> {
+  const result = await db.query(
+    "SELECT id, type, name, credential_hash FROM principals WHERE name = $1 LIMIT 1",
+    [name],
+  );
+  const row = result.rows[0];
+  if (row === undefined) return null;
+  return {
+    id: String(row.id),
+    type: row.type as PrincipalType,
+    name: String(row.name),
+    credentialHash:
+      row.credential_hash === null || row.credential_hash === undefined
+        ? null
+        : String(row.credential_hash),
+  };
+}
+
 export interface UpsertPrincipalInput {
   type: PrincipalType;
   name: string;
