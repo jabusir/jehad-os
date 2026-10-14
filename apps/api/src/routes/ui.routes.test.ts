@@ -227,7 +227,7 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
     const res = await app.inject({ method: "GET", url: "/ui", headers: { cookie } });
     expect(res.statusCode).toBe(200);
     expect(res.headers["content-security-policy"]).toBe(CSP);
-    expect(res.body).toContain("TODAY");
+    expect(res.body).toContain("<h1>Today</h1>");
     expect(res.body).toContain("Needs you");
     expect(res.body).toContain("Snoozed");
     expect(res.body).toContain("Seen thing");           // seen stays in Needs you
@@ -236,6 +236,58 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
     expect(res.body).toContain("Open outcome");          // registry label
     expect(res.body).toContain("Resolve");
     expect(res.body).toMatch(/id="item-[0-9a-f-]{36}"/); // deep-link anchor
+  });
+
+  it("U0 chrome: dark-mode tokens, reduced-motion guard, and aria-current segmented nav", async () => {
+    const res = await app.inject({ method: "GET", url: "/ui", headers: { cookie } });
+    expect(res.body).toContain("prefers-color-scheme:dark");
+    expect(res.body).toContain("prefers-reduced-motion:reduce");
+    expect(res.body).toContain("env(safe-area-inset-top)");
+    expect(res.body).toContain("backdrop-filter");
+    // segmented nav: exactly one active item, Today on /ui (count outside the CSS)
+    const markup = res.body.split("</style>")[1] ?? "";
+    expect((markup.match(/aria-current="page"/g) ?? [])).toHaveLength(1);
+    expect(markup).toContain(`href="/ui" aria-current="page"`);
+    const missions = await app.inject({ method: "GET", url: "/ui/missions", headers: { cookie } });
+    const missionsMarkup = missions.body.split("</style>")[1] ?? "";
+    expect(missionsMarkup).toContain(`href="/ui/missions" aria-current="page"`);
+    expect(missionsMarkup).not.toContain(`href="/ui" aria-current="page"`);
+  });
+
+  it("U0 primary-action cards: one filled primary button + ⋯ sheet with red Dismiss last", async () => {
+    const res = await app.inject({ method: "GET", url: "/ui", headers: { cookie } });
+    const outcomeCard = res.body.split("Outcome ready")[1] ?? "";
+    expect(outcomeCard).toContain(`class="btn-primary">Resolve</button>`); // outcome card → resolve primary
+    const outcomeSheet = outcomeCard.split(`<details class="sheet">`)[1] ?? "";
+    expect(outcomeSheet).toContain(`aria-label="More actions"`);
+    expect(outcomeSheet).toContain("Open outcome"); // registry label inside the sheet
+
+    const watchCard = res.body.split("Seen thing")[1] ?? "";
+    expect(watchCard).toContain(`class="btn-primary">Mark seen</button>`); // watch card → seen primary
+    const watchSheet = watchCard.split(`<details class="sheet">`)[1] ?? "";
+    expect(watchSheet).toContain(`class="btn-secondary">Resolve</button>`); // resolve demoted into the sheet
+    expect(watchSheet).toContain(`class="sheet-danger"`);          // dismiss visually separated
+    expect(watchSheet).toContain(`class="btn-danger">Dismiss</button>`);   // red
+    expect(watchSheet.indexOf("Dismiss")).toBeGreaterThan(watchSheet.indexOf("Resolve")); // at the sheet end
+    // the same contract fields ride every form (endpoint + names unchanged)
+    expect(watchSheet).toContain(`action="/ui/action"`);
+    expect(watchSheet).toContain(`name="key" value="attention.dismiss"`);
+  });
+
+  it("U0 empty states carry CTAs; ?done= renders one dismissible flash banner", async () => {
+    const missionsEmpty = await app.inject({ method: "GET", url: "/ui/missions", headers: { cookie: otherCookie } });
+    expect(missionsEmpty.body).toContain("No missions yet");
+    expect(missionsEmpty.body).toContain(`href="/ui/delegate"`);
+    expect(missionsEmpty.body).toContain("Create your first mission");
+
+    const done = await app.inject({ method: "GET", url: "/ui?done=resolve", headers: { cookie } });
+    expect(done.statusCode).toBe(200);
+    expect(done.body).toContain(`<details class="flash" open>`);
+    expect(done.body).toContain("Resolved — that card is done and off your Today.");
+
+    const unknown = await app.inject({ method: "GET", url: "/ui?done=bogus", headers: { cookie } });
+    expect(unknown.statusCode).toBe(200);
+    expect(unknown.body).not.toContain(`class="flash"`); // arbitrary query input never reflected
   });
 
   it("XSS: external item text is fully escaped in Today and the outcome view", async () => {
@@ -267,6 +319,15 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
       itemId: target, key: "attention.resolve", args: "{}", csrf: `${csrf.slice(0, -2)}00`,
     });
     expect(wrong.statusCode).toBe(403);
+    // U0: a CSRF failure is never a dead end — the originating form re-renders
+    // (same endpoint + field names) with an inline banner and a fresh token,
+    // while the response stays 403 and the row stays untouched.
+    expect(wrong.headers["content-security-policy"]).toBe(CSP);
+    expect(wrong.body).toContain("Not completed");
+    expect(wrong.body).toContain(`action="/ui/action"`);
+    expect(wrong.body).toContain(`name="itemId" value="${target}"`);
+    expect(wrong.body).toContain(`name="key" value="attention.resolve"`);
+    expect((wrong.body.match(/name="csrf"/g) ?? []).length).toBe(1);
 
     const row = (await db.pool.query("SELECT state FROM attention_items WHERE id = $1::uuid", [target])).rows[0];
     expect(row.state).toBe("seen"); // untouched by both denied posts
@@ -365,12 +426,16 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
     const byPath = await app.inject({ method: "GET", url: "/ui/outcome/ABC7", headers: { cookie } });
     expect(byPath.statusCode).toBe(200);
     expect(byPath.headers["content-security-policy"]).toBe(CSP);
-    expect(byPath.body).toContain("status waiting_user");
+    expect(byPath.body).toContain("Waiting for you");    // language-mapped status pill
+    expect(byPath.body).not.toContain("waiting_user");   // raw enums never render
+    expect(byPath.body).toContain(`href="/ui/missions"`); // way back to Missions
     expect(byPath.body).toContain("✓");
     expect(byPath.body).toContain("The thing is done");
     expect(byPath.body).toContain("○");
     expect(byPath.body).toContain("Created ");
     expect(byPath.body).toContain("Updated ");
+    // ISO lives only in title/datetime attrs, never as visible text
+    expect(byPath.body).toMatch(/<time datetime="[^"]+" title="[^"]+">/);
 
     // query shape — what cookie browsers land on via the rewriteUrl hop
     const byQuery = await app.inject({ method: "GET", url: "/ui/outcome?ref=ABC7", headers: { cookie } });
