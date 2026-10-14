@@ -2,6 +2,9 @@
 
 - **Status:** ratified by owner (2026-10-11, with the product-reset plan
   `docs/plans/product-reset-watch-attention.md`, owner amendment 2).
+- **Amended by:** ADR-0022 (one hash-pinned inline enhancement script + CSP
+  `script-src`/`connect-src`/`img-src`, 2026-10-13) — §2's "no client JS" and
+  `default-src 'none'` header value only.
 - **Complements:** ADR-0009 (local auth: loopback is a network boundary, not
   identity), ADR-0018 (attention semantics). Supersedes the frozen CR1
   "loopback web read-out" scope in `docs/plans/delegate-watch-roadmap.md` §16

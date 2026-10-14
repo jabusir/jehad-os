@@ -226,14 +226,16 @@ describe.skipIf(db === null)("W1 Today + attention HTTP surface (integration, po
 
     const page = await app!.inject({ method: "GET", url: "/ui", headers: { cookie: session } });
     expect(page.statusCode).toBe(200);
-    expect(page.body).not.toContain("<script");
+    // ADR-0022: exactly one <script — the hash-pinned enhancement script;
+    // hostile content must never add another or render raw.
+    expect(page.body.split("<script").length - 1).toBe(1);
     expect(page.body).not.toContain("<img"); // inert "onerror=" text may survive; the tag must not
 
     const outcomeView = await app!.inject({
       method: "GET", url: `/ui/outcome/${ref}`, headers: { cookie: session },
     });
     expect(outcomeView.statusCode).toBe(200);
-    expect(outcomeView.body).not.toContain("<script");
+    expect(outcomeView.body.split("<script").length - 1).toBe(1);
     expect(outcomeView.body).not.toContain("<img");
     expect(outcomeView.body).toContain("&lt;script"); // escaped, rendered anyway
     expect(outcomeView.body).toContain("Waiting for you"); // U0 language map (raw enum never renders)

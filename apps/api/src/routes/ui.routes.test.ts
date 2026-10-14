@@ -4,16 +4,46 @@
  *
  */
 
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { migrateUp, seedDomains, sha256Hex, upsertPrincipalCredential } from "@jehad/db";
 import { createIsolatedTestDb, dropIsolatedTestDb, type IsolatedDb } from "../../../../packages/db/tests/test-db";
 import { issueSession } from "../session";
 import { buildApp } from "../index";
+import { scriptTags, TODAY_CSP, TODAY_SCRIPT } from "./ui-script";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
-const CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'";
+
+describe("ADR-0022 CSP integrity (no DB — runs in every environment)", () => {
+  it("the hash embedded in TODAY_CSP equals an independent sha256(TODAY_SCRIPT) — drift fails the build, not production", () => {
+    const embedded = TODAY_CSP.match(/'sha256-([A-Za-z0-9+/=]+)'/);
+    expect(embedded, "TODAY_CSP must pin exactly one sha256 script hash").not.toBeNull();
+    expect(embedded![1]).toBe(createHash("sha256").update(TODAY_SCRIPT).digest("base64"));
+  });
+
+  it("TODAY_CSP is the exact amended string (ADR-0022): no unsafe-inline for scripts, connect-src/img-src present", () => {
+    const hash = createHash("sha256").update(TODAY_SCRIPT).digest("base64");
+    expect(TODAY_CSP).toBe(
+      `default-src 'none'; script-src 'sha256-${hash}'; style-src 'unsafe-inline'; ` +
+        `connect-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'`,
+    );
+  });
+
+  it("scriptTags() embeds TODAY_SCRIPT exactly once plus icon/meta identity", () => {
+    const tags = scriptTags();
+    expect(tags.split("<script>").length - 1).toBe(1);
+    expect(tags).toContain(`<script>${TODAY_SCRIPT}</script>`);
+    expect(tags).toContain(`<link rel="apple-touch-icon" href="/ui/icon.svg">`);
+    expect(tags).toContain(`<meta name="apple-mobile-web-app-capable" content="yes">`);
+  });
+
+  it("TODAY_SCRIPT never contains markup-breaking sequences", () => {
+    expect(TODAY_SCRIPT).not.toContain("</script");
+    expect(TODAY_SCRIPT).not.toContain("<!--");
+    expect(TODAY_SCRIPT.length).toBeGreaterThan(0);
+  });
+});
 
 
 
@@ -161,7 +191,7 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
   it("no session → 401 fail-closed page (recovery link, never a credential prompt); bad token → 401; good token → flagged cookie", async () => {
     const anon = await app.inject({ method: "GET", url: "/ui" });
     expect(anon.statusCode).toBe(401);
-    expect(anon.headers["content-security-policy"]).toBe(CSP);
+    expect(anon.headers["content-security-policy"]).toBe(TODAY_CSP);
     // W1.2: the normal path fails closed; the credential paste is recovery-only
     expect(anon.body).toContain("/ui/recovery");
     expect(anon.body).not.toContain(`action="/ui/session"`);
@@ -226,7 +256,7 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
   it("GET /ui renders Today sections, metadata, and registry labels", async () => {
     const res = await app.inject({ method: "GET", url: "/ui", headers: { cookie } });
     expect(res.statusCode).toBe(200);
-    expect(res.headers["content-security-policy"]).toBe(CSP);
+    expect(res.headers["content-security-policy"]).toBe(TODAY_CSP);
     expect(res.body).toContain("<h1>Today</h1>");
     expect(res.body).toContain("Needs you");
     expect(res.body).toContain("Snoozed");
@@ -292,15 +322,86 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
 
   it("XSS: external item text is fully escaped in Today and the outcome view", async () => {
     const res = await app.inject({ method: "GET", url: "/ui", headers: { cookie } });
-    expect(res.body).not.toContain("<script");
+    // ADR-0022: exactly ONE script tag — the hash-pinned enhancement script;
+    // hostile payloads must never add a second (or survive raw).
+    expect(res.body.split("<script").length - 1).toBe(1);
+    expect(res.body).not.toContain("<script>alert");
     expect(res.body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(res.body).not.toContain("<img");
     expect(res.body).toContain("&lt;img src=x onerror=&quot;alert(2)&quot;&gt;");
 
     const view = await app.inject({ method: "GET", url: "/ui/outcome/ABC7", headers: { cookie } });
     expect(view.statusCode).toBe(200);
+    expect(view.body.split("<script").length - 1).toBe(1);
     expect(view.body).not.toContain("<b>Delegated</b>");
     expect(view.body).toContain("&lt;b&gt;Delegated&lt;/b&gt; work");
+  });
+
+  // ---------------------------------------------------------------- lane D
+  it("ADR-0022: every Today response carries TODAY_CSP and serves the pinned script exactly once", async () => {
+    const surfaces = [
+      { method: "GET", url: "/ui", headers: { cookie } },
+      { method: "GET", url: "/ui/delegate", headers: { cookie } },
+      { method: "GET", url: "/ui/missions", headers: { cookie } },
+      { method: "GET", url: "/ui/outcome/ABC7", headers: { cookie } },
+      { method: "GET", url: "/ui" }, // 401 fail-closed page carries it too
+    ] as const;
+    for (const surface of surfaces) {
+      const res = await app.inject({ ...surface });
+      expect(res.headers["content-security-policy"], surface.url).toBe(TODAY_CSP);
+      expect(res.body.split("<script>").length - 1, surface.url).toBe(1);
+      expect(res.body).toContain(TODAY_SCRIPT);
+    }
+  });
+
+  it("GET /ui/icon.svg is a reachable public path serving a small static SVG", async () => {
+    const anon = await app.inject({ method: "GET", url: "/ui/icon.svg" });
+    expect(anon.statusCode).toBe(200); // no cookie, no bearer — public path
+    expect(anon.headers["content-type"]).toBe("image/svg+xml; charset=utf-8");
+    expect(anon.headers["cache-control"]).toBe("public, max-age=604800");
+    expect(anon.body.startsWith("<svg")).toBe(true);
+    expect(Buffer.byteLength(anon.body, "utf8")).toBeLessThanOrEqual(1024);
+    expect(anon.body).not.toContain("<script");
+    expect(anon.body).not.toMatch(/(src|href)\s*=/); // zero external/remote references
+
+    // public path means NO auth gate: garbage session never blocks it either
+    const gated = await app.inject({
+      method: "GET", url: "/ui/icon.svg", headers: { cookie: "jehad_session=garbage" },
+    });
+    expect(gated.statusCode).toBe(200);
+    expect(gated.body).toBe(anon.body);
+  });
+
+  it("no-JS parity: stripping the enhancement script leaves every functional form intact", async () => {
+    const stripScript = (html: string): string => html.replace(/<script>[\s\S]*?<\/script>/, "");
+    const count = (html: string, re: RegExp): number => (html.match(re) ?? []).length;
+
+    const today = await app.inject({ method: "GET", url: "/ui", headers: { cookie } });
+    const todayStripped = stripScript(today.body);
+    expect(count(todayStripped, /<script/g)).toBe(0);
+    expect(count(todayStripped, /<form method="post" action="\/ui\/action"/g)).toBe(
+      count(today.body, /<form method="post" action="\/ui\/action"/g),
+    );
+    expect(count(todayStripped, /name="csrf" value="[^"]+"/g)).toBe(
+      count(today.body, /name="csrf" value="[^"]+"/g),
+    );
+    expect(count(todayStripped, /<button type="submit">/g)).toBe(
+      count(today.body, /<button type="submit">/g),
+    );
+
+    const delegate = await app.inject({ method: "GET", url: "/ui/delegate", headers: { cookie } });
+    const delegateStripped = stripScript(delegate.body);
+    expect(delegateStripped).toContain(`<form method="post" action="/ui/delegate">`);
+    expect(count(delegateStripped, /<form method="post"/g)).toBe(
+      count(delegate.body, /<form method="post"/g),
+    );
+    expect(count(delegateStripped, /<input[^>]+maxlength="2000"/g)).toBe(
+      count(delegate.body, /<input[^>]+maxlength="2000"/g),
+    );
+
+    const recovery = await app.inject({ method: "GET", url: "/ui/recovery" });
+    const recoveryStripped = stripScript(recovery.body);
+    expect(recoveryStripped).toContain(`<form method="post" action="/ui/session">`);
   });
 
   // ------------------------------------------------------------------ csrf
@@ -313,7 +414,7 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
       itemId: target, key: "attention.resolve", args: "{}",
     });
     expect(missing.statusCode).toBe(403);
-    expect(missing.headers["content-security-policy"]).toBe(CSP);
+    expect(missing.headers["content-security-policy"]).toBe(TODAY_CSP);
 
     const wrong = await actionPost(cookie, {
       itemId: target, key: "attention.resolve", args: "{}", csrf: `${csrf.slice(0, -2)}00`,
@@ -322,7 +423,7 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
     // U0: a CSRF failure is never a dead end — the originating form re-renders
     // (same endpoint + field names) with an inline banner and a fresh token,
     // while the response stays 403 and the row stays untouched.
-    expect(wrong.headers["content-security-policy"]).toBe(CSP);
+    expect(wrong.headers["content-security-policy"]).toBe(TODAY_CSP);
     expect(wrong.body).toContain("Not completed");
     expect(wrong.body).toContain(`action="/ui/action"`);
     expect(wrong.body).toContain(`name="itemId" value="${target}"`);
@@ -425,7 +526,7 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
 
     const byPath = await app.inject({ method: "GET", url: "/ui/outcome/ABC7", headers: { cookie } });
     expect(byPath.statusCode).toBe(200);
-    expect(byPath.headers["content-security-policy"]).toBe(CSP);
+    expect(byPath.headers["content-security-policy"]).toBe(TODAY_CSP);
     expect(byPath.body).toContain("Waiting for you");    // language-mapped status pill
     expect(byPath.body).not.toContain("waiting_user");   // raw enums never render
     expect(byPath.body).toContain(`href="/ui/missions"`); // way back to Missions

@@ -21,6 +21,7 @@
  * escapeHtml before interpolation, same as the route module.
  */
 
+import { scriptTags } from "./ui-script.js";
 import { escapeHtml } from "../escape-html.js";
 
 // ------------------------------------------------------------ design tokens
@@ -284,12 +285,13 @@ export function page(body: string, opts: PageOptions = {}): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+${scriptTags()}
 <title>Today</title>
 <style>${UI_CSS}</style>
 </head>
 <body>
 <nav class="top-nav"><div class="segmented">${nav}</div></nav>
-<main>
+<main data-main>
 ${body}
 </main>
 </body>
