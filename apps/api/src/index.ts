@@ -10,6 +10,7 @@ import { registerAttentionRoutes } from "./routes/attention.js";
 import { registerUiRoutes } from "./routes/ui.js";
 import { registerUiIconRoute } from "./routes/ui-icon.js";
 import { registerAttentionActions } from "./routes/attention-actions.js";
+import { registerOutcomeActions } from "./routes/outcome-actions.js";
 import type { PromotionDb } from "@jehad/core";
 
 const HOST = "127.0.0.1";
@@ -79,6 +80,9 @@ export async function buildApp(opts: AppOptions = {}) {
         // only in the bearer-gate sense, never in the authority sense.
         "/ui/snooze",
         "/ui/reopen",
+        "/ui/mission-done",
+        "/ui/mission-failed",
+        "/ui/criterion",
       ],
     });
     registerEventRoutes(app, { db: opts.db });
@@ -89,6 +93,7 @@ export async function buildApp(opts: AppOptions = {}) {
     registerAttentionRoutes(app, { db: opts.db });
     registerUiRoutes(app, { db: opts.db, dispatch: opts.dispatch });
     registerAttentionActions(app, { db: opts.db });
+    registerOutcomeActions(app, { db: opts.db });
   }
 
   app.get("/healthz", async () => ({ ok: true }) as const);

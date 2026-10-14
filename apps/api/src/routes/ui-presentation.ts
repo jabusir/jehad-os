@@ -128,6 +128,9 @@ time{white-space:nowrap}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}
 }
+.decision-row{display:flex;gap:.5rem;flex-wrap:wrap;margin:.5rem 0}
+.criterion-actions{display:inline-flex;gap:.35rem;margin-left:.5rem}
+.criterion-actions form{display:inline;margin:0}
 .snooze-presets{display:flex;flex-wrap:wrap;gap:.4rem;margin:.25rem 0}
 .snooze-presets form{display:inline}
 .field-error{color:#b3261e;margin:.25rem 0}
@@ -331,6 +334,8 @@ const DONE_BANNER_TEXT: Readonly<Record<string, string>> = {
   resolve: "Resolved — that card is done and off your Today.",
   dismiss: "Dismissed — it won't come back on its own.",
   seen: "Marked seen — it stays on Today until you resolve it.",
+  "mission-done": "Mission done — criteria verified by you and the mission is completed.",
+  "mission-failed": "Mission marked not done — it's recorded as failed with your reason.",
   reopen: "Returned to Today — the card is back in Needs you.",
   snooze: "Snoozed — it will come back at the time you picked.",
   feedback: "Thanks — your feedback was recorded.",

@@ -287,10 +287,14 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
   it("U0 primary-action cards: one filled primary button + ⋯ sheet with red Dismiss last", async () => {
     const res = await app.inject({ method: "GET", url: "/ui", headers: { cookie } });
     const outcomeCard = res.body.split("Outcome ready")[1] ?? "";
-    expect(outcomeCard).toContain(`class="btn-primary">Resolve</button>`); // outcome card → resolve primary
+    // U1.4: an outcome.ready card's PRIMARY is the canonical judgment —
+    // "It's done" posting /ui/mission-done; clearing the nudge is demoted.
+    expect(outcomeCard).toContain(`action="/ui/mission-done"`);
+    expect(outcomeCard).toContain(`class="btn-primary">It's done</button>`);
     const outcomeSheet = outcomeCard.split(`<details class="sheet">`)[1] ?? "";
     expect(outcomeSheet).toContain(`aria-label="More actions"`);
     expect(outcomeSheet).toContain("Open outcome"); // registry label inside the sheet
+    expect(outcomeSheet).toContain("Just clear this nudge"); // resolve, demoted
 
     const watchCard = res.body.split("Seen thing")[1] ?? "";
     expect(watchCard).toContain(`class="btn-primary">Mark seen</button>`); // watch card → seen primary

@@ -105,6 +105,7 @@ function dispatchPort(): OutcomeDispatchPort {
 /** Structural view of AttentionItemRow + registry descriptor (types.ts at merge). */
 interface TodayItem {
   readonly id: string;
+  readonly kind: string;
   readonly state: string;
   readonly title: string;
   readonly whyItMatters: string | null;
@@ -220,6 +221,22 @@ function evidenceText(item: TodayItem): string {
  */
 function card(item: TodayItem, csrf: string, now: Date): string {
   const known = knownActions(item);
+  // U1.4: an outcome.ready card is a JUDGMENT request, not a nudge — the
+  // primary action drives the canonical decision (mission-done); clearing the
+  // nudge without judging stays available in the sheet.
+  const missionRef =
+    item.kind === "outcome.ready"
+      ? (item.actions.find((a) => a.key === "outcome.open")?.args?.ref as string | undefined ??
+          item.evidenceRefs.find((e) => e.type === "outcome")?.id ??
+          null)
+      : null;
+  const missionDoneForm =
+    item.kind === "outcome.ready" && missionRef !== null
+      ? `<form method="post" action="/ui/mission-done" class="primary-decision">` +
+        `<input type="hidden" name="ref" value="${escapeHtml(missionRef)}">` +
+        `<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">` +
+        `<button type="submit" class="btn-primary">It's done</button></form>`
+      : "";
   const prefKeys = isOutcomeCard(item)
     ? ["attention.resolve", "attention.seen"]
     : ["attention.seen", "attention.resolve"];
@@ -232,19 +249,28 @@ function card(item: TodayItem, csrf: string, now: Date): string {
     primary = known.find((d) => d.descriptor.kind !== "dismiss") ?? known[0];
   }
   const rest = primary === undefined ? [] : known.filter((d) => d !== primary);
+  // When the canonical decision replaces the primary, the stored resolve
+  // action still belongs on the card — demote it into the sheet.
+  const nudgeOnlyEntry =
+    missionDoneForm !== "" && primary !== undefined && primary.descriptor.kind === "resolve"
+      ? primary
+      : null;
   const sheetMid = rest.filter((d) => d.descriptor.kind !== "dismiss");
+  if (nudgeOnlyEntry !== null) sheetMid.unshift(nudgeOnlyEntry);
   const sheetDismiss = rest.filter((d) => d.descriptor.kind === "dismiss");
 
   const primaryForm =
-    primary === undefined
-      ? ""
-      : actionForm(
-          item,
-          primary.action,
-          primary.descriptor,
-          csrf,
-          primary.descriptor.kind === "dismiss" ? "btn-danger" : "btn-primary",
-        );
+    missionDoneForm !== ""
+      ? missionDoneForm
+      : primary === undefined
+        ? ""
+        : actionForm(
+            item,
+            primary.action,
+            primary.descriptor,
+            csrf,
+            primary.descriptor.kind === "dismiss" ? "btn-danger" : "btn-primary",
+          );
   const hasStoredSnooze = rest.some((d) => d.descriptor.kind === "snooze");
   const snoozePresets = hasStoredSnooze
     ? `<div class="snooze-presets">` +
@@ -271,9 +297,22 @@ function card(item: TodayItem, csrf: string, now: Date): string {
         sheetEntries
           .map((d) => {
             const danger = d.descriptor.kind === "dismiss";
+            const nudgeOnly = missionDoneForm !== "" && d.descriptor.kind === "resolve";
+            const label = nudgeOnly
+              ? "Just clear this nudge"
+              : danger
+                ? d.descriptor.label(d.action.args ?? d.descriptor.defaultArgs ?? {})
+                : d.descriptor.label(d.action.args ?? d.descriptor.defaultArgs ?? {});
             return (
               (danger ? `<div class="sheet-danger">` : `<div>`) +
-              actionForm(item, d.action, d.descriptor, csrf, danger ? "btn-danger" : "btn-secondary") +
+              (nudgeOnly
+                ? `<form method="post" action="/ui/action">` +
+                  `<input type="hidden" name="itemId" value="${escapeHtml(item.id)}">` +
+                  `<input type="hidden" name="key" value="${escapeHtml(d.action.key)}">` +
+                  `<input type="hidden" name="args" value="${escapeHtml(JSON.stringify(d.action.args ?? d.descriptor.defaultArgs ?? {}))}">` +
+                  `<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">` +
+                  `<button type="submit" class="btn-secondary">${escapeHtml(label)}</button></form>`
+                : actionForm(item, d.action, d.descriptor, csrf, danger ? "btn-danger" : "btn-secondary")) +
               `</div>`
             );
           })
@@ -991,10 +1030,45 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
       }));
     }
     const criteria = await listOutcomeCriteria(db, session.principal.id, outcome.id);
+    const decidable = outcome.status === "waiting_user" || outcome.status === "verifying";
+    const decisionForms = (csrf: string): string => {
+      if (!decidable) return "";
+      const ref = escapeHtml(outcome.ref);
+      return (
+        `<div class="decision-row">` +
+        `<form method="post" action="/ui/mission-done">` +
+        `<input type="hidden" name="ref" value="${ref}">` +
+        `<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">` +
+        `<button type="submit" class="btn-primary">It's done</button></form>` +
+        `<form method="post" action="/ui/mission-failed">` +
+        `<input type="hidden" name="ref" value="${ref}">` +
+        `<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">` +
+        `<button type="submit" class="btn-danger">Didn't happen</button></form>` +
+        `</div>`
+      );
+    };
     const list = criteria
       .map((c) => {
         const glyph = CRITERION_GLYPHS[c.status] ?? "·";
-        return `<li><span class="glyph">${escapeHtml(glyph)}</span> ${escapeHtml(c.criterion)} <span class="meta">(${escapeHtml(humanizeCriterion(c.status))})</span></li>`;
+        const unmet = c.status !== "verified" && c.status !== "waived_by_owner";
+        const controls =
+          decidable && unmet
+            ? `<span class="criterion-actions">` +
+              `<form method="post" action="/ui/criterion">` +
+              `<input type="hidden" name="ref" value="${escapeHtml(outcome.ref)}">` +
+              `<input type="hidden" name="ordinal" value="${c.ordinal}">` +
+              `<input type="hidden" name="verdict" value="verify">` +
+              `<input type="hidden" name="csrf" value="${escapeHtml(session.csrfToken)}">` +
+              `<button type="submit" class="btn-secondary">Verify</button></form>` +
+              `<form method="post" action="/ui/criterion">` +
+              `<input type="hidden" name="ref" value="${escapeHtml(outcome.ref)}">` +
+              `<input type="hidden" name="ordinal" value="${c.ordinal}">` +
+              `<input type="hidden" name="verdict" value="waive">` +
+              `<input type="hidden" name="csrf" value="${escapeHtml(session.csrfToken)}">` +
+              `<button type="submit" class="btn-secondary">Waive</button></form>` +
+              `</span>`
+            : "";
+        return `<li><span class="glyph">${escapeHtml(glyph)}</span> ${escapeHtml(c.criterion)} <span class="meta">(${escapeHtml(humanizeCriterion(c.status))})</span>${controls}</li>`;
       })
       .join("");
     const body =
@@ -1002,6 +1076,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
       `<h1>${escapeHtml(outcome.title)}</h1>` +
       `<p class="meta">${escapeHtml(outcome.ref)} · ${statusPill(outcome.status)}</p>` +
       `<p class="meta">Created <time ${timeAttr(outcome.createdAt)}>${formatLocalTime(outcome.createdAt)}</time> · Updated <time ${timeAttr(outcome.updatedAt)}>${formatLocalTime(outcome.updatedAt)}</time></p>` +
+      (decidable ? decisionForms(session.csrfToken) : "") +
       `<h2>Criteria</h2><ul class="criteria">${list}</ul>`;
     return await sendHtml(reply, 200, page(body, { path: "/ui/missions" }));
   };
