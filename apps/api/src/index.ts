@@ -8,6 +8,7 @@ import { registerImessageHarnessRoutes } from "./routes/harness-imessage.js";
 import { registerNotificationRoutes } from "./routes/notifications.js";
 import { registerAttentionRoutes } from "./routes/attention.js";
 import { registerUiRoutes } from "./routes/ui.js";
+import { registerAttentionActions } from "./routes/attention-actions.js";
 import type { PromotionDb } from "@jehad/core";
 
 const HOST = "127.0.0.1";
@@ -72,6 +73,10 @@ export async function buildApp(opts: AppOptions = {}) {
         "/ui/missions",
         "/ui/action",
         "/ui/outcome",
+        // U1 (ADR-0021): session-gated in-handler like /ui/action — public
+        // only in the bearer-gate sense, never in the authority sense.
+        "/ui/snooze",
+        "/ui/reopen",
       ],
     });
     registerEventRoutes(app, { db: opts.db });
@@ -81,6 +86,7 @@ export async function buildApp(opts: AppOptions = {}) {
     registerNotificationRoutes(app, { db: opts.db });
     registerAttentionRoutes(app, { db: opts.db });
     registerUiRoutes(app, { db: opts.db, dispatch: opts.dispatch });
+    registerAttentionActions(app, { db: opts.db });
   }
 
   app.get("/healthz", async () => ({ ok: true }) as const);

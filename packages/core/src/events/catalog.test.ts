@@ -50,8 +50,10 @@ describe("event catalog v1", () => {
       // W1 additive (ADR-0018): the attention lifecycle, content-free payloads.
       "attention.item.opened",
       "attention.item.resolved",
+      // U1 additive (ADR-0021): owner-initiated reopen (undo).
+      "attention.item.reopened",
     ]);
-    expect(EVENT_CATALOG_V1.length).toBe(42);
+    expect(EVENT_CATALOG_V1.length).toBe(43);
   });
 
   it("accepts catalog names and rejects everything else", () => {

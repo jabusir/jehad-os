@@ -388,17 +388,18 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
       case "resolve": {
         const updated = await resolveAttention(db, principalId, itemId, { now, actor, by: "owner" });
         if (updated === null) return await sendHtml(reply, 404, page(`<h1>TODAY</h1><p>Not found.</p>`));
-        return await reply.code(303).header("location", "/ui").send("");
+        // U1 flash feedback: ?done=<key> drives the dismissible banner (Lane A).
+        return await reply.code(303).header("location", "/ui?done=resolve").send("");
       }
       case "dismiss": {
         const updated = await dismissAttention(db, principalId, itemId, { now, actor });
         if (updated === null) return await sendHtml(reply, 404, page(`<h1>TODAY</h1><p>Not found.</p>`));
-        return await reply.code(303).header("location", "/ui").send("");
+        return await reply.code(303).header("location", "/ui?done=dismiss").send("");
       }
       case "seen": {
         const updated = await markSeen(db, principalId, itemId, { now, actor });
         if (updated === null) return await sendHtml(reply, 404, page(`<h1>TODAY</h1><p>Not found.</p>`));
-        return await reply.code(303).header("location", "/ui").send("");
+        return await reply.code(303).header("location", "/ui?done=seen").send("");
       }
       case "snooze": {
         const minutes = Number(args.minutes ?? descriptor.defaultArgs?.minutes);
@@ -407,7 +408,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
         }
         const updated = await snoozeAttention(db, principalId, itemId, minutes, { now, actor });
         if (updated === null) return await sendHtml(reply, 404, page(`<h1>TODAY</h1><p>Not found.</p>`));
-        return await reply.code(303).header("location", "/ui").send("");
+        return await reply.code(303).header("location", "/ui?done=snooze").send("");
       }
       case "feedback": {
         const verdict = args.verdict;
@@ -427,7 +428,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
           }
           throw err;
         }
-        return await reply.code(303).header("location", "/ui").send("");
+        return await reply.code(303).header("location", "/ui?done=feedback").send("");
       }
       case "link": {
         const ref = args.ref;

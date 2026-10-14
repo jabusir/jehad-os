@@ -92,6 +92,20 @@ function audit(db: SqlExecutor, action: string, outputs: Record<string, unknown>
   return recordAudit(db, { actor, action, reversible: true, outputsRef: JSON.stringify(outputs) });
 }
 
+/**
+ * Owner-initiated reopen rejected (ADR-0021): non-terminal state, a
+ * non-owner close (producer/liveness/system truth is never owner-overridden),
+ * or the 24h legality window from resolved_at expired. Routes surface this
+ * as a 400 inline-remedy page; it is never an authorization signal (a
+ * foreign/unknown item stays a null → 404, indistinguishable).
+ */
+export class AttentionReopenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AttentionReopenError";
+  }
+}
+
 const ATTENTION_COLUMNS = `
   id, principal_id, source_type, source_object_id, fingerprint, kind, state,
   level, safety_class, title, summary, why_it_matters, evidence_refs,
@@ -494,6 +508,77 @@ export async function dismissAttention(
     return item;
   }
   return getItemRow(db, principalId, itemId);
+}
+
+/**
+ * Owner-initiated reopen — the undo for resolve/dismiss (ADR-0021). Legal
+ * ONLY from a terminal state (resolved/dismissed) whose closer was the owner
+ * (resolved_by = 'owner') and whose resolved_at is within 24h. Flips the row
+ * back to open and clears the resolution columns; first_raised_at and
+ * occurrences are untouched (undo is not a new occurrence — §1.3 counts
+ * producer occurrences only).
+ *
+ * NO DELIVERY (ADR-0021 decision): the owner is standing in the UI when they
+ * undo — this mints NO notification and never calls
+ * deliverOutcomeAttentionNow/notifyAttentionItem. Contrast the producer-side
+ * reopen (bumpOrReopen), which carries deliverNow: true because recurrence
+ * news arrives while the owner is presumably away.
+ *
+ * Fail-closed: unknown/foreign item → null (indistinguishable, ADR-0013);
+ * an existing item that fails any legality guard throws AttentionReopenError.
+ */
+export async function reopenAttentionByOwner(
+  db: AttentionDb,
+  principalId: string,
+  itemId: string,
+  opts: { now: Date; actor: string },
+): Promise<AttentionItemRow | null> {
+  const prior = await getItemRow(db, principalId, itemId);
+  if (prior === null) return null;
+  if (prior.state !== "resolved" && prior.state !== "dismissed") {
+    throw new AttentionReopenError(`attention: reopen requires a resolved or dismissed item (state '${prior.state}')`);
+  }
+  if (prior.resolvedBy !== "owner") {
+    throw new AttentionReopenError(`attention: only owner-closed items reopen (resolved_by '${prior.resolvedBy ?? "unknown"}')`);
+  }
+  const REOPEN_WINDOW_MS = 24 * 3_600_000; // 24h from resolved_at (ADR-0021)
+  if (prior.resolvedAt === null || opts.now.getTime() - prior.resolvedAt.getTime() > REOPEN_WINDOW_MS) {
+    throw new AttentionReopenError("attention: the 24h reopen window from resolved_at has expired");
+  }
+  const flipped = await db.query(
+    `UPDATE attention_items SET
+       state = 'open', resolved_at = NULL, resolved_by = NULL,
+       resolution_reason = NULL, updated_at = $3::timestamptz
+     WHERE id = $1::uuid AND principal_id = $2::uuid
+       AND state IN ('resolved','dismissed') AND resolved_by = 'owner'
+     RETURNING ${ATTENTION_COLUMNS}`,
+    [itemId, principalId, opts.now.toISOString()],
+  );
+  if (flipped.rows.length === 0) {
+    // Lost a concurrent race (the row moved under us) — report honestly
+    // against a fresh read rather than guessing.
+    return getItemRow(db, principalId, itemId);
+  }
+  const item = toAttentionItem(flipped.rows[0] as unknown as AttentionSqlRow);
+  await acceptEvent(db, {
+    type: "attention.item.reopened",
+    schemaVersion: LATEST_PAYLOAD_SCHEMA_VERSION,
+    source: "internal",
+    externalId: `attention-reopened:${item.id}:${opts.now.toISOString()}`,
+    occurredAt: opts.now.toISOString(),
+    domainId: "personal",
+    sensitivity: "normal",
+    payload: {
+      itemId: item.id,
+      principalId: item.principalId,
+      sourceType: item.sourceType,
+      sourceObjectId: item.sourceObjectId,
+      priorState: prior.state,
+    },
+    runId: null,
+  }, { now: () => opts.now });
+  await audit(db, "attention.reopened_by_owner", { itemId: item.id, priorState: prior.state }, opts.actor);
+  return item;
 }
 
 /** seen ≠ resolved: an acknowledgement that keeps the item on the action list. */

@@ -75,6 +75,11 @@ export const EVENT_CATALOG_V1 = [
   // (ADR-0006); schemaVersion stays 1.
   "attention.item.opened",
   "attention.item.resolved",
+  // U1 additive (Today UX overhaul Lane B; ADR-0021): owner-initiated reopen
+  // of a terminal attention item (undo). Content-free payload like the rest
+  // of the family — ids + priorState; item text stays on the row. Additive
+  // name only (ADR-0006); schemaVersion stays 1.
+  "attention.item.reopened",
 ] as const;
 
 export type EventTypeName = (typeof EVENT_CATALOG_V1)[number];
