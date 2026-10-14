@@ -38,6 +38,7 @@ import {
   UUID_RE,
   getOutcomeByRef,
   isFeedbackVerdict,
+  listActiveOutcomes,
   listOutcomeCriteria,
   recordFeedback,
 } from "@jehad/core";
@@ -182,6 +183,26 @@ function isOutcomeCard(item: TodayItem): boolean {
     item.actions.some((a) => a.key === "outcome.open") ||
     item.evidenceRefs.some((r) => r.type === "outcome")
   );
+}
+
+/**
+ * Shared time-token map (UX plan §2, deadline side), resolved at POST time:
+ * Tonight = 20:00 server-local (NO snooze-floor roll), Tomorrow = next day
+ * 09:00, Next week = +7 days 09:00 — all server-local via setHours/setDate.
+ * The route rejects a resolved target that is already past (only Tonight can
+ * be); exported pure for deterministic mapping tests.
+ */
+export function resolveDeadlinePick(pick: string, now: Date): Date | null {
+  const target = new Date(now);
+  if (pick === "tonight") {
+    target.setHours(20, 0, 0, 0);
+  } else if (pick === "tomorrow" || pick === "nextweek") {
+    target.setDate(target.getDate() + (pick === "tomorrow" ? 1 : 7));
+    target.setHours(9, 0, 0, 0);
+  } else {
+    return null;
+  }
+  return target;
 }
 
 function evidenceText(item: TodayItem): string {
@@ -627,43 +648,126 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
   });
 
 
-  // ------------------------------------------------------- delegate (W1.2)
+  // ------------------------------------------------------- delegate (U2)
   // Explicit structured Outcome creation — NOT a chatbot. The user chooses
   // the verb (Delegate); natural language is only the CONTENT of bounded
   // fields. No model calls, no intent inference, no josctl shell-out: the
-  // route uses the SAME canonical seam as the CLI (createAndDispatchOutcome).
+  // route uses the SAME canonical seam as the CLI (createAndDispatchOutcome),
+  // with the principal taken ONLY from the session and submissionId
+  // idempotency unchanged. U2 additions are render-time only: grouped form,
+  // helper lines, deadline quick-picks (resolved at POST time, §2 map),
+  // policy-slot context, inline-remedy re-renders with preserved input.
   const DELEGATE_ROWS = 4;
-  const rowInputs = (name: string, labels: readonly string[]): string =>
-    labels
-      .map((label, i) => {
-        const n = i + 1;
-        return (
-          `<label>${label} ${n}<br>` +
-          `<input type="text" name="${name}${n}" maxlength="2000" autocomplete="off"></label>`
-        );
-      })
-      .join("");
+  const DEADLINE_PICKS: readonly string[] = ["none", "tonight", "tomorrow", "nextweek", "custom"];
+
+  interface DelegateFormState {
+    goal: string;
+    criteria: string[];
+    constraints: string[];
+    deadlinePick: string;
+    deadline: string;
+  }
+
+  interface DelegateFormErrors {
+    goal?: string;
+    criteria?: string;
+    deadline?: string;
+    form?: string;
+  }
+
+  const emptyDelegateState = (): DelegateFormState => ({
+    goal: "",
+    criteria: Array.from({ length: DELEGATE_ROWS }, () => ""),
+    constraints: Array.from({ length: DELEGATE_ROWS }, () => ""),
+    deadlinePick: "none",
+    deadline: "",
+  });
+
+  const fieldError = (message: string): string =>
+    `<p class="field-error">${escapeHtml(message)}</p>`;
+
+  const textRow = (name: string, label: string, n: number, value: string, extra: boolean): string =>
+    `<label${extra ? " data-extra" : ""}>${label} ${n}<br>` +
+    `<input type="text" name="${name}${n}" maxlength="2000" autocomplete="off" value="${escapeHtml(value)}"></label>`;
+
+  // Rows 2-4 stay in the DOM (same bounded 4-row form contract as W1.2),
+  // each marked data-extra for Lane D's reveal script; the no-JS affordance
+  // is a plain <details> "Add another" wrapper — deliberately boring.
+  const extraRows = (name: string, label: string, values: readonly string[]): string =>
+    `<details class="extra-rows"><summary>Add another</summary>` +
+    Array.from({ length: DELEGATE_ROWS - 1 }, (_v, i) =>
+      textRow(name, label, i + 2, values[i + 1] ?? "", true),
+    ).join("") +
+    `</details>`;
+
+  const delegateFormBody = (
+    csrf: string,
+    state: DelegateFormState,
+    errors: DelegateFormErrors,
+    cap: number,
+    used: number,
+  ): string => {
+    const atCap = used >= cap;
+    const pickRadio = (value: string, label: string): string =>
+      `<label class="pick"><input type="radio" name="deadlinePick" value="${value}"${state.deadlinePick === value ? " checked" : ""}> ${label}</label>`;
+    // At cap the notice replaces the submit button — prevent, don't reject.
+    const submitSlot = atCap
+      ? `<p class="field-error">You're at the policy cap — ${used} of ${cap} mission slots used. Resolve or cancel a mission, then come back.</p>`
+      : `<p><button type="submit">Delegate — an executor starts immediately.</button></p>`;
+    return (
+      `<p><a href="/ui">← Today</a></p>` +
+      `<h1>NEW MISSION</h1>` +
+      `<p class="meta">${used} of ${cap} mission slots used</p>` +
+      `<form method="post" action="/ui/delegate">` +
+      `<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">` +
+      // Fresh id on every render: a validation-failed attempt never consumed
+      // the previous one (route pre-checks run before the seam), and a fresh
+      // uuid keeps retries clean even if a prior POST reached the seam.
+      `<input type="hidden" name="submissionId" value="${randomUUID()}">` +
+      `<label>What do you want owned?<br>` +
+      `<input type="text" name="goal" maxlength="2000" required autocomplete="off" value="${escapeHtml(state.goal)}"></label>` +
+      (errors.goal !== undefined ? fieldError(errors.goal) : "") +
+      `<h2>Done means</h2>` +
+      `<p class="meta">How will you judge this? You verify it later.</p>` +
+      textRow("criterion", "Criterion", 1, state.criteria[0] ?? "", false) +
+      (errors.criteria !== undefined ? fieldError(errors.criteria) : "") +
+      extraRows("criterion", "Criterion", state.criteria) +
+      `<h2>Limits</h2>` +
+      `<p class="meta">Rules the executor must respect.</p>` +
+      textRow("constraint", "Limit", 1, state.constraints[0] ?? "", false) +
+      extraRows("constraint", "Limit", state.constraints) +
+      `<h2>Deadline</h2>` +
+      pickRadio("none", "None") +
+      pickRadio("tonight", "Tonight") +
+      pickRadio("tomorrow", "Tomorrow") +
+      pickRadio("nextweek", "Next week") +
+      pickRadio("custom", "Custom") +
+      // Revealed by CSS when Custom is checked (:has) — no JS on this route.
+      `<div class="deadline-custom">` +
+      `<label>Custom date/time<br><input type="datetime-local" name="deadline" autocomplete="off" value="${escapeHtml(state.deadline)}"></label>` +
+      `</div>` +
+      (errors.deadline !== undefined ? fieldError(errors.deadline) : "") +
+      (errors.form !== undefined ? fieldError(errors.form) : "") +
+      submitSlot +
+      `</form>`
+    );
+  };
+
+  const delegateSlots = async (principalId: string): Promise<{ cap: number; used: number }> => {
+    const cap = loadOutcomesPolicy().maxActivePerPrincipal;
+    const used = (await listActiveOutcomes(db, principalId)).length;
+    return { cap, used };
+  };
 
   app.get("/ui/delegate", async (request, reply) => {
     const session = await todaySession(request, reply);
     if (session === null) return await sendHtml(reply, 401, unauthorizedPage());
-    const body =
-      `<p><a href="/ui">← Today</a></p>` +
-      `<h1>NEW MISSION</h1>` +
-      `<form method="post" action="/ui/delegate">` +
-      `<input type="hidden" name="csrf" value="${escapeHtml(session.csrfToken)}">` +
-      `<input type="hidden" name="submissionId" value="${randomUUID()}">` +
-      `<label>What do you want owned?<br>` +
-      `<input type="text" name="goal" maxlength="2000" required autocomplete="off"></label>` +
-      `<h2>Done means</h2>` +
-      rowInputs("criterion", Array.from({ length: DELEGATE_ROWS }, () => "")) +
-      `<h2>Constraints</h2>` +
-      rowInputs("constraint", Array.from({ length: DELEGATE_ROWS }, () => "")) +
-      `<h2>Deadline</h2>` +
-      `<label>Optional date/time<br><input type="datetime-local" name="deadline" autocomplete="off"></label>` +
-      `<p><button type="submit">Delegate</button></p>` +
-      `</form>`;
-    return await sendHtml(reply, 200, page(body));
+    const { cap, used } = await delegateSlots(session.principal.id);
+    return await sendHtml(
+      reply,
+      200,
+      page(delegateFormBody(session.csrfToken, emptyDelegateState(), {}, cap, used)),
+    );
   });
 
   app.post("/ui/delegate", async (request, reply) => {
@@ -682,24 +786,74 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
     if (submissionId === null) {
       return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Invalid submission id.</p>`));
     }
-    const goal = typeof body.goal === "string" ? body.goal : "";
-    const criteria = Array.from({ length: DELEGATE_ROWS }, (_v, i) =>
-      typeof body[`criterion${i + 1}`] === "string" ? String(body[`criterion${i + 1}`]) : "",
-    );
-    const constraints = Array.from({ length: DELEGATE_ROWS }, (_v, i) =>
-      typeof body[`constraint${i + 1}`] === "string" ? String(body[`constraint${i + 1}`]) : "",
-    );
+    const state: DelegateFormState = {
+      goal: typeof body.goal === "string" ? body.goal : "",
+      criteria: Array.from({ length: DELEGATE_ROWS }, (_v, i) =>
+        typeof body[`criterion${i + 1}`] === "string" ? String(body[`criterion${i + 1}`]) : "",
+      ),
+      constraints: Array.from({ length: DELEGATE_ROWS }, (_v, i) =>
+        typeof body[`constraint${i + 1}`] === "string" ? String(body[`constraint${i + 1}`]) : "",
+      ),
+      deadlinePick:
+        typeof body.deadlinePick === "string" && DEADLINE_PICKS.includes(body.deadlinePick)
+          ? body.deadlinePick
+          : "none",
+      deadline: typeof body.deadline === "string" ? body.deadline : "",
+    };
+    // A typed datetime submitted without a pick (or under None) renders back
+    // under Custom so the preserved value stays visible.
+    if (state.deadline.trim().length > 0 && state.deadlinePick === "none") {
+      state.deadlinePick = "custom";
+    }
+
+    // Inline-remedy re-render: same form, submitted values preserved, the
+    // message next to the offending field — never a bare 400 page.
+    const reRenderForm = async (errors: DelegateFormErrors): Promise<FastifyReply> => {
+      const { cap, used } = await delegateSlots(session.principal.id);
+      return await sendHtml(reply, 400, page(delegateFormBody(session.csrfToken, state, errors, cap, used)));
+    };
+
+    const now = new Date();
+    const goal = state.goal.trim();
+    if (goal.length === 0) {
+      return await reRenderForm({ goal: "Enter what you want owned — one short line the executor starts from." });
+    }
+    if (goal.length < 4) {
+      return await reRenderForm({ goal: "Give a little more detail — at least 4 characters, or the executor cannot act on it." });
+    }
+    if (state.criteria.every((c) => c.trim().length === 0)) {
+      return await reRenderForm({ criteria: `Add at least one "Done means" row — how will you judge this done?` });
+    }
+
+    // Deadline: quick-picks resolve at POST time (§2 map, server-local);
+    // Custom/legacy keeps the raw datetime-local contract.
     let deadlineAt: string | undefined;
-    if (typeof body.deadline === "string" && body.deadline.trim().length > 0) {
-      const parsed = new Date(body.deadline);
-      if (Number.isNaN(parsed.getTime())) {
-        return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Malformed deadline.</p>`));
+    if (state.deadlinePick === "tonight" || state.deadlinePick === "tomorrow" || state.deadlinePick === "nextweek") {
+      const target = resolveDeadlinePick(state.deadlinePick, now);
+      if (target === null || target.getTime() <= now.getTime()) {
+        return await reRenderForm({ deadline: "That quick pick already passed — choose another, or set a custom time." });
       }
-      if (parsed.getTime() <= Date.now()) {
-        return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Deadline must be in the future.</p>`));
+      deadlineAt = target.toISOString();
+    } else if (state.deadlinePick === "custom" || state.deadline.trim().length > 0) {
+      if (state.deadline.trim().length === 0) {
+        return await reRenderForm({ deadline: "You chose Custom — pick a date and time, or choose None for the default." });
+      }
+      const parsed = new Date(state.deadline);
+      if (Number.isNaN(parsed.getTime())) {
+        return await reRenderForm({ deadline: "That date and time could not be read — use the picker or type YYYY-MM-DD HH:MM." });
+      }
+      if (parsed.getTime() <= now.getTime()) {
+        return await reRenderForm({ deadline: "That deadline already passed — pick a time in the future, or None for the default." });
       }
       deadlineAt = parsed.toISOString();
     }
+
+    // Cap stays the SEAM's authority (it checks idempotency FIRST, so a
+    // duplicate retry at cap still recovers the prior mission instead of
+    // being rejected); a genuine cap rejection lands in the catch below and
+    // re-renders inline with the notice in the submit slot.
+    const policy = loadOutcomesPolicy();
+
     try {
       // Principal comes ONLY from the authenticated session — never the form.
       const mission = await createAndDispatchOutcome(
@@ -710,38 +864,36 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
           principalName: session.principal.name,
           goal,
           directive: goal,
-          criteria,
-          constraints,
+          criteria: state.criteria,
+          constraints: state.constraints,
           deadlineAt,
           submissionId,
-          policy: loadOutcomesPolicy(),
+          policy,
         },
-        { now: new Date(), actor: `user:${session.principal.name}` },
+        { now, actor: `user:${session.principal.name}` },
       );
-      const ref = escapeHtml(mission.outcome.ref);
-      const banner = mission.alreadyRequested
-        ? `<p>Already delegated — showing the existing mission ${ref}.</p>`
-        : `<p>Mission ${ref} delegated — the executor is running it.</p>`;
-      return await sendHtml(
-        reply,
-        200,
-        page(
-          `<p><a href="/ui">← Today</a> · <a href="/ui/missions">Missions</a></p>` +
-            `<h1>DELEGATED</h1>${banner}` +
-            `<p><a href="/ui/missions">Open Missions</a></p>`,
-        ),
-      );
+      // No confirmation page: land on the mission itself (one-time highlight).
+      return await reply
+        .code(303)
+        .header("location", `/ui/missions?created=${encodeURIComponent(mission.outcome.ref)}`)
+        .send("");
     } catch (err) {
       const message = err instanceof Error ? err.message : "delegation failed";
-      return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>${escapeHtml(message)}</p>`));
+      return await reRenderForm({ form: `Could not delegate: ${message}` });
     }
   });
 
   // -------------------------------------------------------- missions (W1.2)
-  // Read-only projection of existing Outcomes — no new state.
+  // Read-only projection of existing Outcomes — no new state. ?created=REF
+  // (set by POST /ui/delegate's 303) applies a one-time CSS highlight pulse
+  // to that mission's card; only a ref owned by THIS principal can match,
+  // and anything else renders unhighlighted (fail-closed, never a leak).
   app.get("/ui/missions", async (request, reply) => {
     const session = await todaySession(request, reply);
     if (session === null) return await sendHtml(reply, 401, unauthorizedPage());
+    const query = request.query as { created?: string } | undefined;
+    const createdRef =
+      typeof query?.created === "string" && query.created.length > 0 ? query.created : null;
     const now = new Date();
     const result = await db.query(
       `SELECT ref, title, status, deadline_at, updated_at
@@ -758,7 +910,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
     const recentCutoff = now.getTime() - 7 * 86_400_000;
     const asOf = (v: string | Date): Date => (v instanceof Date ? v : new Date(v));
     const cardHtml = (r: Row): string =>
-      `<article class="card">` +
+      `<article class="card${createdRef !== null && r.ref === createdRef ? " created-pulse" : ""}">` +
       `<h3><a href="/ui/outcome/${encodeURIComponent(r.ref)}">${escapeHtml(r.title)}</a></h3>` +
       `<p class="meta">${escapeHtml(r.ref)} · ${statusPill(r.status)} · updated <time ${timeAttr(asOf(r.updated_at).toISOString())}>${relativeTime(asOf(r.updated_at), now)}</time>` +
       (r.deadline_at !== null ? ` · deadline <time ${timeAttr(asOf(r.deadline_at).toISOString())}>${formatLocalTime(asOf(r.deadline_at))}</time>` : "") +
