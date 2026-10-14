@@ -331,6 +331,7 @@ const DONE_BANNER_TEXT: Readonly<Record<string, string>> = {
   resolve: "Resolved — that card is done and off your Today.",
   dismiss: "Dismissed — it won't come back on its own.",
   seen: "Marked seen — it stays on Today until you resolve it.",
+  reopen: "Returned to Today — the card is back in Needs you.",
   snooze: "Snoozed — it will come back at the time you picked.",
   feedback: "Thanks — your feedback was recorded.",
 };

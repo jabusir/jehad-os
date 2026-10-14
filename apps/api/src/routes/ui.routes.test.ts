@@ -441,7 +441,8 @@ describe.skipIf(!TEST_DATABASE_URL)("today ui routes (integration)", () => {
     });
     expect(resolved.statusCode).toBe(303);
     // U1 flash feedback: the success redirect carries ?done=<key>.
-    expect(resolved.headers.location).toBe("/ui?done=resolve");
+    // undoable actions carry &item= so the flash banner can offer Undo
+    expect(resolved.headers.location).toMatch(/^\/ui\?done=resolve&item=[0-9a-f-]{36}$/);
     expect((await db.pool.query("SELECT state FROM attention_items WHERE id = $1::uuid", [resolveId])).rows[0].state).toBe("resolved");
 
     const dismissId = await seedItem(userId, { title: "Dismiss me" });

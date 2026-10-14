@@ -461,11 +461,18 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
       return await sendHtml(reply, 401, unauthorizedPage());
     }
     const now = new Date();
-    const query = request.query as { done?: string } | undefined;
-    const flashText =
-      typeof query === "object" && query !== null && typeof query.done === "string"
-        ? doneBannerText(query.done)
-        : null;
+    const query = request.query as { done?: string; item?: string } | undefined;
+    const done = typeof query === "object" && query !== null && typeof query.done === "string" ? query.done : null;
+    const undoneItem = typeof query === "object" && query !== null && typeof query.item === "string" ? query.item : null;
+    const flashText = done === null ? null : doneBannerText(done);
+    const undoable = done === "resolve" || done === "dismiss";
+    const undoForm =
+      flashText !== null && undoable && undoneItem !== null && UUID_RE.test(undoneItem)
+        ? `<form method="post" action="/ui/reopen" data-undo-form>` +
+          `<input type="hidden" name="itemId" value="${escapeHtml(undoneItem)}">` +
+          `<input type="hidden" name="csrf" value="${escapeHtml(session.csrfToken)}">` +
+          `<button type="submit" class="btn-secondary">Undo</button></form>`
+        : "";
     const items = (await listOpenAttention(db, session.principal.id, {
       now,
       includeSnoozed: true,
@@ -483,7 +490,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
     const snoozed = items.filter(snoozeLive);
     const body =
       `<h1>Today</h1>` +
-      (flashText !== null ? flashBanner(flashText) : "") +
+      (flashText !== null ? flashBanner(flashText) + undoForm : "") +
       `<h2>Needs you</h2>` +
       (needs.length > 0
         ? needs.map((i) => card(i, session.csrfToken, now)).join("")
@@ -577,7 +584,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
           "It changed state before this action could run, so nothing happened.",
           "Reopen Today to see what still needs you.",
         ));
-        return await reply.code(303).header("location", "/ui?done=resolve").send("");
+        return await reply.code(303).header("location", `/ui?done=resolve&item=${itemId}`).send("");
       }
       case "dismiss": {
         const updated = await dismissAttention(db, principalId, itemId, { now, actor });
@@ -586,7 +593,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
           "It changed state before this action could run, so nothing happened.",
           "Reopen Today to see what still needs you.",
         ));
-        return await reply.code(303).header("location", "/ui?done=resolve").send("");
+        return await reply.code(303).header("location", `/ui?done=dismiss&item=${itemId}`).send("");
       }
       case "seen": {
         const updated = await markSeen(db, principalId, itemId, { now, actor });
@@ -595,7 +602,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
           "It changed state before this action could run, so nothing happened.",
           "Reopen Today to see what still needs you.",
         ));
-        return await reply.code(303).header("location", "/ui?done=resolve").send("");
+        return await reply.code(303).header("location", `/ui?done=seen`).send("");
       }
       case "snooze": {
         const minutes = Number(args.minutes ?? descriptor.defaultArgs?.minutes);
