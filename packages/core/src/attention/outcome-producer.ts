@@ -37,8 +37,12 @@ const PRODUCED_KINDS = {
   waiting_user: {
     kind: "outcome.ready",
     segment: "ready",
-    titleSuffix: " — ready for your judgment",
-    whyItMatters: "Delegated work needs your decision to continue.",
+    // Honesty (dogfood 2026-10-14): today's missions park here because the
+    // system cannot do them itself yet — the owner does the thing in the
+    // world and declares the outcome. "Judgment" implied executor output to
+    // evaluate; there is none. Say what the park actually is.
+    titleSuffix: "",
+    whyItMatters: "Parked with you — the system can't do this one itself yet. Mark it done when it happens, or say it didn't.",
   },
   blocked: {
     kind: "outcome.blocked",

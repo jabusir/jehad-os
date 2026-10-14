@@ -107,8 +107,10 @@ describe.skipIf(!TEST_DATABASE_URL || !KERNEL_PRESENT)(
       expect(item["state"]).toBe("open");
       expect(item["level"]).toBe("inbox");
       expect(item["safety_class"]).toBe("none");
-      expect(item["title"]).toBe("Chase the Acme quote — ready for your judgment");
-      expect(item["why_it_matters"]).toBe("Delegated work needs your decision to continue.");
+      expect(item["title"]).toBe("Chase the Acme quote");
+      expect(item["why_it_matters"]).toBe(
+        "Parked with you — the system can't do this one itself yet. Mark it done when it happens, or say it didn't.",
+      );
       expect(item["evidence_refs"]).toEqual([{ type: "outcome", id: ref }]);
       // W1.1 finding 3: outcome cards carry the full direct-control set.
       expect(item["actions"]).toEqual([

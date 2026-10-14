@@ -249,8 +249,10 @@ describe.skipIf(db === null)("W1 scenario B — delegated result end to end (int
     expect(raw.level).toBe("inbox");
     expect(raw.safety_class).toBe("none");
     expect(raw.state).toBe("open");
-    expect(raw.title).toBe(`${outcome.title} — ready for your judgment`);
-    expect(raw.why_it_matters).toBe("Delegated work needs your decision to continue.");
+    expect(raw.title).toBe(outcome.title);
+    expect(raw.why_it_matters).toBe(
+      "Parked with you — the system can't do this one itself yet. Mark it done when it happens, or say it didn't.",
+    );
     expect(raw.evidence_refs).toEqual([{ type: "outcome", id: outcome.ref }]);
     expect(raw.actions).toEqual(
       expect.arrayContaining([
@@ -528,7 +530,7 @@ describe.skipIf(db === null)("W1 scenario B — delegated result end to end (int
     const { outcome } = await makeOutcome(ownerPrincipalId, hostile);
     await driveToWaitingUser(outcome.id);
     const raw = await soleItem(outcome.id);
-    expect(raw.title).toBe(`${hostile} — ready for your judgment`); // stored raw, never sanitized
+    expect(raw.title).toBe(`${hostile}`); // stored raw, never sanitized
     // Producer contract: summary = trimmed directive (title carries the
     // hostile content; Today's escape-at-boundary covers the render side).
     expect(raw.summary).toBe("W1 acceptance: do the delegated thing and come back for judgment");
