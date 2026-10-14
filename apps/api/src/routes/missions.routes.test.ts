@@ -125,7 +125,7 @@ describe.skipIf(!TEST_DATABASE_URL)("missions view (integration)", () => {
     // 22 three-day-old cancelled outcomes + 1 fresh completion exist; only
     // 20 render (the oldest bulk rows spill past the cap), and the
     // 30-day-old failure is outside the 7-day window
-    const finishedCount = (finished.match(/<article>/g) ?? []).length;
+    const finishedCount = (finished.match(/<article class="card">/g) ?? []).length;
     expect(finishedCount).toBe(20);
     expect(finished).toContain("Old bulk 0"); // newest of the bulk
     expect(finished).not.toContain("Old bulk 20"); // spilled past the cap

@@ -236,7 +236,7 @@ describe.skipIf(db === null)("W1 Today + attention HTTP surface (integration, po
     expect(outcomeView.body).not.toContain("<script");
     expect(outcomeView.body).not.toContain("<img");
     expect(outcomeView.body).toContain("&lt;script"); // escaped, rendered anyway
-    expect(outcomeView.body).toContain("waiting_user");
+    expect(outcomeView.body).toContain("Waiting for you"); // U0 language map (raw enum never renders)
   });
 
   it("POST /ui/action dispatches attention.resolve through the registry (CSRF required)", async () => {

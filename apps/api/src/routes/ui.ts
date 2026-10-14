@@ -15,6 +15,14 @@
  *    never from row-stored endpoints; unknown keys render nothing and
  *    dispatch nothing (fail-closed).
  *
+ * U0 foundations (docs/plans/today-ux-overhaul.md, Lane A): design tokens,
+ * language map, relative times, remedy-oriented error pages, CTA empty
+ * states, and the primary-action card structure (one filled primary button +
+ * a `⋯` details sheet) all live in ui-presentation.ts — this module stays
+ * the behavior boundary (session, CSRF, ownership, dispatch, redirects).
+ * CSRF failures re-render the originating form with an inline banner and a
+ * fresh token: never a dead end.
+ *
  * NOTE(lane D): listOpenAttention/resolve/dismiss/markSeen/snooze and
  * getActionDescriptor come from the attention service (lane B) — the only
  * import surface that does not compile standalone until that lane merges
@@ -51,6 +59,18 @@ import { outcomesPolicyOf, parsePolicyV1 } from "@jehad/core";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import {
+  doneBannerText,
+  emptyState,
+  errorPage,
+  flashBanner,
+  formatLocalTime,
+  humanizeCriterion,
+  page,
+  relativeTime,
+  statusPill,
+  timeAttr,
+} from "./ui-presentation.js";
 
 export interface UiRoutesOptions {
   db: SqlExecutor;
@@ -115,51 +135,49 @@ function sendHtml(reply: FastifyReply, code: number, html: string): FastifyReply
     .send(html);
 }
 
-function page(body: string): string {
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{font-family:system-ui,sans-serif;margin:1rem auto;max-width:40rem;padding:0 1rem;color:#111;background:#fafafa;overflow-wrap:break-word}
-nav{display:flex;gap:1rem;padding:.5rem 0;border-bottom:1px solid #ddd;margin-bottom:.5rem;font-size:1.05rem}
-label{display:block;margin:.5rem 0;font-size:1rem}
-h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:1.5rem;border-bottom:1px solid #ddd;padding-bottom:.25rem}
-article{background:#fff;border:1px solid #ddd;border-radius:8px;padding:.75rem 1rem;margin:.75rem 0}
-.meta{color:#555;font-size:.85rem;margin:.25rem 0}
-form{display:inline-block;margin:.25rem .5rem 0 0}
-button{padding:.35rem .8rem;font-size:.9rem}
-ul{padding-left:1.25rem}.glyph{font-weight:bold}
-input[type=password]{width:100%;padding:.5rem;margin:.5rem 0;box-sizing:border-box}
-input[type=text],input[type=datetime-local],textarea{width:100%;padding:.5rem;margin:.25rem 0 .75rem;box-sizing:border-box;font-size:16px}
-button{min-height:44px;min-width:44px}
-</style>
-</head>
-<body>
-<nav><a href="/ui">Today</a><a href="/ui/delegate">Delegate</a><a href="/ui/missions">Missions</a></nav>
-${body}
-</body>
-</html>`;
-}
+// ------------------------------------------------------------ action forms
 
-function pasteFormPage(message: string): string {
-  return page(
-    `<h1>TODAY</h1><p>${escapeHtml(message)}</p>` +
-      `<form method="post" action="/ui/session">` +
-      `<input type="password" name="token" autocomplete="off" required>` +
-      `<button type="submit">Open Today</button></form>`,
+type CardAction = TodayItem["actions"][number];
+
+/**
+ * The registry-form for one stored action. Field names, endpoint, and hidden
+ * values are the action contract — they never change with the styling.
+ */
+function actionForm(
+  item: TodayItem,
+  action: CardAction,
+  descriptor: ActionDescriptor,
+  csrf: string,
+  buttonClass: string,
+): string {
+  const args = action.args ?? descriptor.defaultArgs ?? {};
+  const button = buttonClass === "" ? "" : ` class="${buttonClass}"`;
+  return (
+    `<form method="post" action="/ui/action">` +
+    `<input type="hidden" name="itemId" value="${escapeHtml(item.id)}">` +
+    `<input type="hidden" name="key" value="${escapeHtml(action.key)}">` +
+    `<input type="hidden" name="args" value="${escapeHtml(JSON.stringify(args))}">` +
+    `<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">` +
+    `<button type="submit"${button}>${escapeHtml(descriptor.label(args))}</button></form>`
   );
 }
 
-function relativeAge(from: Date, now: Date): string {
-  const seconds = Math.max(0, Math.floor((now.getTime() - from.getTime()) / 1000));
-  if (seconds < 60) return "just now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
+/** Registry-known actions only; unknown keys render nothing (fail-closed). */
+function knownActions(item: TodayItem): { action: CardAction; descriptor: ActionDescriptor }[] {
+  const out: { action: CardAction; descriptor: ActionDescriptor }[] = [];
+  for (const action of item.actions) {
+    const descriptor = getActionDescriptor(action.key) as ActionDescriptor | null;
+    if (descriptor !== null) out.push({ action, descriptor });
+  }
+  return out;
+}
+
+/** Outcome cards carry an outcome link/outcome evidence; everything else is a watch card. */
+function isOutcomeCard(item: TodayItem): boolean {
+  return (
+    item.actions.some((a) => a.key === "outcome.open") ||
+    item.evidenceRefs.some((r) => r.type === "outcome")
+  );
 }
 
 function evidenceText(item: TodayItem): string {
@@ -168,33 +186,79 @@ function evidenceText(item: TodayItem): string {
     .join(" · ");
 }
 
-/** One card = title, whyItMatters, age, occurrences, evidence, registry forms. */
+/**
+ * One card = title, whyItMatters, humanized meta, and the action area: ONE
+ * filled primary button (context-aware — resolve on outcome cards, seen on
+ * watch cards) + every remaining action inside a `⋯` details sheet, with
+ * Dismiss red and separated at the end.
+ */
 function card(item: TodayItem, csrf: string, now: Date): string {
-  const meta = [relativeAge(item.firstRaisedAt, now)];
+  const known = knownActions(item);
+  const prefKeys = isOutcomeCard(item)
+    ? ["attention.resolve", "attention.seen"]
+    : ["attention.seen", "attention.resolve"];
+  let primary: { action: CardAction; descriptor: ActionDescriptor } | undefined;
+  for (const prefKey of prefKeys) {
+    primary = known.find((d) => d.action.key === prefKey);
+    if (primary !== undefined) break;
+  }
+  if (primary === undefined) {
+    primary = known.find((d) => d.descriptor.kind !== "dismiss") ?? known[0];
+  }
+  const rest = primary === undefined ? [] : known.filter((d) => d !== primary);
+  const sheetMid = rest.filter((d) => d.descriptor.kind !== "dismiss");
+  const sheetDismiss = rest.filter((d) => d.descriptor.kind === "dismiss");
+
+  const primaryForm =
+    primary === undefined
+      ? ""
+      : actionForm(
+          item,
+          primary.action,
+          primary.descriptor,
+          csrf,
+          primary.descriptor.kind === "dismiss" ? "btn-danger" : "btn-primary",
+        );
+  const sheetEntries = [...sheetMid, ...sheetDismiss];
+  const sheet =
+    sheetEntries.length === 0
+      ? ""
+      : `<details class="sheet">` +
+        `<summary class="sheet-toggle" aria-label="More actions">⋯</summary>` +
+        `<div class="sheet-body">` +
+        sheetEntries
+          .map((d) => {
+            const danger = d.descriptor.kind === "dismiss";
+            return (
+              (danger ? `<div class="sheet-danger">` : `<div>`) +
+              actionForm(item, d.action, d.descriptor, csrf, danger ? "btn-danger" : "btn-secondary") +
+              `</div>`
+            );
+          })
+          .join("") +
+        `</div></details>`;
+
+  const meta = [
+    `<time ${timeAttr(item.firstRaisedAt.toISOString())}>${relativeTime(item.firstRaisedAt, now)}</time>`,
+  ];
   if (item.occurrences > 1) meta.push(`×${item.occurrences} occurrences`);
   const evidence = evidenceText(item);
   if (evidence.length > 0) meta.push(escapeHtml(evidence));
-  const forms = item.actions
-    .map((action) => {
-      const descriptor = getActionDescriptor(action.key) as ActionDescriptor | null;
-      if (descriptor === null) return ""; // fail-closed: unknown key renders nothing
-      const args = action.args ?? descriptor.defaultArgs ?? {};
-      return (
-        `<form method="post" action="/ui/action">` +
-        `<input type="hidden" name="itemId" value="${escapeHtml(item.id)}">` +
-        `<input type="hidden" name="key" value="${escapeHtml(action.key)}">` +
-        `<input type="hidden" name="args" value="${escapeHtml(JSON.stringify(args))}">` +
-        `<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">` +
-        `<button type="submit">${escapeHtml(descriptor.label(args))}</button></form>`
+  if (item.state === "snoozed" && item.snoozedUntil !== null) {
+    const until = new Date(item.snoozedUntil);
+    if (!Number.isNaN(until.getTime()) && until.getTime() > now.getTime()) {
+      meta.push(
+        `back <time ${timeAttr(until.toISOString())}>${formatLocalTime(until)}</time>`,
       );
-    })
-    .join("");
+    }
+  }
   return (
-    `<article id="item-${escapeHtml(item.id)}">` +
+    `<article class="card" id="item-${escapeHtml(item.id)}">` +
     `<h3>${escapeHtml(item.title)}</h3>` +
     (item.whyItMatters ? `<p>${escapeHtml(item.whyItMatters)}</p>` : "") +
     `<p class="meta">${meta.join(" · ")}</p>` +
-    forms +
+    primaryForm +
+    sheet +
     `</article>`
   );
 }
@@ -221,6 +285,49 @@ function hashesMatch(a: string, b: string): boolean {
   const left = Buffer.from(a, "utf8");
   const right = Buffer.from(b, "utf8");
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+/** Remedy-oriented error body for card-action failures (way back = Today). */
+function actionError(heading: string, what: string, remedy: string): string {
+  return errorPage({
+    heading,
+    what,
+    remedy,
+    backHref: "/ui",
+    backLabel: "Back to Today",
+    navPath: "/ui",
+  });
+}
+
+/**
+ * CSRF failure on a card action → the originating form re-rendered with an
+ * inline banner and a FRESH session token: a legitimate stale page retries
+ * with one tap; an attacker gains nothing (no auto-submit, no JS, and the
+ * token is only ever readable by the already-authenticated session itself).
+ */
+function csrfRetryPage(session: TodaySession, body: Record<string, unknown>): string {
+  const itemId = typeof body.itemId === "string" ? body.itemId : "";
+  const key = typeof body.key === "string" ? body.key : "";
+  const args = typeof body.args === "string" ? body.args : "";
+  return errorPage({
+    heading: "One more tap needed",
+    what:
+      "This action was not completed: its form token didn't match this session, so it was refused. Nothing changed.",
+    remedy:
+      "If this is what you meant to do, submit it again below — the form now carries a fresh token.",
+    formHtml:
+      `<div class="banner-error" role="alert"><p>Not completed — the security token was stale or missing.</p></div>` +
+      `<div class="error-form"><form method="post" action="/ui/action">` +
+      `<input type="hidden" name="itemId" value="${escapeHtml(itemId)}">` +
+      `<input type="hidden" name="key" value="${escapeHtml(key)}">` +
+      `<input type="hidden" name="args" value="${escapeHtml(args)}">` +
+      `<input type="hidden" name="csrf" value="${escapeHtml(session.csrfToken)}">` +
+      `<button type="submit" class="btn-primary">Try the action again</button>` +
+      `</form></div>`,
+    backHref: "/ui",
+    backLabel: "Back to Today",
+    navPath: "/ui",
+  });
 }
 
 export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): void {
@@ -255,11 +362,13 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
 
   /** Fail-closed page — never the credential form on the normal path. */
   const unauthorizedPage = (): string =>
-    page(
-      `<h1>TODAY</h1>` +
-        `<p>Not signed in. Open this tailnet URL from an allowlisted device, ` +
-        `or use <a href="/ui/recovery">recovery sign-in</a>.</p>`,
-    );
+    errorPage({
+      heading: "Today",
+      what: "Not signed in — Today is private to allowlisted devices on your tailnet.",
+      remedy: "Open this tailnet URL from an allowlisted device, or use recovery sign-in below.",
+      backHref: "/ui/recovery",
+      backLabel: "recovery sign-in",
+    });
 
   // Native form POSTs are urlencoded; fastify core only parses JSON. Additive,
   // scoped to exactly this media type (no new deps — ADR-0019 no-toolchain).
@@ -310,6 +419,11 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
       return await sendHtml(reply, 401, unauthorizedPage());
     }
     const now = new Date();
+    const query = request.query as { done?: string } | undefined;
+    const flashText =
+      typeof query === "object" && query !== null && typeof query.done === "string"
+        ? doneBannerText(query.done)
+        : null;
     const items = (await listOpenAttention(db, session.principal.id, {
       now,
       includeSnoozed: true,
@@ -326,45 +440,66 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
     const needs = items.filter((i) => !snoozeLive(i));
     const snoozed = items.filter(snoozeLive);
     const body =
-      `<h1>TODAY</h1>` +
+      `<h1>Today</h1>` +
+      (flashText !== null ? flashBanner(flashText) : "") +
       `<h2>Needs you</h2>` +
       (needs.length > 0
         ? needs.map((i) => card(i, session.csrfToken, now)).join("")
-        : `<p>Nothing needs you right now.</p>`) +
+        : emptyState(
+            "Nothing needs you right now. Delegated work is running — or you could hand something off.",
+            "Delegate something",
+            "/ui/delegate",
+          )) +
       `<h2>Snoozed</h2>` +
       (snoozed.length > 0
         ? snoozed.map((i) => card(i, session.csrfToken, now)).join("")
-        : `<p>Nothing snoozed.</p>`);
-    return await sendHtml(reply, 200, page(body));
+        : emptyState("Nothing snoozed. Cards you snooze come back here on time."));
+    return await sendHtml(reply, 200, page(body, { path: "/ui" }));
   });
 
   // -------------------------------------------------------------- action
   app.post("/ui/action", async (request, reply) => {
     const session = await verifySession(db, request.headers.cookie, new Date());
     if (session === null) {
-      return await sendHtml(reply, 401, pasteFormPage("Session expired — paste your credential again."));
+      return await sendHtml(reply, 401, pasteFormPage("Session expired — paste your credential again to keep going."));
     }
     const body = (typeof request.body === "object" && request.body !== null
       ? (request.body as Record<string, unknown>)
       : {}) as Record<string, unknown>;
     if (!verifyCsrf(session, body.csrf)) {
-      return await sendHtml(reply, 403, page(`<h1>TODAY</h1><p>Invalid request token. <a href="/ui">Back to Today</a>.</p>`));
+      return await sendHtml(reply, 403, csrfRetryPage(session, body));
     }
     const itemId = body.itemId;
     if (typeof itemId !== "string" || !UUID_RE.test(itemId)) {
-      return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Invalid request. <a href="/ui">Back to Today</a>.</p>`));
+      return await sendHtml(reply, 400, actionError(
+        "That request was incomplete",
+        "The action didn't include a valid card id, so nothing could be matched.",
+        "Go back to Today and tap the action on its card.",
+      ));
     }
     const key = body.key;
     const descriptor = (typeof key === "string" ? getActionDescriptor(key) : null) as ActionDescriptor | null;
     if (descriptor === null) {
-      return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Unknown action. <a href="/ui">Back to Today</a>.</p>`));
+      return await sendHtml(reply, 400, actionError(
+        "Unknown action",
+        "That action isn't one this server offers, so it was refused.",
+        "Go back to Today and use the buttons shown on the card.",
+      ));
     }
     const args = parseArgs(body.args);
     if (args === null) {
-      return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Invalid action arguments. <a href="/ui">Back to Today</a>.</p>`));
+      return await sendHtml(reply, 400, actionError(
+        "That action couldn't be validated",
+        "The action's saved details arrived in a form this server couldn't read.",
+        "Go back to Today and try the action from its card.",
+      ));
     }
     if (descriptor.validateArgs !== undefined && !descriptor.validateArgs(args)) {
-      return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Invalid action arguments. <a href="/ui">Back to Today</a>.</p>`));
+      return await sendHtml(reply, 400, actionError(
+        "That action couldn't be validated",
+        "The action's saved details didn't meet this action's requirements.",
+        "Go back to Today and try the action from its card.",
+      ));
     }
     const principalId = session.principal.id;
     const actor = `user:${session.principal.name}`;
@@ -374,7 +509,11 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
     const items = (await listOpenAttention(db, principalId, { now, includeSnoozed: true })) as readonly TodayItem[];
     const item = items.find((i) => i.id === itemId);
     if (item === undefined) {
-      return await sendHtml(reply, 404, page(`<h1>TODAY</h1><p>Not found. <a href="/ui">Back to Today</a>.</p>`));
+      return await sendHtml(reply, 404, actionError(
+        "That card isn't available",
+        "It may already be resolved or dismissed, or it belongs to a different account.",
+        "Reopen Today to see the cards that currently need you.",
+      ));
     }
     // W1.1 finding 5 — authorization is registry AND item: the submitted
     // {key,args} must match an action the producer actually stored on THIS
@@ -382,37 +521,65 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
     // carried) fails closed — the registry alone is not authorization.
     const storedActions = (item.actions ?? []) as readonly { key: string; args?: Record<string, string | number> }[];
     if (!storedActionMatches(storedActions, String(key), args)) {
-      return await sendHtml(reply, 403, page(`<h1>TODAY</h1><p>That action is not available on this item. <a href="/ui">Back to Today</a>.</p>`));
+      return await sendHtml(reply, 403, actionError(
+        "That action isn't offered on this card",
+        "The card's producer didn't attach this action, so it was refused.",
+        "Go back to Today and use the actions shown on the card.",
+      ));
     }
     switch (descriptor.kind) {
       case "resolve": {
         const updated = await resolveAttention(db, principalId, itemId, { now, actor, by: "owner" });
-        if (updated === null) return await sendHtml(reply, 404, page(`<h1>TODAY</h1><p>Not found.</p>`));
+        if (updated === null) return await sendHtml(reply, 404, actionError(
+          "That card isn't available",
+          "It changed state before this action could run, so nothing happened.",
+          "Reopen Today to see what still needs you.",
+        ));
         return await reply.code(303).header("location", "/ui").send("");
       }
       case "dismiss": {
         const updated = await dismissAttention(db, principalId, itemId, { now, actor });
-        if (updated === null) return await sendHtml(reply, 404, page(`<h1>TODAY</h1><p>Not found.</p>`));
+        if (updated === null) return await sendHtml(reply, 404, actionError(
+          "That card isn't available",
+          "It changed state before this action could run, so nothing happened.",
+          "Reopen Today to see what still needs you.",
+        ));
         return await reply.code(303).header("location", "/ui").send("");
       }
       case "seen": {
         const updated = await markSeen(db, principalId, itemId, { now, actor });
-        if (updated === null) return await sendHtml(reply, 404, page(`<h1>TODAY</h1><p>Not found.</p>`));
+        if (updated === null) return await sendHtml(reply, 404, actionError(
+          "That card isn't available",
+          "It changed state before this action could run, so nothing happened.",
+          "Reopen Today to see what still needs you.",
+        ));
         return await reply.code(303).header("location", "/ui").send("");
       }
       case "snooze": {
         const minutes = Number(args.minutes ?? descriptor.defaultArgs?.minutes);
         if (!Number.isSafeInteger(minutes) || minutes < 5 || minutes > 4320) {
-          return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Snooze must be 5..4320 minutes.</p>`));
+          return await sendHtml(reply, 400, actionError(
+            "That snooze length isn't allowed",
+            "Snoozes work between 5 minutes and 3 days (4320 minutes).",
+            "Go back to Today and snooze again with a length in that range.",
+          ));
         }
         const updated = await snoozeAttention(db, principalId, itemId, minutes, { now, actor });
-        if (updated === null) return await sendHtml(reply, 404, page(`<h1>TODAY</h1><p>Not found.</p>`));
+        if (updated === null) return await sendHtml(reply, 404, actionError(
+          "That card isn't available",
+          "It changed state before this action could run, so nothing happened.",
+          "Reopen Today to see what still needs you.",
+        ));
         return await reply.code(303).header("location", "/ui").send("");
       }
       case "feedback": {
         const verdict = args.verdict;
         if (!isFeedbackVerdict(verdict)) {
-          return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Invalid verdict.</p>`));
+          return await sendHtml(reply, 400, actionError(
+            "That feedback wasn't recorded",
+            "The feedback verdict wasn't one of the allowed kinds.",
+            "Go back to Today and send feedback from the card.",
+          ));
         }
         try {
           await recordFeedback(db, {
@@ -423,7 +590,11 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
           });
         } catch (err) {
           if (err instanceof FeedbackInputError) {
-            return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Invalid verdict.</p>`));
+            return await sendHtml(reply, 400, actionError(
+              "That feedback wasn't recorded",
+              "The feedback verdict wasn't one of the allowed kinds.",
+              "Go back to Today and send feedback from the card.",
+            ));
           }
           throw err;
         }
@@ -432,11 +603,19 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
       case "link": {
         const ref = args.ref;
         if (typeof ref !== "string" || ref.length === 0) {
-          return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Invalid link target.</p>`));
+          return await sendHtml(reply, 400, actionError(
+            "That link target wasn't valid",
+            "The card's link didn't carry a usable mission reference.",
+            "Go back to Today and open the card again.",
+          ));
         }
         const outcome = await getOutcomeByRef(db, principalId, ref);
         if (outcome === null) {
-          return await sendHtml(reply, 404, page(`<h1>TODAY</h1><p>Not found.</p>`));
+          return await sendHtml(reply, 404, actionError(
+            "That mission isn't available",
+            "The linked mission doesn't exist for your account.",
+            "Reopen Today to see the cards that currently need you.",
+          ));
         }
         return await reply.code(302).header("location", `/ui/outcome/${encodeURIComponent(ref)}`).send("");
       }
@@ -562,9 +741,9 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
     const now = new Date();
     const result = await db.query(
       `SELECT ref, title, status, deadline_at, updated_at
-         FROM outcomes
-        WHERE principal_id = $1::uuid
-        ORDER BY (status IN ('completed','failed','cancelled')), updated_at DESC`,
+          FROM outcomes
+         WHERE principal_id = $1::uuid
+         ORDER BY (status IN ('completed','failed','cancelled')), updated_at DESC`,
       [session.principal.id],
     );
     type Row = { ref: string; title: string; status: string; deadline_at: string | Date | null; updated_at: string | Date };
@@ -575,10 +754,10 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
     const recentCutoff = now.getTime() - 7 * 86_400_000;
     const asOf = (v: string | Date): Date => (v instanceof Date ? v : new Date(v));
     const cardHtml = (r: Row): string =>
-      `<article>` +
+      `<article class="card">` +
       `<h3><a href="/ui/outcome/${encodeURIComponent(r.ref)}">${escapeHtml(r.title)}</a></h3>` +
-      `<p class="meta">${escapeHtml(r.ref)} · ${escapeHtml(r.status)} · updated ${escapeHtml(relativeAge(asOf(r.updated_at), now))}` +
-      (r.deadline_at !== null ? ` · deadline ${escapeHtml(asOf(r.deadline_at).toISOString().slice(0, 16).replace("T", " "))}` : "") +
+      `<p class="meta">${escapeHtml(r.ref)} · ${statusPill(r.status)} · updated <time ${timeAttr(asOf(r.updated_at).toISOString())}>${relativeTime(asOf(r.updated_at), now)}</time>` +
+      (r.deadline_at !== null ? ` · deadline <time ${timeAttr(asOf(r.deadline_at).toISOString())}>${formatLocalTime(asOf(r.deadline_at))}</time>` : "") +
       `</p></article>`;
     const needs = rows.filter((r) => NEEDS_YOU.has(r.status));
     const running = rows.filter((r) => RUNNING.has(r.status));
@@ -588,12 +767,17 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
     const section = (title: string, list: Row[], empty: string): string =>
       `<h2>${title}</h2>` + (list.length > 0 ? list.map(cardHtml).join("") : `<p>${empty}</p>`);
     const body =
-      `<p><a href="/ui">← Today</a></p>` +
-      `<h1>MISSIONS</h1>` +
-      section("Needs you", needs, "Nothing needs you.") +
-      section("Running", running, "Nothing running.") +
-      section("Recently finished", finished, "Nothing finished recently.");
-    return await sendHtml(reply, 200, page(body));
+      `<h1>Missions</h1>` +
+      (rows.length === 0
+        ? emptyState(
+            "No missions yet. Delegate work with a definition of done and follow along here.",
+            "Create your first mission",
+            "/ui/delegate",
+          )
+        : section("Needs you", needs, "Nothing is waiting on you.") +
+          section("Running", running, "Nothing is in motion right now.") +
+          section("Recently finished", finished, "Nothing finished in the last 7 days."));
+    return await sendHtml(reply, 200, page(body, { path: "/ui/missions" }));
   });
 
   // ------------------------------------------------------- outcome view
@@ -606,30 +790,61 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
     const query = request.query as { ref?: string };
     const ref = params.ref ?? query.ref;
     if (typeof ref !== "string" || ref.length === 0) {
-      return await sendHtml(reply, 400, page(`<h1>TODAY</h1><p>Missing outcome ref.</p>`));
+      return await sendHtml(reply, 400, errorPage({
+        heading: "Missing mission reference",
+        what: "This view needs a mission ref to show anything.",
+        remedy: "Open Missions and pick the mission there.",
+        backHref: "/ui/missions",
+        backLabel: "Back to Missions",
+        navPath: "/ui/missions",
+      }));
     }
     const outcome = await getOutcomeByRef(db, session.principal.id, ref);
     if (outcome === null) {
-      return await sendHtml(reply, 404, page(`<h1>TODAY</h1><p>Not found. <a href="/ui">Back to Today</a>.</p>`));
+      return await sendHtml(reply, 404, errorPage({
+        heading: "That mission isn't available",
+        what: "No mission with that reference exists for your account — foreign refs 404, never a leak.",
+        remedy: "Open Missions to see the missions that belong to you.",
+        backHref: "/ui/missions",
+        backLabel: "Back to Missions",
+        navPath: "/ui/missions",
+      }));
     }
     const criteria = await listOutcomeCriteria(db, session.principal.id, outcome.id);
     const list = criteria
       .map((c) => {
         const glyph = CRITERION_GLYPHS[c.status] ?? "·";
-        return `<li><span class="glyph">${escapeHtml(glyph)}</span> ${escapeHtml(c.criterion)} <span class="meta">(${escapeHtml(c.status)})</span></li>`;
+        return `<li><span class="glyph">${escapeHtml(glyph)}</span> ${escapeHtml(c.criterion)} <span class="meta">(${escapeHtml(humanizeCriterion(c.status))})</span></li>`;
       })
       .join("");
     const body =
-      `<p><a href="/ui">← Today</a></p>` +
+      `<p class="crumb"><a href="/ui/missions">← Missions</a></p>` +
       `<h1>${escapeHtml(outcome.title)}</h1>` +
-      `<p class="meta">Outcome ${escapeHtml(outcome.ref)} · status ${escapeHtml(outcome.status)}</p>` +
-      `<p class="meta">Created ${escapeHtml(outcome.createdAt)} · Updated ${escapeHtml(outcome.updatedAt)}</p>` +
-      `<h2>Criteria</h2><ul>${list}</ul>`;
-    return await sendHtml(reply, 200, page(body));
+      `<p class="meta">${escapeHtml(outcome.ref)} · ${statusPill(outcome.status)}</p>` +
+      `<p class="meta">Created <time ${timeAttr(outcome.createdAt)}>${formatLocalTime(outcome.createdAt)}</time> · Updated <time ${timeAttr(outcome.updatedAt)}>${formatLocalTime(outcome.updatedAt)}</time></p>` +
+      `<h2>Criteria</h2><ul class="criteria">${list}</ul>`;
+    return await sendHtml(reply, 200, page(body, { path: "/ui/missions" }));
   };
   // Query-shape route is what cookie-browsers hit: auth.ts's publicPaths
   // exact-match can only exempt static paths, so buildApp rewrites the
   // contract path /ui/outcome/:ref onto it before the bearer gate runs.
   app.get("/ui/outcome", outcomeView);
   app.get("/ui/outcome/:ref", outcomeView); // contract shape; bearer clients (or post-merge hook changes)
+}
+
+/**
+ * Recovery/credential-paste form (break-glass) — the originating form for
+ * pre-auth 401s, re-rendered remedy-style with the way forward inline.
+ */
+function pasteFormPage(message: string): string {
+  return errorPage({
+    heading: "Recovery sign-in",
+    what: message,
+    remedy: "Paste a one-time credential below. It opens a private Today session on this device.",
+    formHtml:
+      `<div class="error-form"><form method="post" action="/ui/session">` +
+      `<input type="password" name="token" autocomplete="off" required>` +
+      `<button type="submit" class="btn-primary">Open Today</button>` +
+      `</form></div>`,
+  });
 }
