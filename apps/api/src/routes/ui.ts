@@ -56,7 +56,8 @@ import {
 import { escapeHtml } from "../escape-html.js";
 import { issueSession, verifyCsrf, verifySession, type TodaySession } from "../session.js";
 import { loadTodayAuthPolicy, resolveTailscalePrincipal } from "../tailscale-auth.js";
-import { scriptTags, TODAY_CSP } from "./ui-script.js";
+import { TODAY_CSP } from "./ui-script.js";
+import { EVENING_HOUR, TOMORROW_HOUR } from "./attention-actions.js";
 import { createAndDispatchOutcome, createWorkflowRuntime, type OutcomeDispatchPort } from "@jehad/workflow";
 import { outcomesPolicyOf, parsePolicyV1 } from "@jehad/core";
 import { randomUUID } from "node:crypto";
@@ -195,10 +196,10 @@ function isOutcomeCard(item: TodayItem): boolean {
 export function resolveDeadlinePick(pick: string, now: Date): Date | null {
   const target = new Date(now);
   if (pick === "tonight") {
-    target.setHours(20, 0, 0, 0);
+    target.setHours(EVENING_HOUR, 0, 0, 0);
   } else if (pick === "tomorrow" || pick === "nextweek") {
     target.setDate(target.getDate() + (pick === "tomorrow" ? 1 : 7));
-    target.setHours(9, 0, 0, 0);
+    target.setHours(TOMORROW_HOUR, 0, 0, 0);
   } else {
     return null;
   }
@@ -244,6 +245,21 @@ function card(item: TodayItem, csrf: string, now: Date): string {
           csrf,
           primary.descriptor.kind === "dismiss" ? "btn-danger" : "btn-primary",
         );
+  const hasStoredSnooze = rest.some((d) => d.descriptor.kind === "snooze");
+  const snoozePresets = hasStoredSnooze
+    ? `<div class="snooze-presets">` +
+      [["1h", "Snooze 1h"], ["evening", "This evening"], ["tomorrow", "Tomorrow"]]
+        .map(
+          ([preset, label]) =>
+            `<form method="post" action="/ui/snooze">` +
+            `<input type="hidden" name="itemId" value="${escapeHtml(item.id)}">` +
+            `<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">` +
+            `<input type="hidden" name="preset" value="${preset}">` +
+            `<button type="submit" class="btn-secondary">${label}</button></form>`,
+        )
+        .join("") +
+      `</div>`
+    : "";
   const sheetEntries = [...sheetMid, ...sheetDismiss];
   const sheet =
     sheetEntries.length === 0
@@ -251,6 +267,7 @@ function card(item: TodayItem, csrf: string, now: Date): string {
       : `<details class="sheet">` +
         `<summary class="sheet-toggle" aria-label="More actions">⋯</summary>` +
         `<div class="sheet-body">` +
+        snoozePresets +
         sheetEntries
           .map((d) => {
             const danger = d.descriptor.kind === "dismiss";

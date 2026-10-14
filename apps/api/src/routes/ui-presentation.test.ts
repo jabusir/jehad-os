@@ -110,7 +110,10 @@ describe("page chrome", () => {
   it("keeps the security head: viewport meta, no script, no external assets", () => {
     const html = page("x", { path: "/ui" });
     expect(html).toContain(`<meta name="viewport" content="width=device-width, initial-scale=1">`);
-    expect(html).not.toContain("<script");
+    // U3: exactly ONE script — the inline, CSP-hashed enhancement (no src, no
+    // external asset). Everything else stays script-free.
+    expect((html.match(/<script/g) ?? [])).toHaveLength(1);
+    expect(html).not.toContain('<script src=');
     expect(html).not.toContain("http://");
     expect(html).not.toContain("https://");
   });

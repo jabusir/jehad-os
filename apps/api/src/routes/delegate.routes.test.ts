@@ -19,6 +19,9 @@ import { resolveDeadlinePick } from "./ui";
 import type { OutcomeDispatchPort } from "@jehad/workflow";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+// U3 injects a CSP-hashed inline script into every page; markup assertions
+// must run against the DOM content, not the script's own selector text.
+const bodyOnly = (html: string): string => html.replace(/<script[\s\S]*?<\/script>/g, "");
 const TS_LOGIN = "owner@example.tailnet";
 
 function cookieFrom(res: { headers: Record<string, unknown> }): string {
@@ -381,7 +384,7 @@ describe.skipIf(!TEST_DATABASE_URL)("U2 delegate form (integration, isolated uxc
     // all 4 rows per section in the DOM; rows 2-4 marked data-extra
     expect((res.body.match(/name="criterion[1-4]"/g) ?? [])).toHaveLength(4);
     expect((res.body.match(/name="constraint[1-4]"/g) ?? [])).toHaveLength(4);
-    expect((res.body.match(/data-extra/g) ?? [])).toHaveLength(6);
+    expect((bodyOnly(res.body).match(/data-extra/g) ?? [])).toHaveLength(6);
     expect((res.body.match(/<details class="extra-rows"><summary>Add another<\/summary>/g) ?? [])).toHaveLength(2);
     // deadline quick-picks + no-JS custom reveal hook
     for (const pick of ["none", "tonight", "tomorrow", "nextweek", "custom"]) {
@@ -472,14 +475,14 @@ describe.skipIf(!TEST_DATABASE_URL)("U2 delegate form (integration, isolated uxc
     expect(page.statusCode).toBe(200);
     expect(page.body).toContain("3 of 3 mission slots used");
     expect(page.body).toContain("policy cap");
-    expect(page.body).not.toContain('type="submit"');
-    expect(page.body).not.toContain("an executor starts immediately");
+    expect(bodyOnly(page.body)).not.toContain('type="submit"');
+    expect(bodyOnly(page.body)).not.toContain("an executor starts immediately");
 
     const res = await postForm({ goal: "Uxc cap-buster", criterion1: "done" });
     expect(res.statusCode).toBe(400);
     expect(res.body).toContain("policy cap");
     expect(res.body).toContain('value="Uxc cap-buster"');
-    expect(res.body).not.toContain('type="submit"');
+    expect(bodyOnly(res.body)).not.toContain('type="submit"');
     await cancelAll();
     // cap lifted → the submit button is back
     const after = await app.inject({ method: "GET", url: "/ui/delegate", headers: { cookie } });
@@ -496,7 +499,7 @@ describe.skipIf(!TEST_DATABASE_URL)("U2 delegate form (integration, isolated uxc
     const missions = await app.inject({ method: "GET", url: loc, headers: { cookie } });
     expect(missions.statusCode).toBe(200);
     expect(missions.body).toContain("Uxc highlight me mission");
-    expect((missions.body.match(/class="created-pulse"/g) ?? [])).toHaveLength(1);
+    expect((missions.body.match(/class="card created-pulse"/g) ?? [])).toHaveLength(1);
     // the pulse ships with its reduced-motion opt-out, ≤10 style lines
     expect(missions.body).toContain("@keyframes createdPulse");
     expect(missions.body).toContain("prefers-reduced-motion");

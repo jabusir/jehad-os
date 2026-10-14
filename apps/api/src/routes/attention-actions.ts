@@ -80,6 +80,8 @@ const SNOOZE_CEILING_MINUTES = 4320;
 /** §2 snooze-floor artifact: "evening" closer than this rolls to the NEXT
  *  day's 20:00. Applies ONLY to /ui/snooze token translation, never to U2
  *  deadlines (deadlines have no floor — their only rule is "in the future"). */
+export const EVENING_HOUR = 20;
+export const TOMORROW_HOUR = 9;
 const EVENING_ROLL_THRESHOLD_MINUTES = 30;
 
 function localAtHour(now: Date, hour: number, dayOffset: number): Date {
@@ -101,14 +103,14 @@ export function snoozeTokenToMinutes(token: string, now: Date): number | null {
     case "1h":
       return 60;
     case "evening": {
-      let target = localAtHour(now, 20, 0);
+      let target = localAtHour(now, EVENING_HOUR, 0);
       if ((target.getTime() - now.getTime()) / 60_000 < EVENING_ROLL_THRESHOLD_MINUTES) {
-        target = localAtHour(now, 20, 1);
+        target = localAtHour(now, EVENING_HOUR, 1);
       }
       return Math.ceil((target.getTime() - now.getTime()) / 60_000);
     }
     case "tomorrow": {
-      const target = localAtHour(now, 9, 1);
+      const target = localAtHour(now, TOMORROW_HOUR, 1);
       return Math.ceil((target.getTime() - now.getTime()) / 60_000);
     }
     default:

@@ -127,7 +127,16 @@ ul{padding-left:1.25rem}
 time{white-space:nowrap}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}
-}`;
+}
+.snooze-presets{display:flex;flex-wrap:wrap;gap:.4rem;margin:.25rem 0}
+.snooze-presets form{display:inline}
+.field-error{color:#b3261e;margin:.25rem 0}
+.deadline-custom{display:none}
+form:has(input[name="deadlinePick"][value="custom"]:checked) .deadline-custom{display:block}
+@keyframes createdPulse{0%{outline:3px solid #4a90d9;outline-offset:2px}100%{outline:3px solid transparent;outline-offset:8px}}
+.created-pulse{animation:createdPulse 1.2s ease-out 2}
+@media(prefers-reduced-motion:reduce){.created-pulse{animation:none}}
+`;
 
 // ------------------------------------------------------------- language map
 
@@ -308,14 +317,7 @@ export function emptyState(message: string, ctaLabel?: string, ctaHref?: string)
   const cta = ctaLabel !== undefined && ctaHref !== undefined
     ? `<a class="btn btn-primary" href="${escapeHtml(ctaHref)}">${escapeHtml(ctaLabel)}</a>`
     : "";
-  return `<div class="empty"><p>${escapeHtml(message)}</p>${cta}</div>
-.field-error{color:#b3261e;margin:.25rem 0}
-.deadline-custom{display:none}
-form:has(input[name="deadlinePick"][value="custom"]:checked) .deadline-custom{display:block}
-@keyframes createdPulse{0%{outline:3px solid #4a90d9;outline-offset:2px}100%{outline:3px solid transparent;outline-offset:8px}}
-.created-pulse{animation:createdPulse 1.2s ease-out 2}
-@media(prefers-reduced-motion:reduce){.created-pulse{animation:none}}
-`;
+  return `<div class="empty"><p>${escapeHtml(message)}</p>${cta}</div>`;
 }
 
 // -------------------------------------------------------------- flash banner
