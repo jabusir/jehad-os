@@ -8,6 +8,7 @@ import { registerImessageHarnessRoutes } from "./routes/harness-imessage.js";
 import { registerNotificationRoutes } from "./routes/notifications.js";
 import { registerAttentionRoutes } from "./routes/attention.js";
 import { registerUiRoutes } from "./routes/ui.js";
+import { registerUiIconRoute } from "./routes/ui-icon.js";
 import type { PromotionDb } from "@jehad/core";
 
 const HOST = "127.0.0.1";
@@ -72,6 +73,7 @@ export async function buildApp(opts: AppOptions = {}) {
         "/ui/missions",
         "/ui/action",
         "/ui/outcome",
+        "/ui/icon.svg",
       ],
     });
     registerEventRoutes(app, { db: opts.db });
@@ -84,6 +86,10 @@ export async function buildApp(opts: AppOptions = {}) {
   }
 
   app.get("/healthz", async () => ({ ok: true }) as const);
+
+  // Lane D / ADR-0022: static public asset — needs no DB, registered even
+  // for db-less tooling builds.
+  registerUiIconRoute(app);
 
   return app;
 }

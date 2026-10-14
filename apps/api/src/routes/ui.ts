@@ -1,6 +1,7 @@
 /**
  * Today — the private tailnet web read-out (ADR-0019; W1 contract §"API
- * contract"). Server-rendered HTML only: no SPA, no client-side JS, no
+ * contract"). Server-rendered HTML plus exactly ONE hash-pinned inline
+ * enhancement script (ADR-0022, ui-script.ts): no SPA, no framework, no
  * external assets. Four hard rules from ADR-0019 §2 are enforced here:
  *
  * 1. Identity gate: one-time bearer-credential paste → stateless signed
@@ -10,7 +11,7 @@
  *    (hence no session-scoped CSRF token) exists yet; SameSite=Strict plus
  *    the one-time credential itself close the login-CSRF window.
  * 3. Every string derived from external content escapes through the single
- *    escapeHtml helper; CSP `default-src 'none'` on every response.
+ *    escapeHtml helper; the ADR-0022 CSP (TODAY_CSP) on every response.
  * 4. Actions render from the ADR-0018 §1.6 registry descriptors only —
  *    never from row-stored endpoints; unknown keys render nothing and
  *    dispatch nothing (fail-closed).
@@ -46,6 +47,7 @@ import {
 import { escapeHtml } from "../escape-html.js";
 import { issueSession, verifyCsrf, verifySession, type TodaySession } from "../session.js";
 import { loadTodayAuthPolicy, resolveTailscalePrincipal } from "../tailscale-auth.js";
+import { scriptTags, TODAY_CSP } from "./ui-script.js";
 import { createAndDispatchOutcome, createWorkflowRuntime, type OutcomeDispatchPort } from "@jehad/workflow";
 import { outcomesPolicyOf, parsePolicyV1 } from "@jehad/core";
 import { randomUUID } from "node:crypto";
@@ -58,9 +60,11 @@ export interface UiRoutesOptions {
   dispatch?: OutcomeDispatchPort;
 }
 
-/** ADR-0019 CSP — sent on every Today response (contract-mandated value). */
-const CSP =
-  "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'";
+/**
+ * ADR-0022 CSP (amends ADR-0019's `default-src 'none'`) — sent on every
+ * Today response. Hash-pinned to the inline enhancement script it serves;
+ * see ui-script.ts for the script, the hash, and the directive rationale.
+ */
 
 function loadOutcomesPolicy() {
   const moduleDefault = fileURLToPath(new URL("../../../../policy.yaml", import.meta.url));
@@ -111,7 +115,7 @@ function sendHtml(reply: FastifyReply, code: number, html: string): FastifyReply
   return reply
     .code(code)
     .header("content-type", "text/html; charset=utf-8")
-    .header("content-security-policy", CSP)
+    .header("content-security-policy", TODAY_CSP)
     .send(html);
 }
 
@@ -121,6 +125,7 @@ function page(body: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+${scriptTags()}
 <style>
 body{font-family:system-ui,sans-serif;margin:1rem auto;max-width:40rem;padding:0 1rem;color:#111;background:#fafafa;overflow-wrap:break-word}
 nav{display:flex;gap:1rem;padding:.5rem 0;border-bottom:1px solid #ddd;margin-bottom:.5rem;font-size:1.05rem}
