@@ -539,7 +539,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
           "It changed state before this action could run, so nothing happened.",
           "Reopen Today to see what still needs you.",
         ));
-        return await reply.code(303).header("location", "/ui").send("");
+        return await reply.code(303).header("location", "/ui?done=resolve").send("");
       }
       case "dismiss": {
         const updated = await dismissAttention(db, principalId, itemId, { now, actor });
@@ -548,7 +548,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
           "It changed state before this action could run, so nothing happened.",
           "Reopen Today to see what still needs you.",
         ));
-        return await reply.code(303).header("location", "/ui").send("");
+        return await reply.code(303).header("location", "/ui?done=resolve").send("");
       }
       case "seen": {
         const updated = await markSeen(db, principalId, itemId, { now, actor });
@@ -557,7 +557,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
           "It changed state before this action could run, so nothing happened.",
           "Reopen Today to see what still needs you.",
         ));
-        return await reply.code(303).header("location", "/ui").send("");
+        return await reply.code(303).header("location", "/ui?done=resolve").send("");
       }
       case "snooze": {
         const minutes = Number(args.minutes ?? descriptor.defaultArgs?.minutes);
@@ -574,7 +574,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
           "It changed state before this action could run, so nothing happened.",
           "Reopen Today to see what still needs you.",
         ));
-        return await reply.code(303).header("location", "/ui").send("");
+        return await reply.code(303).header("location", "/ui?done=snooze").send("");
       }
       case "feedback": {
         const verdict = args.verdict;
@@ -602,7 +602,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
           }
           throw err;
         }
-        return await reply.code(303).header("location", "/ui").send("");
+        return await reply.code(303).header("location", "/ui?done=feedback").send("");
       }
       case "link": {
         const ref = args.ref;
