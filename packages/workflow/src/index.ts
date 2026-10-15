@@ -42,9 +42,12 @@ export {
 export { calendarSyncWorkflow, type CalendarSyncResult } from "./calendar-workflows.js";
 export {
   createAndDispatchOutcome,
+  DELEGATION_MODES,
+  researchPlanFor,
   type CreateAndDispatchOutcomeInput,
-  type DelegateFormInput,
   type DelegatedMission,
+  type DelegationMode,
+  type DelegateFormInput,
   type OutcomeDispatchPort,
 } from "./delegate-shared.js";
 export {
@@ -83,6 +86,9 @@ export {
   OUTCOME_EXECUTOR_MAX_ITERATIONS,
   OUTCOME_REAPER_ACTOR,
   OUTCOME_SCANNER_ACTOR,
+  RESEARCH_CONTEXT_ONLY_STANCE,
+  RESEARCH_SYSTEM_STANCE,
+  buildResearchOutputContract,
   runOutcomeExecutor,
   runOutcomeReapTick,
   runOutcomeResumeScan,
@@ -95,6 +101,13 @@ export {
   type OutcomeReapResult,
   type OutcomeScanResult,
 } from "./outcome-workflows.js";
+export {
+  parseJsonEnvelope,
+  reconcileWebCitations,
+  normalizeUrlForMatch,
+  type CitationReconciliation,
+  type WorkerCitation,
+} from "./research-web.js";
 export {
   VERIFIER_SYSTEM_STANCE,
   buildVerifierOutputContract,

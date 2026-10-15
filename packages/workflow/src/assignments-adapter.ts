@@ -19,7 +19,7 @@ import type {
   HarnessRunStatus,
   ModelProvider,
 } from "@jehad/adapters";
-import { callModel, type ModelCallDb, type ModelEgressPolicyRegistry } from "@jehad/core";
+import { callModel, callModelChat, type ModelCallDb, type ModelEgressPolicyRegistry } from "@jehad/core";
 
 export interface ModelHarnessAdapterDeps {
   readonly db: ModelCallDb;
@@ -47,6 +47,57 @@ export class ModelHarnessAdapter implements HarnessCapableAdapter {
   }
 
   async start(spec: HarnessRunSpec): Promise<HarnessRunResult> {
+    // Web-capable run (mission-execution v1): the chat surface with
+    // provider-operated READ-ONLY server tools, hard-capped by the policy
+    // web spec that traveled on this spec. Same admission → egress → ledger
+    // path; the tool spend rides usage.costUsd.
+    if (spec.web !== undefined) {
+      const { web } = spec;
+      const outcome = await callModelChat(this.deps, {
+        runId: spec.runId,
+        domainId: "personal",
+        sensitivity: "normal",
+        provider: this.deps.provider.id,
+        model: spec.model,
+        messages: [{ role: "user", content: spec.prompt }],
+        serverTools: [
+          {
+            type: "openrouter:web_search",
+            parameters: { engine: "exa", max_results: 5, max_uses: web.maxSearches, max_characters: Math.min(100_000, web.maxSourceContentTokens * 4) },
+          },
+          {
+            type: "openrouter:web_fetch",
+            parameters: { engine: "exa", max_uses: web.maxFetches, max_content_tokens: web.maxSourceContentTokens },
+          },
+        ],
+        // Outer loop bound: total server-tool steps across both tools.
+        maxToolCalls: web.maxSearches + web.maxFetches,
+        promptVersion: spec.promptVersion ?? undefined,
+        principalId: spec.principalId,
+        surface: "assignment",
+        outcomeId: spec.outcomeId,
+        assignmentId: spec.assignmentId,
+      });
+      const state: "succeeded" | "failed" = outcome.resultStatus === "error" ? "failed" : "succeeded";
+      const denial =
+        outcome.resultStatus === "error"
+          ? (outcome.result.text === "" ? "provider_error" : "empty_output")
+          : undefined;
+      this.terminals.set(spec.assignmentId ?? spec.runId, {
+        state,
+        text: outcome.result.text,
+        latencyMs: outcome.latencyMs,
+      });
+      return {
+        ok: outcome.resultStatus !== "error",
+        text: outcome.result.text,
+        costUsd: outcome.costUsd,
+        latencyMs: outcome.latencyMs,
+        ...(outcome.result.annotations !== undefined ? { annotations: outcome.result.annotations } : {}),
+        ...(outcome.result.usage?.serverToolUse !== undefined ? { serverToolUse: outcome.result.usage.serverToolUse } : {}),
+        ...(denial !== undefined ? { denial } : {}),
+      };
+    }
     const outcome = await callModel(this.deps, {
       runId: spec.runId,
       domainId: "personal",
