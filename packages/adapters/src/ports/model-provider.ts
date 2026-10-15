@@ -69,6 +69,37 @@ export interface ChatTool {
   readonly parameters: Record<string, unknown>;
 }
 
+/**
+ * A PROVIDER-OPERATED server tool (mission-execution v1): the provider
+ * executes it inside the request loop and folds the results into the model's
+ * context. OpenRouter names them `openrouter:*`; the exact wire type string
+ * is the provider's contract — this port only carries it opaquely. Never
+ * granted globally: callers pass server tools per request, and policy (the
+ * workers ceiling) decides which role's request may carry them.
+ */
+export interface ChatServerTool {
+  readonly type: string;
+  readonly parameters?: Record<string, unknown>;
+}
+
+/**
+ * A citation the PROVIDER attached to generated content — the mechanical
+ * record of an externally retrieved source (url_citation annotations).
+ * Software truth, not model prose: research results may cite only URLs that
+ * appear here (or were provably fetched), never URLs the model invented.
+ */
+export interface WebCitation {
+  readonly url: string;
+  readonly title?: string;
+  readonly content?: string;
+}
+
+/** Server-tool usage reported by the provider (spend/count audit trail). */
+export interface ServerToolUse {
+  readonly webSearchRequests?: number;
+  readonly webFetchRequests?: number;
+}
+
 export interface ChatRequest {
   readonly domainId: string;
   readonly sensitivity: Sensitivity;
@@ -77,6 +108,16 @@ export interface ChatRequest {
   readonly messages: readonly ChatMessage[];
   /** Absent/empty = plain chat (no tool surface offered). */
   readonly tools?: readonly ChatTool[];
+  /**
+   * Provider-operated server tools for THIS request only (read-only web
+   * tools for the research role; nothing else). Absent = no server tools.
+   */
+  readonly serverTools?: readonly ChatServerTool[];
+  /**
+   * Hard cap on total server-tool steps for the request (OpenRouter's
+   * `max_tool_calls`); omitted = provider default.
+   */
+  readonly maxToolCalls?: number;
   /**
    * Per-call provider timeout (the native path's ratified T_native, 15s).
    * Providers honor min(this, their own default); omitted = provider default.
@@ -91,7 +132,9 @@ export interface ChatResult {
   readonly text: string;
   /** Tool calls requested by the assistant, in provider order. */
   readonly toolCalls: readonly ChatToolCall[];
-  readonly usage?: ModelResult["usage"];
+  /** Provider-attached web citations (mechanical retrieval record). */
+  readonly annotations?: readonly WebCitation[];
+  readonly usage?: ModelResult["usage"] & { readonly serverToolUse?: ServerToolUse };
   readonly providerRef?: string;
 }
 

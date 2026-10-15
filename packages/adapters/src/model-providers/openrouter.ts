@@ -17,6 +17,7 @@ import type {
   ModelProvider,
   ModelRequest,
   ModelResult,
+  WebCitation,
 } from "../ports/model-provider.js";
 
 const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
@@ -32,12 +33,24 @@ interface OpenRouterCompletionResponse {
         readonly id?: unknown;
         readonly function?: { readonly name?: unknown; readonly arguments?: unknown };
       }[];
+      readonly annotations?: {
+        readonly type?: unknown;
+        readonly url_citation?: {
+          readonly url?: unknown;
+          readonly title?: unknown;
+          readonly content?: unknown;
+        };
+      }[];
     };
   }[];
   readonly usage?: {
     readonly prompt_tokens?: number;
     readonly completion_tokens?: number;
     readonly cost?: number;
+    readonly server_tool_use?: {
+      readonly web_search_requests?: number;
+      readonly web_fetch_requests?: number;
+    };
   };
 }
 
@@ -94,6 +107,25 @@ function safeProviderMessage(bodyText: string): string | undefined {
     // unparseable body — nothing safe to surface
   }
   return undefined;
+}
+
+/** Normalized url_citation annotations → WebCitation (garbage dropped). */
+function parseAnnotations(raw: unknown): WebCitation[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: WebCitation[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as { type?: unknown; url_citation?: { url?: unknown; title?: unknown; content?: unknown } };
+    if (e.type !== "url_citation" || typeof e.url_citation !== "object" || e.url_citation === null) continue;
+    const url = e.url_citation.url;
+    if (typeof url !== "string" || url.length === 0) continue;
+    out.push({
+      url,
+      ...(typeof e.url_citation.title === "string" && e.url_citation.title.length > 0 ? { title: e.url_citation.title } : {}),
+      ...(typeof e.url_citation.content === "string" && e.url_citation.content.length > 0 ? { content: e.url_citation.content } : {}),
+    });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 export function createOpenRouterProvider(
@@ -164,12 +196,22 @@ export function createOpenRouterProvider(
 
       const messages = request.messages.map(chatRequestToWire);
       const body: Record<string, unknown> = { model: request.model, messages };
-      if (request.tools !== undefined && request.tools.length > 0) {
-        body["tools"] = request.tools.map((tool) => ({
-          type: "function",
-          function: { name: tool.name, description: tool.description, parameters: tool.parameters },
-        }));
+      const functionTools = (request.tools ?? []).map((tool) => ({
+        type: "function",
+        function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+      }));
+      // Server tools ride the SAME tools array with their openrouter:* type
+      // (vendor contract stays here); max_tool_calls bounds the whole loop.
+      const serverTools = (request.serverTools ?? []).map((tool) =>
+        tool.parameters !== undefined ? { type: tool.type, parameters: tool.parameters } : { type: tool.type },
+      );
+      const wireTools = [...serverTools, ...functionTools];
+      if (wireTools.length > 0) {
+        body["tools"] = wireTools;
         body["tool_choice"] = "auto";
+      }
+      if (request.maxToolCalls !== undefined) {
+        body["max_tool_calls"] = request.maxToolCalls;
       }
 
       let response: Response;
@@ -228,13 +270,19 @@ export function createOpenRouterProvider(
           toolCalls.push({ id, name, arguments: args });
         });
       }
+      const annotations = parseAnnotations(message?.annotations);
       return {
         text,
         toolCalls,
+        ...(annotations !== undefined ? { annotations } : {}),
         usage: {
           inputTokens: parsed.usage?.prompt_tokens,
           outputTokens: parsed.usage?.completion_tokens,
           costUsd: parsed.usage?.cost,
+          serverToolUse: {
+            webSearchRequests: parsed.usage?.server_tool_use?.web_search_requests,
+            webFetchRequests: parsed.usage?.server_tool_use?.web_fetch_requests,
+          },
         },
         providerRef: parsed.id,
       };

@@ -124,6 +124,8 @@ export const RESULT_TITLE_MAX_CHARS = 200;
 export const RESULT_MAX_CITATIONS = 20;
 export const RESULT_CITATION_REF_MAX_CHARS = 100;
 export const RESULT_CITATION_NOTE_MAX_CHARS = 300;
+export const RESULT_CITATION_URL_MAX_CHARS = 2048;
+export const RESULT_CITATION_TITLE_MAX_CHARS = 300;
 export const RESULT_MAX_OPEN_QUESTIONS = 5;
 export const RESULT_OPEN_QUESTION_MAX_CHARS = 200;
 /** The stored input package may not exceed this (bounded context, §12). */
@@ -133,6 +135,62 @@ export interface AssignmentCitation {
   /** Where the claim came from: an event id, gmail thread ref, URL, … */
   readonly ref: string;
   readonly note?: string;
+  /**
+   * The web source this citation grounds (mission-execution v1). Present
+   * ONLY when the citation is a real web source: validated http(s) URL to a
+   * public host — loopback/private/link-local hosts are rejected (fail
+   * closed) so no hostile page can smuggle an internal URL into evidence.
+   */
+  readonly url?: string;
+  /** The source page title, when known (≤300 chars). */
+  readonly title?: string;
+}
+
+const PRIVATE_HOSTNAMES = new Set(["localhost", "localhost.localdomain", "local", "internal", "intranet", "corp"]);
+
+/**
+ * The public-web URL guard: only http(s) URLs at public, non-reserved hosts
+ * pass. Rejects loopback (127/8, ::1), private ranges (10/8, 172.16/12,
+ * 192.168/16), link-local (169.254/16, fe80::/10), unique-local (fc00::/7),
+ * 0.0.0.0, and reserved single-label/.local/.internal hosts. Returns null
+ * for anything that is not an acceptable public web URL.
+ */
+export function publicWebUrl(raw: unknown): string | null {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > RESULT_CITATION_URL_MAX_CHARS) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  if (hostname.length === 0 || PRIVATE_HOSTNAMES.has(hostname)) return null;
+  if (!hostname.includes(".")) {
+    // Single-label host with no dot is never public web (localhost-style).
+    return null;
+  }
+  if (hostname.endsWith(".local") || hostname.endsWith(".internal") || hostname.endsWith(".localhost") || hostname.endsWith(".home.arpa")) {
+    return null;
+  }
+  if (parsed.username !== "" || parsed.password !== "") return null;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
+    const parts = hostname.split(".").map((p) => Number(p));
+    const [a, b] = parts as [number, number, number, number];
+    if (a === 0 || a === 10 || a === 127) return null;
+    if (a === 169 && b === 254) return null;
+    if (a === 172 && b >= 16 && b <= 31) return null;
+    if (a === 192 && b === 168) return null;
+    if (a === 100 && b >= 64 && b <= 127) return null; // CGNAT
+  }
+  if (hostname.includes(":")) {
+    // IPv6 literal — only global addresses worth attempting: reject
+    // loopback/unique-local/link-local forms outright, allow the rest.
+    if (hostname === "::1" || hostname === "::") return null;
+    if (/^f[cd]/.test(hostname)) return null; // fc00::/7 unique-local
+    if (/^fe[89ab]/.test(hostname)) return null; // fe80::/10 link-local
+  }
+  return parsed.toString();
 }
 
 /** The validated result envelope a worker returns (roadmap §8.3 + D2). */
@@ -186,7 +244,30 @@ export function parseAssignmentResult(raw: unknown): AssignmentResult {
     if (citation.note !== undefined && (typeof citation.note !== "string" || citation.note.length > RESULT_CITATION_NOTE_MAX_CHARS)) {
       throw new AssignmentError(`citation note too long (≤ ${RESULT_CITATION_NOTE_MAX_CHARS} chars)`);
     }
-    return { ref: citation.ref, ...(citation.note !== undefined ? { note: citation.note } : {}) };
+    // Web-source citations (mission-execution v1): a url, when present, must
+    // be a PUBLIC web URL — private/loopback/malformed fails the whole
+    // envelope (fail closed, never a silent strip of provenance).
+    let url: string | undefined;
+    if (citation.url !== undefined && citation.url !== null) {
+      const checked = publicWebUrl(citation.url);
+      if (checked === null) {
+        throw new AssignmentError("citation url must be a public http(s) web URL (no private/loopback hosts)");
+      }
+      url = checked;
+    }
+    let title: string | undefined;
+    if (citation.title !== undefined && citation.title !== null) {
+      if (typeof citation.title !== "string" || citation.title.length > RESULT_CITATION_TITLE_MAX_CHARS) {
+        throw new AssignmentError(`citation title too long (≤ ${RESULT_CITATION_TITLE_MAX_CHARS} chars)`);
+      }
+      title = citation.title;
+    }
+    return {
+      ref: citation.ref,
+      ...(citation.note !== undefined ? { note: citation.note } : {}),
+      ...(url !== undefined ? { url } : {}),
+      ...(title !== undefined ? { title } : {}),
+    };
   });
   if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) {
     throw new AssignmentError("assignment result costUsd must be a non-negative number");
@@ -479,14 +560,27 @@ export async function completeAssignment(
   // Citations land as evidence rows — claims enter the world model only as
   // evidence pointing at their source refs (§8.4: findings, never writes).
   // metadata.assignmentId makes each row traceable to the assignment that
-  // produced it — the D3 verifier gate (027) keys on it.
+  // produced it — the D3 verifier gate (027) keys on it. Web citations
+  // (mission-execution v1) carry a validated public URL: source_type='url',
+  // source_ref=THE URL, with the page title in metadata — real provenance,
+  // not a context-package label.
   const evidenceIds: string[] = [];
   for (const citation of parsed.citations) {
+    const isWeb = typeof citation.url === "string" && citation.url.length > 0;
     const inserted = await db.query(
       `INSERT INTO evidence (domain_id, source_type, source_ref, claim, observed_at, metadata)
-       VALUES ((SELECT id FROM domains WHERE key = 'personal'), 'assignment', $1, $2, $3::timestamptz, $4::jsonb)
+       VALUES ((SELECT id FROM domains WHERE key = 'personal'), $5, $1, $2, $3::timestamptz, $4::jsonb)
        RETURNING id`,
-      [citation.ref, citation.note ?? parsed.summary, opts.now.toISOString(), JSON.stringify({ assignmentId: input.assignmentId })],
+      [
+        isWeb ? citation.url! : citation.ref,
+        citation.note ?? parsed.summary,
+        opts.now.toISOString(),
+        JSON.stringify({
+          assignmentId: input.assignmentId,
+          ...(isWeb ? { title: citation.title ?? null } : {}),
+        }),
+        isWeb ? "url" : "assignment",
+      ],
     );
     evidenceIds.push(String(inserted.rows[0]!.id));
   }

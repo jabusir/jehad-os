@@ -76,6 +76,14 @@ export interface CreateOutcomeInput {
   readonly deadlineAt?: string;
   readonly sourceThreadId?: string;
   readonly createdBy?: "conversation" | "josctl";
+  /**
+   * The canonical initial execution plan (mission-execution v1). An explicit
+   * typed plan — e.g. `[{ assign: { role: "research", task } }]` — is set
+   * ONCE here at create; the executor is its only other writer (entry
+   * consumption). Shape validation belongs to the intake seam that composes
+   * it; this service stores it as the outcome's plan of record.
+   */
+  readonly plan?: readonly unknown[];
 }
 
 export interface OutcomeDb extends EventStoreExecutor, SqlExecutor {}
@@ -180,13 +188,15 @@ export async function createOutcome(
   }
   const id = randomUUID();
   const ref = await mintOutcomeRef(db);
+  const plan = input.plan ?? [];
   const created = await db.query(
-    `INSERT INTO outcomes (id, principal_id, ref, title, directive, status, constraints, budget_usd, deadline_at, source_thread_id, created_by)
-     VALUES ($1, $2::uuid, $3, $4, $5, 'accepted', $6::jsonb, $7, $8::timestamptz, $9::uuid, $10)
+    `INSERT INTO outcomes (id, principal_id, ref, title, directive, status, constraints, plan, budget_usd, deadline_at, source_thread_id, created_by)
+     VALUES ($1, $2::uuid, $3, $4, $5, 'accepted', $6::jsonb, $7::jsonb, $8, $9::timestamptz, $10::uuid, $11)
      RETURNING ${OUTCOME_COLUMNS}`,
     [
       id, input.principalId, ref, input.title.trim(), input.directive,
       JSON.stringify(input.constraints ?? []),
+      JSON.stringify(plan),
       input.budgetUsd ?? null,
       input.deadlineAt ?? null,
       input.sourceThreadId ?? null,

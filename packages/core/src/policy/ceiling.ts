@@ -196,6 +196,27 @@ export interface WorkerRolePolicy {
   readonly defaultDeadlineMinutes: number;
   /** Read-capability allowlist for the context-package builder. */
   readonly reads: readonly string[];
+  /**
+   * Bounded read-only web capability (mission-execution v1). Absent/undefined
+   * = the role gets NO web tools — the default for every role; only an
+   * explicitly ratified `web:` section grants it (fail closed).
+   */
+  readonly web?: WorkerWebPolicy;
+}
+
+/**
+ * `web:` bounds for one worker role — read-only web (search + fetch) via the
+ * provider's server tools, hard-capped per single assignment request. No
+ * write surface exists to grant (no browsing actions, forms, or sends).
+ */
+export interface WorkerWebPolicy {
+  readonly enabled: boolean;
+  /** Max web searches in one assignment's model request (1..10). */
+  readonly maxSearches: number;
+  /** Max web fetches in one assignment's model request (1..20). */
+  readonly maxFetches: number;
+  /** Max retrieved-source content tokens per fetch (1000..100_000). */
+  readonly maxSourceContentTokens: number;
 }
 
 export interface WorkersPolicy {
@@ -208,15 +229,16 @@ export const DEFAULT_WORKERS_POLICY: WorkersPolicy = { enabled: false, roles: {}
 
 /**
  * Parse ONE flow-mapping role entry:
- * `{ model: <id>, max_budget_usd: <num>, default_deadline_minutes: <int>, reads: [a, b] }`.
+ * `{ model: <id>, max_budget_usd: <num>, default_deadline_minutes: <int>, reads: [a, b] }`
+ * optionally followed by `, web: { enabled: <bool>, max_searches: <int>, max_fetches: <int>, max_source_content_tokens: <int> }`.
  * Throws on any deviation (fail closed — a malformed role entry refuses the
  * whole section, refusing the whole worker fleet).
  */
 export function parseWorkerRoleEntry(value: string): WorkerRolePolicy {
   const m = value.match(
-    /^\{\s*model:\s*([\w./-]+),\s*max_budget_usd:\s*([\d.]+),\s*default_deadline_minutes:\s*(\d+),\s*reads:\s*\[([^\]]*)\]\s*\}$/,
+    /^\{\s*model:\s*([\w./-]+),\s*max_budget_usd:\s*([\d.]+),\s*default_deadline_minutes:\s*(\d+),\s*reads:\s*\[([^\]]*)\]\s*(?:,\s*web:\s*\{\s*enabled:\s*(true|false),\s*max_searches:\s*(\d+),\s*max_fetches:\s*(\d+),\s*max_source_content_tokens:\s*(\d+)\s*\})?\s*\}$/,
   );
-  if (m === null) throw new Error(`policy: malformed workers role entry: ${value.slice(0, 120)}`);
+  if (m === null) throw new Error(`policy: malformed workers role entry: ${value.slice(0, 160)}`);
   const maxBudgetUsd = Number(m[2]);
   if (!Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0 || maxBudgetUsd > 50) {
     throw new Error(`policy: workers max_budget_usd out of range: ${m[2]}`);
@@ -229,11 +251,28 @@ export function parseWorkerRoleEntry(value: string): WorkerRolePolicy {
     .split(",")
     .map((r) => r.trim())
     .filter((r) => r.length > 0);
+  let web: WorkerWebPolicy | undefined;
+  if (m[5] !== undefined) {
+    const maxSearches = Number(m[6]);
+    const maxFetches = Number(m[7]);
+    const maxSourceContentTokens = Number(m[8]);
+    if (!Number.isInteger(maxSearches) || maxSearches < 1 || maxSearches > 10) {
+      throw new Error(`policy: workers web max_searches out of range: ${m[6]}`);
+    }
+    if (!Number.isInteger(maxFetches) || maxFetches < 1 || maxFetches > 20) {
+      throw new Error(`policy: workers web max_fetches out of range: ${m[7]}`);
+    }
+    if (!Number.isInteger(maxSourceContentTokens) || maxSourceContentTokens < 1000 || maxSourceContentTokens > 100_000) {
+      throw new Error(`policy: workers web max_source_content_tokens out of range: ${m[8]}`);
+    }
+    web = { enabled: m[5] === "true", maxSearches, maxFetches, maxSourceContentTokens };
+  }
   return {
     model: m[1]!,
     maxBudgetUsd,
     defaultDeadlineMinutes,
     reads,
+    ...(web !== undefined ? { web } : {}),
   };
 }
 
