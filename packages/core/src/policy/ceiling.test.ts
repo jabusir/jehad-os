@@ -12,7 +12,10 @@ import {
   gmailSensorPolicyOf,
   loadPolicyFile,
   parsePolicyV1,
+  parseWorkerRoleEntry,
+  parseWorkersBody,
   personasPolicyOf,
+  workersPolicyOf,
 } from "./ceiling";
 import { DEFAULT_PER_BLOCK_TOKEN_BUDGET } from "../context/assembler";
 
@@ -825,5 +828,137 @@ describe("policy personas (W4 interaction-profile flag — security/default laye
   it("the repo-root policy.yaml ships personas enabled for josctl (owner direction 2026-09-21)", async () => {
     const policy = await loadPolicyFile(new URL("../../../../policy.yaml", import.meta.url));
     expect(personasPolicyOf(policy)).toEqual({ enabled: true, principals: ["josctl"] });
+  });
+});
+
+// --------------------------------- workers web (mission-execution v1)
+
+describe("policy workers web section (mission-execution v1 bounded read-only web)", () => {
+  const BASE_ROLE =
+    "{ model: openai/gpt-4o-mini, max_budget_usd: 2, default_deadline_minutes: 60, reads: [gmail] }";
+  const WEB =
+    "web: { enabled: true, max_searches: 6, max_fetches: 8, max_source_content_tokens: 12000 }";
+  const ROLE_WITH_WEB = `{ model: openai/gpt-4o-mini, max_budget_usd: 2, default_deadline_minutes: 60, reads: [gmail], ${WEB} }`;
+
+  it("parses a valid web section onto the bounded WorkerWebPolicy", () => {
+    expect(parseWorkerRoleEntry(ROLE_WITH_WEB).web).toEqual({
+      enabled: true,
+      maxSearches: 6,
+      maxFetches: 8,
+      maxSourceContentTokens: 12000,
+    });
+  });
+
+  it("parses web disabled (enabled: false) with the caps intact", () => {
+    const role = parseWorkerRoleEntry(ROLE_WITH_WEB.replace("enabled: true", "enabled: false"));
+    expect(role.web).toEqual({
+      enabled: false,
+      maxSearches: 6,
+      maxFetches: 8,
+      maxSourceContentTokens: 12000,
+    });
+  });
+
+  it("accepts the exact range boundaries (searches 1..10, fetches 1..20, tokens 1000..100000)", () => {
+    expect(
+      parseWorkerRoleEntry(
+        "{ model: m, max_budget_usd: 1, default_deadline_minutes: 30, reads: [], web: { enabled: true, max_searches: 1, max_fetches: 1, max_source_content_tokens: 1000 } }",
+      ).web,
+    ).toEqual({ enabled: true, maxSearches: 1, maxFetches: 1, maxSourceContentTokens: 1000 });
+    expect(
+      parseWorkerRoleEntry(
+        "{ model: m, max_budget_usd: 1, default_deadline_minutes: 30, reads: [], web: { enabled: true, max_searches: 10, max_fetches: 20, max_source_content_tokens: 100000 } }",
+      ).web,
+    ).toEqual({ enabled: true, maxSearches: 10, maxFetches: 20, maxSourceContentTokens: 100000 });
+  });
+
+  it("rejects out-of-range caps (fail closed)", () => {
+    const cases = [
+      "web: { enabled: true, max_searches: 0, max_fetches: 8, max_source_content_tokens: 12000 }",
+      "web: { enabled: true, max_searches: 11, max_fetches: 8, max_source_content_tokens: 12000 }",
+      "web: { enabled: true, max_searches: 6, max_fetches: 0, max_source_content_tokens: 12000 }",
+      "web: { enabled: true, max_searches: 6, max_fetches: 21, max_source_content_tokens: 12000 }",
+      "web: { enabled: true, max_searches: 6, max_fetches: 8, max_source_content_tokens: 999 }",
+      "web: { enabled: true, max_searches: 6, max_fetches: 8, max_source_content_tokens: 100001 }",
+    ];
+    for (const web of cases) {
+      expect(
+        () =>
+          parseWorkerRoleEntry(
+            `{ model: m, max_budget_usd: 1, default_deadline_minutes: 30, reads: [], ${web} }`,
+          ),
+        web,
+      ).toThrow();
+    }
+  });
+
+  it("rejects malformed web shapes (missing key, extra key, wrong order, bad bool)", () => {
+    const cases = [
+      "web: { enabled: true, max_searches: 6, max_fetches: 8 }",
+      "web: { enabled: true, max_searches: 6, max_source_content_tokens: 12000 }",
+      "web: { enabled: true, max_searches: 6, max_fetches: 8, max_source_content_tokens: 12000, extra: 1 }",
+      "web: { enabled: true, max_fetches: 8, max_searches: 6, max_source_content_tokens: 12000 }",
+      "web: { max_searches: 6, max_fetches: 8, max_source_content_tokens: 12000, enabled: true }",
+      "web: { enabled: maybe, max_searches: 6, max_fetches: 8, max_source_content_tokens: 12000 }",
+      "web: { enabled: true, max_searches: 6, max_fetches: 8, max_source_content_tokens: 12000.5 }",
+    ];
+    for (const web of cases) {
+      expect(
+        () =>
+          parseWorkerRoleEntry(
+            `{ model: m, max_budget_usd: 1, default_deadline_minutes: 30, reads: [], ${web} }`,
+          ),
+        web,
+      ).toThrow();
+    }
+  });
+
+  it("the legacy no-web role entry still parses (web undefined — no web tools)", () => {
+    const role = parseWorkerRoleEntry(BASE_ROLE);
+    expect(role.web).toBeUndefined();
+    expect(role.model).toBe("openai/gpt-4o-mini");
+    expect(role.maxBudgetUsd).toBe(2);
+    expect(role.defaultDeadlineMinutes).toBe(60);
+    expect(role.reads).toEqual(["gmail"]);
+  });
+
+  it("parseWorkersBody round-trips a web-enabled research role alongside a web-less verifier", () => {
+    const workers = parseWorkersBody([
+      "enabled: true",
+      `research: ${ROLE_WITH_WEB}`,
+      `verifier: ${BASE_ROLE}`,
+    ]);
+    expect(workers.enabled).toBe(true);
+    expect(workers.roles["research"]?.web).toEqual({
+      enabled: true,
+      maxSearches: 6,
+      maxFetches: 8,
+      maxSourceContentTokens: 12000,
+    });
+    expect(workers.roles["verifier"]?.web).toBeUndefined();
+  });
+
+  it("the full policy text parses with the workers web section (workersPolicyOf shape)", () => {
+    const policy = parsePolicyV1(
+      `${VALID}\nworkers:\n  enabled: true\n  research: ${ROLE_WITH_WEB}\n  verifier: ${BASE_ROLE}\n`,
+    );
+    const workers = workersPolicyOf(policy);
+    expect(workers.enabled).toBe(true);
+    expect(workers.roles["research"]?.web).toEqual({
+      enabled: true,
+      maxSearches: 6,
+      maxFetches: 8,
+      maxSourceContentTokens: 12000,
+    });
+    expect(workers.roles["verifier"]?.web).toBeUndefined();
+    expect(workers.roles["research"]?.model).toBe("openai/gpt-4o-mini");
+  });
+
+  it("a malformed web section refuses the whole workers block (fail closed)", () => {
+    expect(() =>
+      parsePolicyV1(
+        `${VALID}\nworkers:\n  enabled: true\n  research: { model: m, max_budget_usd: 1, default_deadline_minutes: 30, reads: [], web: { enabled: true, max_searches: 11, max_fetches: 8, max_source_content_tokens: 12000 } }\n`,
+      ),
+    ).toThrow();
   });
 });

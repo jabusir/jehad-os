@@ -4,6 +4,7 @@
 // (plan §13: live-model evals are opt-in, key stays in gitignored .env).
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ChatRequest } from "../ports/model-provider.js";
 import {
   OpenRouterConfigError,
   OpenRouterRequestError,
@@ -114,6 +115,109 @@ describe("createOpenRouterProvider (hermetic, mocked fetch)", () => {
     const result = await provider.complete(REQUEST);
     expect(result.text).toBe("");
     expect(result.usage).toEqual({ inputTokens: undefined, outputTokens: undefined, costUsd: undefined });
+  });
+});
+
+// Native tool-calling chat() — server tools, annotations, server-tool usage
+// (mission-execution v1). Hermetic: same fetch-stub style as above.
+describe("createOpenRouterProvider chat() (server tools + annotations, mocked fetch)", () => {
+  const CHAT_BASE: ChatRequest = {
+    domainId: "personal",
+    sensitivity: "normal",
+    provider: "openrouter",
+    model: "openai/gpt-4o-mini",
+    messages: [{ role: "user", content: "research ping" }],
+  };
+
+  it("maps serverTools ahead of function tools with tool_choice auto and max_tool_calls", async () => {
+    const fetchMock = vi.fn(async () =>
+      okResponse({ id: "gen-chat", choices: [{ message: { role: "assistant", content: "ok" } }] }),
+    );
+    const provider = createOpenRouterProvider({ apiKey: "test-key", fetchImpl: fetchMock });
+
+    const result = await provider.chat!({
+      ...CHAT_BASE,
+      tools: [{ name: "lookup", description: "d", parameters: { type: "object", properties: {} } }],
+      serverTools: [
+        { type: "openrouter:web_search", parameters: { max_results: 5 } },
+        { type: "openrouter:web_fetch" },
+      ],
+      maxToolCalls: 4,
+    });
+
+    const init = fetchMock.mock.calls[0]![1]!;
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body["model"]).toBe("openai/gpt-4o-mini");
+    expect(body["tools"]).toEqual([
+      { type: "openrouter:web_search", parameters: { max_results: 5 } },
+      { type: "openrouter:web_fetch" },
+      { type: "function", function: { name: "lookup", description: "d", parameters: { type: "object", properties: {} } } },
+    ]);
+    expect(body["tool_choice"]).toBe("auto");
+    expect(body["max_tool_calls"]).toBe(4);
+    expect(result.text).toBe("ok");
+  });
+
+  it("plain chat sends no tools, no tool_choice, no max_tool_calls", async () => {
+    const fetchMock = vi.fn(async () =>
+      okResponse({ id: "gen-plain", choices: [{ message: { role: "assistant", content: "pong" } }] }),
+    );
+    const provider = createOpenRouterProvider({ apiKey: "test-key", fetchImpl: fetchMock });
+
+    await provider.chat!(CHAT_BASE);
+
+    const init = fetchMock.mock.calls[0]![1]!;
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body["tools"]).toBeUndefined();
+    expect(body["tool_choice"]).toBeUndefined();
+    expect(body["max_tool_calls"]).toBeUndefined();
+  });
+
+  it("parses url_citation annotations into WebCitations and drops everything else", async () => {
+    const fetchMock = vi.fn(async () =>
+      okResponse({
+        id: "gen-ann",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: "Answer",
+              annotations: [
+                { type: "url_citation", url_citation: { url: "https://a.example/x", title: "A" } },
+                { type: "other" },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+    const provider = createOpenRouterProvider({ apiKey: "test-key", fetchImpl: fetchMock });
+
+    const result = await provider.chat!(CHAT_BASE);
+
+    expect(result.annotations).toEqual([{ url: "https://a.example/x", title: "A" }]);
+  });
+
+  it("parses usage.server_tool_use counts alongside the base usage", async () => {
+    const fetchMock = vi.fn(async () =>
+      okResponse({
+        id: "gen-usage",
+        choices: [{ message: { role: "assistant", content: "done" } }],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          cost: 0.001,
+          server_tool_use: { web_search_requests: 2, web_fetch_requests: 1 },
+        },
+      }),
+    );
+    const provider = createOpenRouterProvider({ apiKey: "test-key", fetchImpl: fetchMock });
+
+    const result = await provider.chat!(CHAT_BASE);
+
+    expect(result.usage?.serverToolUse).toEqual({ webSearchRequests: 2, webFetchRequests: 1 });
+    expect(result.usage?.inputTokens).toBe(100);
+    expect(result.usage?.outputTokens).toBe(20);
   });
 });
 
