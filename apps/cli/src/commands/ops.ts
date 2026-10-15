@@ -197,9 +197,14 @@ export async function runDelegateCommand(
   argv: readonly string[],
   opts: { readonly stdout: Writable },
 ): Promise<number> {
-  const directive = argv.slice(3).join(" ").trim();
+  // mission-execution v1: `josctl delegate --research "<directive>"` selects
+  // the ONE executable mission type (deterministic research plan at the
+  // shared seam). Without the flag the mission is the legacy owner-executed
+  // kind — it parks with you, and the output says so (no fake autonomy).
+  const research = argv.includes("--research");
+  const directive = argv.slice(3).filter((a) => a !== "--research").join(" ").trim();
   if (directive.length === 0) {
-    opts.stdout.write('usage: josctl delegate "<directive>"\n');
+    opts.stdout.write('usage: josctl delegate [--research] "<directive>"\n');
     return 1;
   }
   const db = new Pool({ connectionString: process.env.DATABASE_URL ?? "postgres://localhost:5432/jehad" });
@@ -219,6 +224,7 @@ export async function runDelegateCommand(
       {
         principalId,
         principalName: "josctl",
+        ...(research ? { mode: "research" as const } : {}),
         goal: directive,
         directive,
         criteria: ["Outcome achieved, judged by the owner"],
@@ -231,6 +237,9 @@ export async function runDelegateCommand(
     opts.stdout.write(
       `outcome ${mission.outcome.ref} accepted — executor dispatched (run ${mission.runId})\n` +
       `  criterion: ${mission.criteria[0]?.criterion}\n` +
+      (research
+        ? `  research is running — the result lands on the outcome when ready\n`
+        : `  note: no autonomous type selected — this mission parks with you until you act (use --research for autonomous research)\n`) +
       `  check on it: josctl ops outcome ${mission.outcome.ref}\n`,
     );
     return 0;

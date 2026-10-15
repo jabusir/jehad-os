@@ -776,10 +776,10 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
     // At cap the notice replaces the submit button — prevent, don't reject.
     const submitSlot = atCap
       ? `<p class="field-error">You're at the policy cap — ${used} of ${cap} mission slots used. Resolve or cancel a mission, then come back.</p>`
-      : `<p><button type="submit">Delegate — an executor starts immediately.</button></p>`;
+      : `<p><button type="submit">Start research</button></p>`;
     return (
       `<p><a href="/ui">← Today</a></p>` +
-      `<h1>NEW MISSION</h1>` +
+      `<h1>DELEGATE</h1>` +
       `<p class="meta">${used} of ${cap} mission slots used</p>` +
       `<form method="post" action="/ui/delegate">` +
       `<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">` +
@@ -787,18 +787,24 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
       // the previous one (route pre-checks run before the seam), and a fresh
       // uuid keeps retries clean even if a prior POST reached the seam.
       `<input type="hidden" name="submissionId" value="${randomUUID()}">` +
-      `<label>What do you want owned?<br>` +
+      // mission-execution v1 — the ONLY honest delegation is one the system
+      // can actually execute. Research is the single supported autonomous
+      // type: the mode is a fixed, checked choice (an explicit expansion seam
+      // for future types, never a free-text "delegation" that parks).
+      `<h2>Type</h2>` +
+      `<label class="pick"><input type="radio" name="mode" value="research" checked> Research — Jehad OS does the research and comes back with a result</label>` +
+      `<label>What do you want researched?<br>` +
       `<input type="text" name="goal" maxlength="2000" required autocomplete="off" value="${escapeHtml(state.goal)}"></label>` +
       (errors.goal !== undefined ? fieldError(errors.goal) : "") +
       `<h2>Done means</h2>` +
-      `<p class="meta">How will you judge this? You verify it later.</p>` +
+      `<p class="meta">How will you judge the result? You verify it when the research comes back.</p>` +
       textRow("criterion", "Criterion", 1, state.criteria[0] ?? "", false) +
       (errors.criteria !== undefined ? fieldError(errors.criteria) : "") +
       extraRows("criterion", "Criterion", state.criteria) +
-      `<h2>Limits</h2>` +
-      `<p class="meta">Rules the executor must respect.</p>` +
-      textRow("constraint", "Limit", 1, state.constraints[0] ?? "", false) +
-      extraRows("constraint", "Limit", state.constraints) +
+      `<h2>Constraints</h2>` +
+      `<p class="meta">Rules the research must respect.</p>` +
+      textRow("constraint", "Constraint", 1, state.constraints[0] ?? "", false) +
+      extraRows("constraint", "Constraint", state.constraints) +
       `<h2>Deadline</h2>` +
       pickRadio("none", "None") +
       pickRadio("tonight", "Tonight") +
@@ -919,12 +925,16 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
 
     try {
       // Principal comes ONLY from the authenticated session — never the form.
+      // The form offers exactly ONE type (research): the radio is fixed, so
+      // the mode sent to the seam is always "research" — a form that cannot
+      // express an unsupported mission cannot create one (§19 honesty rule).
       const mission = await createAndDispatchOutcome(
         db,
         dispatchPort(),
         {
           principalId: session.principal.id,
           principalName: session.principal.name,
+          mode: "research",
           goal,
           directive: goal,
           criteria: state.criteria,
@@ -1030,6 +1040,69 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
       }));
     }
     const criteria = await listOutcomeCriteria(db, session.principal.id, outcome.id);
+    // mission-execution v1 — the RESULT section: canonical assignment data
+    // only (never model prose generated for the page). Principal scoping is
+    // inherited from the outcome fetch above; a foreign ref 404s before this.
+    const researchRow = await db.query(
+      `SELECT id, status, blocker, failure_reason, result, updated_at
+         FROM assignments
+        WHERE outcome_id = $1::uuid AND role = 'research'
+        ORDER BY created_at DESC LIMIT 1`,
+      [outcome.id],
+    );
+    const research = researchRow.rows[0] as
+      | { id: string; status: string; blocker: { kind?: string; detail?: string } | null; failure_reason: string | null; result: Record<string, unknown> | null; updated_at: string | Date }
+      | undefined;
+    const resultSection = (): string => {
+      if (research === undefined) return "";
+      if (research.status === "succeeded" && research.result !== null) {
+        const r = research.result as {
+          summary?: unknown;
+          artifact?: { title?: unknown; body?: unknown };
+          citations?: unknown;
+          confidence?: unknown;
+          openQuestions?: unknown;
+        };
+        const summary = typeof r.summary === "string" ? r.summary : "";
+        const body = typeof r.artifact?.body === "string" ? r.artifact.body : "";
+        const citations = Array.isArray(r.citations) ? r.citations as { ref?: unknown; url?: unknown; title?: unknown; note?: unknown }[] : [];
+        const openQuestions = Array.isArray(r.openQuestions) ? r.openQuestions as unknown[] : [];
+        const confidence = typeof r.confidence === "number" ? Math.round(r.confidence * 100) : null;
+        const sourceList = citations
+          .map((c) => {
+            const label = typeof c.title === "string" && c.title.length > 0 ? c.title : typeof c.ref === "string" ? c.ref : "source";
+            const note = typeof c.note === "string" && c.note.length > 0 ? ` — ${c.note}` : "";
+            // External strings are escaped; hrefs are restricted to the
+            // validated public http(s) URLs the evidence contract stored.
+            const href = typeof c.url === "string" && /^https:\/\//i.test(c.url) ? c.url : null;
+            return `<li>${href !== null
+              ? `<a href="${escapeHtml(href)}" rel="noopener noreferrer nofollow" target="_blank">${escapeHtml(label)}</a>`
+              : escapeHtml(label)}${escapeHtml(note)}</li>`;
+          })
+          .join("");
+        return (
+          `<h2>Research result</h2>` +
+          `<article class="card">` +
+          (summary !== "" ? `<p><strong>${escapeHtml(summary)}</strong></p>` : "") +
+          (body !== "" ? `<p style="white-space:pre-wrap">${escapeHtml(body)}</p>` : "") +
+          (sourceList !== "" ? `<h3>Sources</h3><ul class="criteria">${sourceList}</ul>` : "") +
+          (openQuestions.length > 0
+            ? `<h3>Open questions</h3><ul class="criteria">${openQuestions.map((q) => `<li>${escapeHtml(typeof q === "string" ? q : "")}</li>`).join("")}</ul>`
+            : "") +
+          (confidence !== null ? `<p class="meta">Confidence ${confidence}%</p>` : "") +
+          `</article>`
+        );
+      }
+      // Honest progress derived from assignment status — no invented phases.
+      if (["queued", "running"].includes(research.status)) {
+        return `<p class="meta">Research in progress — this page updates when the result lands.</p>`;
+      }
+      if (research.status === "blocked" || research.status === "failed") {
+        const detail = research.blocker?.detail ?? research.failure_reason ?? "the research could not complete";
+        return `<p class="meta">Research stopped: ${escapeHtml(detail)}</p>`;
+      }
+      return "";
+    };
     const decidable = outcome.status === "waiting_user" || outcome.status === "verifying";
     const decisionForms = (csrf: string): string => {
       if (!decidable) return "";
@@ -1077,6 +1150,7 @@ export function registerUiRoutes(app: FastifyInstance, opts: UiRoutesOptions): v
       `<p class="meta">${escapeHtml(outcome.ref)} · ${statusPill(outcome.status)}</p>` +
       `<p class="meta">Created <time ${timeAttr(outcome.createdAt)}>${formatLocalTime(outcome.createdAt)}</time> · Updated <time ${timeAttr(outcome.updatedAt)}>${formatLocalTime(outcome.updatedAt)}</time></p>` +
       (decidable ? decisionForms(session.csrfToken) : "") +
+      resultSection() +
       `<h2>Criteria</h2><ul class="criteria">${list}</ul>`;
     return await sendHtml(reply, 200, page(body, { path: "/ui/missions" }));
   };
