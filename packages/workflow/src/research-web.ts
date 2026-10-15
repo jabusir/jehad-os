@@ -90,10 +90,42 @@ export function reconcileWebCitations(
 
 /** The strict-envelope parse shared by the executor: strip fences, parse, object-or-null. */
 export function parseJsonEnvelope(text: string): Record<string, unknown> | null {
+  const direct = tryParseObject(
+    text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim(),
+  );
+  if (direct !== null) return direct;
+  // Deterministic healing: models occasionally prepend/append a sentence
+  // around the single-line envelope. Extract the FIRST balanced {…} object
+  // (string-aware) and parse THAT. Discipline is unchanged — the object must
+  // still parse as JSON and pass the full envelope validation downstream;
+  // unparseable output still rejects.
+  const trimmed = text.trim();
+  const start = trimmed.indexOf("{");
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < trimmed.length; i += 1) {
+    const ch = trimmed[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return tryParseObject(trimmed.slice(start, i + 1));
+    }
+  }
+  return null;
+}
+
+function tryParseObject(raw: string): Record<string, unknown> | null {
   try {
-    const parsed: unknown = JSON.parse(
-      text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim(),
-    );
+    const parsed: unknown = JSON.parse(raw.trim());
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
     return parsed as Record<string, unknown>;
   } catch {
