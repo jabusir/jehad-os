@@ -37,10 +37,10 @@ const PRODUCED_KINDS = {
   waiting_user: {
     kind: "outcome.ready",
     segment: "ready",
-    // Honesty (dogfood 2026-10-14): today's missions park here because the
-    // system cannot do them itself yet — the owner does the thing in the
-    // world and declares the outcome. "Judgment" implied executor output to
-    // evaluate; there is none. Say what the park actually is.
+    // Honesty (dogfood 2026-10-14): missions park here when the system could
+    // not do the work itself — the owner does the thing in the world and
+    // declares the outcome. When canonical evidence shows the system DID
+    // produce a research result, the copy says so instead (see below).
     titleSuffix: "",
     whyItMatters: "Parked with you — the system can't do this one itself yet. Mark it done when it happens, or say it didn't.",
   },
@@ -60,6 +60,45 @@ const PRODUCED_KINDS = {
   "waiting_user" | "blocked" | "failed",
   { kind: "outcome.ready" | "outcome.blocked" | "outcome.failed"; segment: string; titleSuffix: string; whyItMatters: string }
 >;
+
+/**
+ * Canonical-state copy refinement (mission-execution v1) — derived ONLY from
+ * stored rows, never model prose:
+ *  - waiting_user + a SUCCEEDED research assignment that carries a result →
+ *    the card means "research ready for review", not "parked with you".
+ *  - blocked → the canonical failureReason is the whyItMatters (bounded).
+ */
+async function refineCopy(
+  db: AttentionDb,
+  outcome: OutcomeRow,
+  toStatus: OutcomeStatus,
+): Promise<{ titleSuffix: string; whyItMatters: string }> {
+  if (toStatus === "waiting_user") {
+    const done = await db.query(
+      `SELECT 1 FROM assignments
+         WHERE outcome_id = $1::uuid AND role = 'research' AND status = 'succeeded'
+           AND result IS NOT NULL LIMIT 1`,
+      [outcome.id],
+    );
+    if (done.rows.length > 0) {
+      return {
+        titleSuffix: " — research ready",
+        whyItMatters: "Jehad OS finished the research. Review the result.",
+      };
+    }
+    const spec = PRODUCED_KINDS.waiting_user;
+    return { titleSuffix: spec.titleSuffix, whyItMatters: spec.whyItMatters };
+  }
+  if (toStatus === "blocked" && outcome.failureReason !== null && outcome.failureReason.trim().length > 0) {
+    const reason = outcome.failureReason.trim();
+    return {
+      titleSuffix: PRODUCED_KINDS.blocked.titleSuffix,
+      whyItMatters: `Blocked: ${reason.length > 200 ? `${reason.slice(0, 197)}…` : reason}`,
+    };
+  }
+  const spec = PRODUCED_KINDS[toStatus as keyof typeof PRODUCED_KINDS];
+  return { titleSuffix: spec.titleSuffix, whyItMatters: spec.whyItMatters };
+}
 
 /**
  * The ONE producer seam, called by transitionOutcome after its canonical
@@ -111,6 +150,7 @@ export async function emitOutcomeAttention(
   }
   const spec = PRODUCED_KINDS[toStatus as keyof typeof PRODUCED_KINDS];
   if (spec === undefined) return null; // completed/cancelled/everything else: no item (ADR-0018 §1.2)
+  const copy = await refineCopy(db, outcome, toStatus);
   const summary = outcome.directive.trim().length > 0 ? outcome.directive.trim() : outcome.title;
   const input: OpenAttentionInput = {
     principalId: outcome.principalId,
@@ -119,9 +159,9 @@ export async function emitOutcomeAttention(
     fingerprint: `outcome:${outcome.id}:${spec.segment}`,
     kind: spec.kind,
     level: "inbox",
-    title: `${outcome.title}${spec.titleSuffix}`,
+    title: `${outcome.title}${copy.titleSuffix}`,
     summary,
-    whyItMatters: spec.whyItMatters,
+    whyItMatters: copy.whyItMatters,
     evidenceRefs: [{ type: "outcome", id: outcome.ref }],
     // W1 controls (W1.1 finding 3): the full direct-control set an outcome
     // card needs in Today — open the canonical outcome, resolve, snooze,
