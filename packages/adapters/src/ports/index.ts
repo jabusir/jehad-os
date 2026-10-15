@@ -35,12 +35,15 @@ export type {
   ChatMessage,
   ChatRequest,
   ChatResult,
+  ChatServerTool,
   ChatTool,
   ChatToolCall,
   ModelEgressPolicy,
   ModelProvider,
   ModelRequest,
   ModelResult,
+  ServerToolUse,
+  WebCitation,
 } from "./model-provider.js";
 export type {
   WorkflowHandle,

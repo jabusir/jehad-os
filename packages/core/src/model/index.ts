@@ -11,12 +11,15 @@ export {
 export {
   MODEL_CALL_RESULT_STATUSES,
   MissingRunError,
+  NativeChatUnsupportedError,
   type ModelBudgetDenialAudit,
   ModelBudgetExceededError,
+  type ModelCallChatOutcome,
   type ModelCallDb,
   type ModelCallDeps,
   type ModelCallInput,
   callModel,
+  callModelChat,
   type ModelCallOutcome,
   type ModelCallResultStatus,
 } from "./call-model.js";
