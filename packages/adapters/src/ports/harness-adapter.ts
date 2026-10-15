@@ -33,6 +33,22 @@ export interface HarnessAdapter {
 // returns the terminal text for seen runs.
 // ---------------------------------------------------------------------------
 
+/**
+ * Bounded read-only web capability for ONE harness run (mission-execution
+ * v1). Present on a spec → the provider's server-side web tools (search +
+ * fetch) are offered to the model for that request only, hard-capped.
+ * Absent → no web tools, exactly the pre-v1 behavior. Read-only by
+ * construction: the granted tool set has no write surface.
+ */
+export interface HarnessWebSpec {
+  /** Max web searches in the request (policy-capped). */
+  readonly maxSearches: number;
+  /** Max web fetches in the request (policy-capped). */
+  readonly maxFetches: number;
+  /** Max retrieved-source content tokens per fetch. */
+  readonly maxSourceContentTokens: number;
+}
+
 export interface HarnessRunSpec {
   /** The FULL worker prompt: role stance + context package + output contract. */
   readonly prompt: string;
@@ -43,6 +59,8 @@ export interface HarnessRunSpec {
   readonly principalId: string | null;
   readonly outcomeId: string | null;
   readonly assignmentId: string | null;
+  /** Present ONLY for roles whose policy grants bounded read-only web. */
+  readonly web?: HarnessWebSpec;
 }
 
 export interface HarnessRunResult {
@@ -50,6 +68,10 @@ export interface HarnessRunResult {
   readonly text: string;
   readonly costUsd: number;
   readonly latencyMs: number;
+  /** Provider-attached web citations — the mechanical retrieval record. */
+  readonly annotations?: readonly import("./model-provider.js").WebCitation[];
+  /** Server-tool usage reported by the provider (spend/count audit). */
+  readonly serverToolUse?: import("./model-provider.js").ServerToolUse;
   /** Set when ok=false: machine-readable denial class. */
   readonly denial?: "deadline_exceeded" | "provider_error" | "empty_output";
 }

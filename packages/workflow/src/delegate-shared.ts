@@ -56,7 +56,27 @@ export interface DelegateFormInput {
   readonly deadlineAt?: string;
   /** Stable per-form-submit id (uuid) — the idempotency key. */
   readonly submissionId: string;
+  /**
+   * The explicit mission type (mission-execution v1). The user CHOOSES the
+   * type in software — no intent classification. `research` deterministically
+   * mints a runnable plan (one research assignment). Absent = the legacy
+   * owner-executed mission (no runnable plan; parks honestly with the owner).
+   * Unknown/unsupported modes FAIL CLOSED — the UI only ever offers what the
+   * system can actually execute.
+   */
+  readonly mode?: DelegationMode;
 }
+
+/**
+ * The bounded delegation-type vocabulary. Exactly one executable type in v1
+ * (research); future types (analyze, personal-admin, document,
+ * external-system-task) join ONLY when an executor for them exists.
+ */
+export const DELEGATION_MODES = ["research"] as const;
+export type DelegationMode = (typeof DELEGATION_MODES)[number];
+
+/** The research assignment task bound — matches the assignment envelope's task ceiling. */
+const RESEARCH_TASK_MAX_CHARS = 200;
 
 const MAX_FORM_CRITERIA = 12;
 const MAX_FORM_CONSTRAINTS = 12;
@@ -87,6 +107,21 @@ export interface CreateAndDispatchOutcomeInput extends DelegateFormInput {
 }
 
 /**
+ * The deterministic research plan (mission-execution v1): the user selected
+ * Research, so software — never an LLM — mints the runnable plan. One typed
+ * assignment, role `research`, task = the user's directive bounded to the
+ * assignment envelope's task ceiling. The directive/criteria/constraints
+ * live canonically on the Outcome; the executor composes the worker's full
+ * mission brief from the OUTCOME row, so this task stays a bounded pointer.
+ */
+export function researchPlanFor(directive: string): readonly { assign: { role: "research"; task: string } }[] {
+  const task = directive.length <= RESEARCH_TASK_MAX_CHARS
+    ? directive
+    : `${directive.slice(0, RESEARCH_TASK_MAX_CHARS - 1)}…`;
+  return [{ assign: { role: "research", task } }];
+}
+
+/**
  * Canonical create+dispatch for BOTH the CLI and the web delegate form.
  * Caps, budgets, deadline defaults, principal checks, audit and provenance
  * all flow through the existing Outcome service — nothing is bypassed.
@@ -99,6 +134,10 @@ export async function createAndDispatchOutcome(
 ): Promise<DelegatedMission> {
   if (!input.policy.enabled) {
     throw new Error("outcomes: delegate intake is disabled by policy (outcomes.enabled)");
+  }
+  if (input.mode !== undefined && !DELEGATION_MODES.includes(input.mode)) {
+    // Fail closed: only mission types with a real executor are acceptable.
+    throw new Error(`delegate: mission type '${input.mode}' is not executable — supported: ${DELEGATION_MODES.join(", ")}`);
   }
   const goal = input.goal.trim();
   const directive = input.directive.trim();
@@ -172,6 +211,10 @@ export async function createAndDispatchOutcome(
       budgetUsd: input.policy.defaultBudgetUsd,
       deadlineAt: deadline,
       createdBy: "josctl",
+      // mission-execution v1: an explicit Research delegation arrives with a
+      // RUNNABLE plan — software-composed from the selected mode, never an
+      // LLM's proposal. The executor picks it up on dispatch.
+      ...(input.mode === "research" ? { plan: researchPlanFor(directive) } : {}),
     },
     opts,
   );
