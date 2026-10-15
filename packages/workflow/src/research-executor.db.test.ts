@@ -459,4 +459,37 @@ describe.skipIf(!TEST_DATABASE_URL)("research executor (mission-execution v1: we
     const outcome = await q(`SELECT status FROM outcomes WHERE id = $1::uuid`, [id]);
     expect(String(outcome[0]!.status)).toBe("waiting_user");
   });
+
+  it("production replay regression: a failed research pass consumes the plan at mint — the Inngest-style re-attempt NEVER re-mints, and a blocked outcome never re-parks", async () => {
+    // Attempt 1 (the real production shape): the model overshoots the
+    // summary bound → envelope rejected → assignment failed → outcome blocked.
+    const { id, ref } = await seedResearchOutcome();
+    const oversized = JSON.stringify({
+      summary: "x".repeat(501),
+      artifact: { title: "t", body: "b" },
+      citations: [{ ref: "source-1", url: "https://good.example/a" }],
+      costUsd: 0,
+    });
+    const first = fakeWebHarness([{ ok: true, text: oversized, costUsd: 0.002 }]);
+    const r1 = await runOutcomeExecutor(
+      db.pool, { outcomeId: id, ref }, `run-${randomUUID()}`, PARKING_PRIMITIVES,
+      { harness: first.adapter, workersPolicy: WEB_POLICY },
+    );
+    expect(r1.completed).toBe(false);
+    expect(r1.status).toBe("blocked");
+    expect(first.specs).toHaveLength(1);
+
+    // Attempt 2 (Inngest-style retry after a late failure): a harness that
+    // refuses ANY call — the replay must not spend another model call.
+    const refusing = fakeWebHarness([]);
+    const r2 = await runOutcomeExecutor(
+      db.pool, { outcomeId: id, ref }, `run-${randomUUID()}`, PARKING_PRIMITIVES,
+      { harness: refusing.adapter, workersPolicy: WEB_POLICY },
+    );
+    expect(refusing.specs).toHaveLength(0); // no re-mint, no spend
+    expect(r2.completed).toBe(false);
+    expect(r2.status).toBe("blocked"); // blocked stays blocked — never re-parked as owner work
+    const assignments = await q(`SELECT count(*)::int AS n FROM assignments WHERE outcome_id = $1::uuid`, [id]);
+    expect(Number(assignments[0]!.n)).toBe(1);
+  });
 });

@@ -368,6 +368,14 @@ export async function runOutcomeExecutor(
         { now: now(), actor: OUTCOME_EXECUTOR_ACTOR },
       );
       const assignmentId = created.assignment.id;
+      // Replay-safety (mission-execution v1): consume the plan entry AT MINT
+      // TIME — before any model call. Inngest retries a whole executor
+      // attempt after certain late failures; a replayed attempt re-reading
+      // the plan must never re-mint the same assignment.
+      const remaining = plan.filter((entry) => entry !== assignEntry);
+      await p.query(`UPDATE outcomes SET plan = $2::jsonb, updated_at = $3::timestamptz WHERE id = $1::uuid`, [
+        outcome.id, JSON.stringify(remaining), now().toISOString(),
+      ]);
       // Worker deadline enforced BEFORE any dispatch (honest, mechanical):
       // an assignment whose deadline already passed never spends a model call.
       if (now().getTime() >= deadline.getTime()) {
@@ -537,12 +545,8 @@ export async function runOutcomeExecutor(
         const failedOutcome = await transitionOutcome(db, outcome.id, "blocked", { failureReason: "assignment result envelope rejected" }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
         return { outcomeId: outcome.id, ref: failedOutcome.outcome.ref, status: failedOutcome.outcome.status, completed: false, iterations };
       }
-      // Consume the plan entry and keep looping (the result feeds the next
-      // step; criteria verification stays with the verifier lane).
-      const remaining = plan.filter((entry) => entry !== assignEntry);
-      await p.query(`UPDATE outcomes SET plan = $2::jsonb, updated_at = $3::timestamptz WHERE id = $1::uuid`, [
-        outcome.id, JSON.stringify(remaining), now().toISOString(),
-      ]);
+      // Consume-the-entry already happened at mint time — refresh and keep
+      // looping (the result feeds verification/the owner park).
       outcome = (await getOutcomeById(db, outcome.id))!;
       continue;
     }
@@ -651,7 +655,7 @@ export async function runOutcomeExecutor(
           },
           { now: now(), actor: OUTCOME_EXECUTOR_ACTOR },
         );
-        const assignmentId = created.assignment.id;
+      const assignmentId = created.assignment.id;
         const domain = await p.query(`SELECT id FROM domains WHERE key = 'personal' LIMIT 1`);
         const grant = await issueGrant(db, {
           principalId: outcome.principalId,
@@ -814,10 +818,35 @@ export async function runOutcomeExecutor(
     // 3. Nothing runnable + unresolved criteria → owner verification (D0's
     //    verifier is the owner; D3 swaps in verifier assignments behind the
     //    same gate). pauseForApproval is durable + journaled in human_waits.
-    // Preserve the executor runId across the waiting_user transition —
-    // the approval resume (josctl ops decide) needs it to signal the run.
-    // waiting_on carries the CURRENT run id — the approval resume (josctl
-    // ops decide) signals this run, the one actually parked below.
+    //    Preserve the executor runId across the waiting_user transition —
+    //    the approval resume (josctl ops decide) needs it to signal the run.
+    //    waiting_on carries the CURRENT run id — the approval resume (josctl
+    //    ops decide) signals this run, the one actually parked below.
+    //
+    //    Park-honesty gates (mission-execution v1): a BLOCKED outcome is
+    //    terminal-honest — never re-presented as owner work; and a LIVE
+    //    (queued/running) assignment means a previous executor attempt was
+    //    interrupted mid-flight — terminate it and block honestly instead of
+    //    parking "with you" over work that never finished.
+    if (outcome.status === "blocked") {
+      return { outcomeId: outcome.id, ref: outcome.ref, status: outcome.status, completed: false, iterations };
+    }
+    {
+      const live = await p.query(
+        `SELECT id FROM assignments WHERE outcome_id = $1::uuid AND status IN ('queued', 'running') LIMIT 1`,
+        [outcome.id],
+      );
+      const liveId = live.rows[0] !== undefined ? String((live.rows[0] as { id: string }).id) : null;
+      if (liveId !== null) {
+        await terminateAssignment(db, {
+          assignmentId: liveId,
+          outcome: "failed",
+          reason: "executor replay interrupted the run",
+        }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
+        const interrupted = await transitionOutcome(db, outcome.id, "blocked", { failureReason: "executor replay interrupted an in-flight assignment" }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
+        return { outcomeId: outcome.id, ref: interrupted.outcome.ref, status: interrupted.outcome.status, completed: false, iterations };
+      }
+    }
     await transitionOutcome(db, outcome.id, "waiting_user", { waitingOn: { why: "owner verification of criteria", runId } }, { now: now(), actor: OUTCOME_EXECUTOR_ACTOR });
     const approval = await primitives.pauseForApproval(`verify-${outcome.ref.toLowerCase()}`, { reason: "owner verification of outcome criteria" });
     // Decision (or 30-day timeout) → re-loop; criteria state decides.
