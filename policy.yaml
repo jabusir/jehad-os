@@ -135,7 +135,12 @@ attention: { enabled: true, cooldownMinutes: 60 }
 # behind this same ceiling (role 'verifier' reserved).
 workers:
   enabled: true
-  research: { model: openai/gpt-4.1-mini, max_budget_usd: 1, default_deadline_minutes: 30, reads: [gmail.metadata.recent, calendar.today, commitments.waiting, memory.relevant] }
+  # research (mission-execution v1): the ONE autonomous delegation type. `web`
+  # grants bounded READ-ONLY server-side web tools (OpenRouter web_search +
+  # web_fetch, Exa engine) for that assignment's single model request only —
+  # hard caps below; no write surface exists to grant. Absent web section on
+  # a role = no web tools (fail closed).
+  research: { model: openai/gpt-4.1-mini, max_budget_usd: 1, default_deadline_minutes: 30, reads: [gmail.metadata.recent, calendar.today, commitments.waiting, memory.relevant], web: { enabled: true, max_searches: 6, max_fetches: 8, max_source_content_tokens: 12000 } }
   verifier: { model: openai/gpt-4.1-mini, max_budget_usd: 0.5, default_deadline_minutes: 15, reads: [] }
 
 sensors:
