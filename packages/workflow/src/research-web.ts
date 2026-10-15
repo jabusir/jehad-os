@@ -100,6 +100,9 @@ export function parseJsonEnvelope(text: string): Record<string, unknown> | null 
   // still parse as JSON and pass the full envelope validation downstream;
   // unparseable output still rejects.
   const trimmed = text.trim();
+  // A payload that IS an array (or starts with one) is never an object
+  // envelope — extraction must not fish an object out of an array.
+  if (trimmed.startsWith("[")) return null;
   const start = trimmed.indexOf("{");
   if (start === -1) return null;
   let depth = 0;
