@@ -376,11 +376,14 @@ describe.skipIf(!TEST_DATABASE_URL)("U2 delegate form (integration, isolated uxc
   it("GET renders the grouped form: labels, helper lines, 4 DOM rows with data-extra rows 2-4 in details wrappers", async () => {
     const res = await app.inject({ method: "GET", url: "/ui/delegate", headers: { cookie } });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toContain("What do you want owned?");
+    // mission-execution v1: Research is the ONE executable type — fixed mode,
+    // research framing, honest submit copy.
+    expect(res.body).toContain('name="mode" value="research" checked');
+    expect(res.body).toContain("What do you want researched?");
     expect(res.body).toContain("Done means");
-    expect(res.body).toContain("How will you judge this? You verify it later.");
-    expect(res.body).toContain("Limits");
-    expect(res.body).toContain("Rules the executor must respect.");
+    expect(res.body).toContain("How will you judge the result? You verify it when the research comes back.");
+    expect(res.body).toContain("Constraints");
+    expect(res.body).toContain("Rules the research must respect.");
     // all 4 rows per section in the DOM; rows 2-4 marked data-extra
     expect((res.body.match(/name="criterion[1-4]"/g) ?? [])).toHaveLength(4);
     expect((res.body.match(/name="constraint[1-4]"/g) ?? [])).toHaveLength(4);
@@ -394,7 +397,7 @@ describe.skipIf(!TEST_DATABASE_URL)("U2 delegate form (integration, isolated uxc
     expect(res.body).toContain('class="deadline-custom"');
     // policy slots context + new submit copy
     expect(res.body).toContain("of 3 mission slots used");
-    expect(res.body).toContain("Delegate — an executor starts immediately.");
+    expect(res.body).toContain("Start research");
   });
 
   it("quick-picks resolve server-local: tomorrow 09:00, nextweek +7d 09:00, tonight 20:00", async () => {
@@ -476,7 +479,7 @@ describe.skipIf(!TEST_DATABASE_URL)("U2 delegate form (integration, isolated uxc
     expect(page.body).toContain("3 of 3 mission slots used");
     expect(page.body).toContain("policy cap");
     expect(bodyOnly(page.body)).not.toContain('type="submit"');
-    expect(bodyOnly(page.body)).not.toContain("an executor starts immediately");
+    expect(bodyOnly(page.body)).not.toContain("Start research");
 
     const res = await postForm({ goal: "Uxc cap-buster", criterion1: "done" });
     expect(res.statusCode).toBe(400);
@@ -486,7 +489,7 @@ describe.skipIf(!TEST_DATABASE_URL)("U2 delegate form (integration, isolated uxc
     await cancelAll();
     // cap lifted → the submit button is back
     const after = await app.inject({ method: "GET", url: "/ui/delegate", headers: { cookie } });
-    expect(after.body).toContain("an executor starts immediately.");
+    expect(after.body).toContain("Start research");
   });
 
   it("POST redirects to /ui/missions?created=REF and that card renders a one-time highlight", async () => {
